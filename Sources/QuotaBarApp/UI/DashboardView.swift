@@ -7,7 +7,7 @@ enum DashboardLayout {
     static let accountCardHeight: CGFloat = 154
     static let accountCardSpacing: CGFloat = 10
     static let maxVisibleAccountCards = 3
-    static let headerHeight: CGFloat = 58
+    static let headerHeight: CGFloat = 60
     static let footerHeight: CGFloat = 28
     static let stackSpacing: CGFloat = 10
     static let headerListSpacing: CGFloat = 12
@@ -210,7 +210,7 @@ struct DashboardView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
                 HStack(alignment: .center, spacing: 6) {
                     toolSwitchMenu
@@ -243,17 +243,8 @@ struct DashboardView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .layoutPriority(1)
-
-            Circle()
-                .fill(Branding.separatorDot)
-                .frame(width: 3, height: 3)
-
-            Text(text.dashboardStats(count: toolAccounts.count, available: availableAccountCount))
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(Branding.inkMuted)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
         }
+        .frame(height: 16, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipped()
     }

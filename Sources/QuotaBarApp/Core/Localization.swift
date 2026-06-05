@@ -119,18 +119,6 @@ struct AppText {
         }
     }
 
-    func dashboardStats(count: Int, available: Int) -> String {
-        switch language {
-        case .english:
-            let accountText = count == 1 ? "1 account" : "\(count) accounts"
-            return "\(accountText) · \(available) available"
-        case .simplifiedChinese:
-            return "\(count) 个账号 · \(available) 个可用"
-        case .traditionalChinese:
-            return "\(count) 個帳號 · \(available) 個可用"
-        }
-    }
-
     func accountFilterAll(count: Int) -> String {
         switch language {
         case .english:

@@ -398,10 +398,6 @@ struct AccountCardView: View {
             items.append((planSummaryBadge.text, planSummaryBadge.tint, .semibold))
         }
 
-        if isRecommended, !isActive {
-            items.append((text.string(.recommended), Branding.success, .semibold))
-        }
-
         if shouldShowStatusBadge {
             items.append((status.title(text), status.tint, .semibold))
         }
@@ -535,6 +531,12 @@ struct AccountCardView: View {
                     .truncationMode(.tail)
                     .help(shouldShowFullNameHelp ? account.name : "")
                     .layoutPriority(1)
+
+                if isRecommended, !isActive {
+                    InlineMetadataLabel(text: text.string(.recommended), tint: Branding.success, weight: .semibold)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(2)
+                }
 
                 Spacer(minLength: 8)
             }
