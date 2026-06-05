@@ -1,6 +1,31 @@
 import AppKit
 import SwiftUI
 
+enum DashboardLayout {
+    static let panelWidth: CGFloat = 430
+    static let fixedPanelHeight: CGFloat = 620
+    static let accountCardHeight: CGFloat = 154
+    static let accountCardSpacing: CGFloat = 10
+    static let maxVisibleAccountCards = 3
+    static let headerHeight: CGFloat = 58
+    static let footerHeight: CGFloat = 28
+    static let stackSpacing: CGFloat = 10
+    static let headerListSpacing: CGFloat = 12
+    static let listFooterSpacing: CGFloat = 8
+    static let bottomReserve: CGFloat = 12
+
+    static var maxAccountListHeight: CGFloat {
+        CGFloat(maxVisibleAccountCards) * accountCardHeight
+            + CGFloat(maxVisibleAccountCards - 1) * accountCardSpacing
+    }
+
+    static var panelSize: NSSize {
+        NSSize(width: panelWidth, height: fixedPanelHeight)
+    }
+
+    static let accountListHeight = maxAccountListHeight
+}
+
 struct DashboardView: View {
     @ObservedObject var appState: AppState
     @State private var accountFilter: AccountFilter = .all
@@ -40,8 +65,8 @@ struct DashboardView: View {
         visibleAccounts.map(\.id)
     }
 
-    private var activeName: String {
-        appState.activeAccount(for: appState.selectedTool)?.name ?? "--"
+    private var preferredPanelHeight: CGFloat {
+        DashboardLayout.fixedPanelHeight
     }
 
     private var isRefreshingSelectedTool: Bool {
@@ -58,21 +83,41 @@ struct DashboardView: View {
         )
     }
 
+    private var activeAccountName: String? {
+        appState.activeAccount(for: appState.selectedTool).map { compactHeaderAccountName($0.name) }
+    }
+
+    private var recommendedAccountID: UUID? {
+        AccountListPresenter.recommendedAccountID(
+            accounts: toolAccounts,
+            activeID: appState.activeAccountByTool[appState.selectedTool],
+            quotaByAccount: appState.quotaByAccount,
+            loadStateByAccount: appState.loadStateByAccount
+        )
+    }
+
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 0) {
             header
+            Spacer()
+                .frame(height: DashboardLayout.headerListSpacing)
+            accountList
+            Spacer()
+                .frame(height: DashboardLayout.listFooterSpacing)
+            footerBar
+            Spacer(minLength: DashboardLayout.bottomReserve)
+        }
+        .overlay(alignment: .top) {
             if shouldShowUpdateNotice {
                 updateNoticeBar
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .padding(.top, DashboardLayout.headerHeight + DashboardLayout.stackSpacing)
+                    .zIndex(2)
+                    .transition(.opacity)
             }
-            accountList
-                .frame(maxHeight: .infinity)
-            footerBar
         }
         .padding(.top, 8)
         .padding(.horizontal, 18)
-        .padding(.bottom, 12)
-        .frame(width: 430, height: 552, alignment: .top)
+        .frame(width: DashboardLayout.panelWidth, height: preferredPanelHeight, alignment: .top)
         .background(Branding.pageBackground)
         .foregroundStyle(Branding.ink)
         .alert(text.string(.restartRequiredTitle), isPresented: restartRequiredAlertBinding) {
@@ -81,6 +126,9 @@ struct DashboardView: View {
             }
         } message: {
             Text(appState.restartRequiredMessage ?? "")
+        }
+        .transaction { transaction in
+            transaction.animation = nil
         }
         .alert(text.string(.addAccountFailedTitle), isPresented: addAccountErrorAlertBinding) {
             Button(text.string(.ok)) {
@@ -122,12 +170,12 @@ struct DashboardView: View {
     private var effectiveFrozenOrder: [UUID]? {
         let tool = appState.selectedTool
         if let frozen = frozenAccountOrderByTool[tool] {
-            return frozen
+            return activeFirstOrder(frozen)
         }
         if isRefreshingSelectedTool,
            let remembered = lastVisibleAccountOrderByTool[tool],
            !remembered.isEmpty {
-            return remembered
+            return activeFirstOrder(remembered)
         }
         return nil
     }
@@ -135,13 +183,21 @@ struct DashboardView: View {
     private func preferredFrozenOrderForSelectedTool() -> [UUID] {
         let tool = appState.selectedTool
         if let remembered = lastVisibleAccountOrderByTool[tool], !remembered.isEmpty {
-            return remembered
+            return activeFirstOrder(remembered)
         }
-        return visibleAccountIDs
+        return activeFirstOrder(visibleAccountIDs)
     }
 
     private func rememberVisibleOrderForSelectedTool(_ ids: [UUID]) {
-        lastVisibleAccountOrderByTool[appState.selectedTool] = ids
+        lastVisibleAccountOrderByTool[appState.selectedTool] = activeFirstOrder(ids)
+    }
+
+    private func activeFirstOrder(_ ids: [UUID]) -> [UUID] {
+        guard let activeID = appState.activeAccountByTool[appState.selectedTool],
+              ids.contains(activeID) else {
+            return ids
+        }
+        return [activeID] + ids.filter { $0 != activeID }
     }
 
     private func accountLoadState(_ account: Account) -> AccountLoadState {
@@ -164,49 +220,63 @@ struct DashboardView: View {
                         .lineLimit(1)
                 }
 
-                Spacer(minLength: 6)
+                Spacer(minLength: 10)
 
                 headerActions
             }
 
-            Text(text.subtitle(count: toolAccounts.count, activeName: activeName))
-                .font(.system(size: 11.5, weight: .regular))
-                .foregroundStyle(Branding.inkSubtle.opacity(0.9))
+            headerStatus
+        }
+        .frame(height: DashboardLayout.headerHeight, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private var headerStatus: some View {
+        HStack(spacing: 6) {
+            Text(text.string(.current))
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Branding.inkMuted)
+
+            Text(activeAccountName ?? "--")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Branding.inkStrong.opacity(0.74))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .layoutPriority(1)
+
+            Circle()
+                .fill(Branding.separatorDot)
+                .frame(width: 3, height: 3)
+
+            Text(text.dashboardStats(count: toolAccounts.count, available: availableAccountCount))
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Branding.inkMuted)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
+    }
+
+    private func compactHeaderAccountName(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "--" }
+        if trimmed.count <= 28 {
+            return trimmed
+        }
+        if let atIndex = trimmed.firstIndex(of: "@") {
+            let localPart = String(trimmed[..<atIndex])
+            let domainPart = String(trimmed[trimmed.index(after: atIndex)...])
+            if localPart.count > 14 {
+                return "\(localPart.prefix(14))...\(domainPart.isEmpty ? "" : "@\(domainPart)")"
+            }
+        }
+        return "\(trimmed.prefix(24))..."
     }
 
     private var headerActions: some View {
-        HStack(spacing: 9) {
-            Button {
-                freezeCurrentAccountOrder()
-                refreshCycleID += 1
-                appState.refreshSelectedTool()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 14, weight: .semibold))
-                    .rotationEffect(.degrees(isRefreshingSelectedTool ? 360 : 0))
-                    .animation(
-                        isRefreshingSelectedTool
-                            ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                            : .easeOut(duration: 0.2),
-                        value: isRefreshingSelectedTool
-                    )
-                .frame(width: 42, height: 34)
-                .foregroundStyle(isRefreshingSelectedTool || toolAccounts.isEmpty ? Branding.inkSubtle : Branding.inkMuted)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Branding.controlSurface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Branding.controlStroke, lineWidth: 1)
-                )
-            }
-            .disabled(isRefreshingSelectedTool || toolAccounts.isEmpty)
-            .buttonStyle(.plain)
-            .help(text.string(.refresh))
+        HStack(spacing: 8) {
+            headerRefreshButton
 
             Button {
                 if appState.isAddingAccount {
@@ -220,27 +290,68 @@ struct DashboardView: View {
                         ProgressView()
                             .controlSize(.small)
                             .tint(Branding.warning)
+                    } else {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11.5, weight: .bold))
                     }
 
                     Text(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
                         .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
-                .frame(height: 34)
-                .padding(.horizontal, 15)
-                .foregroundStyle(appState.isAddingAccount ? Branding.warning : Branding.primaryActionText)
+                .padding(.horizontal, 12)
+                .frame(width: 82, height: 32)
+                .foregroundStyle(appState.isAddingAccount ? Branding.warning : Branding.accentBlueDark)
                 .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(appState.isAddingAccount ? Branding.warningSoft : Branding.accentBlue)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(appState.isAddingAccount ? Branding.warningSoft : Branding.accentBlueSoft)
                 )
-                .shadow(
-                    color: appState.isAddingAccount ? Branding.warning.opacity(0.12) : Branding.accentBlue.opacity(0.14),
-                    radius: 7,
-                    y: 2
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(
+                            appState.isAddingAccount
+                                ? Branding.warning.opacity(0.16)
+                                : Branding.accentBlue.opacity(0.14),
+                            lineWidth: 1
+                        )
                 )
             }
             .buttonStyle(.plain)
         }
-        .fixedSize()
+        .frame(width: 126, height: 32, alignment: .trailing)
+    }
+
+    private var headerRefreshButton: some View {
+        let isEnabled = !isRefreshingSelectedTool && !toolAccounts.isEmpty
+
+        return Button {
+            guard isEnabled else { return }
+            freezeCurrentAccountOrder()
+            refreshCycleID += 1
+            appState.refreshSelectedTool()
+        } label: {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isEnabled ? Branding.inkMuted : Branding.inkSubtle)
+                .opacity(isEnabled ? 1 : 0.58)
+                .frame(width: 36, height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Branding.controlSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Branding.controlStroke, lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .help(text.string(.refresh))
+        .transaction { transaction in
+            transaction.animation = nil
+        }
     }
 
     private var toolSwitchMenu: some View {
@@ -354,7 +465,7 @@ struct DashboardView: View {
     @ViewBuilder
     private var accountList: some View {
         let accounts = visibleAccounts
-        let accountIDs = accounts.map(\.id)
+        let listHeight = DashboardLayout.accountListHeight
 
         ScrollView(.vertical, showsIndicators: false) {
             ZStack(alignment: .topLeading) {
@@ -367,19 +478,22 @@ struct DashboardView: View {
                 } else if accounts.isEmpty {
                     filteredEmptyState
                 } else {
-                    LazyVStack(spacing: 12) {
-                        ForEach(accounts) { account in
+                    LazyVStack(spacing: DashboardLayout.accountCardSpacing) {
+                        ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
                             AccountCardView(
                                 account: account,
                                 language: appState.language,
                                 isActive: appState.activeAccountByTool[appState.selectedTool] == account.id,
+                                isRecommended: recommendedAccountID == account.id,
                                 isRefreshing: isAccountRefreshing(account),
                                 loadState: accountLoadState(account),
                                 quota: appState.quotaByAccount[account.id],
                                 errorMessage: appState.errorByAccount[account.id],
                                 canActivate: true,
+                                isPrimaryVisibleCard: index == 0,
                                 refreshCycleID: refreshCycleID,
                                 onActivate: { appState.activateAccount(account) },
+                                onRefresh: { appState.refreshAccount(account) },
                                 onDelete: { appState.deleteAccount(account) }
                             )
                             .transaction { transaction in
@@ -389,16 +503,14 @@ struct DashboardView: View {
                             }
                         }
                     }
-                    .padding(.top, 2)
-                    .padding(.bottom, 10)
                     .frame(maxWidth: .infinity, alignment: .top)
-                    .animation(isRefreshingSelectedTool ? nil : .easeInOut(duration: 0.16), value: accountIDs)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .scrollIndicators(.never, axes: .vertical)
         .clipped()
+        .frame(height: listHeight)
         .frame(maxWidth: .infinity)
     }
 
@@ -429,16 +541,16 @@ struct DashboardView: View {
             } label: {
                 HStack(spacing: 7) {
                     Text(text.string(.show))
-                        .font(.system(size: 11.5, weight: .regular))
-                        .foregroundStyle(Branding.inkSubtle)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Branding.inkMuted)
 
                     Circle()
                         .fill(Branding.separatorDot)
                         .frame(width: 3, height: 3)
 
                     Text(currentFilterTitle)
-                        .font(.system(size: 11.5, weight: .regular))
-                        .foregroundStyle(Branding.inkMuted)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Branding.inkStrong.opacity(0.68))
                         .lineLimit(1)
 
                     Image(systemName: "chevron.down")
@@ -447,13 +559,13 @@ struct DashboardView: View {
                 }
                 .padding(.leading, 9)
                 .padding(.trailing, 8)
-                .frame(height: 23)
+                .frame(height: 25)
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Branding.controlSurface)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(Branding.controlStroke, lineWidth: 1)
                 )
             }
@@ -501,7 +613,6 @@ struct DashboardView: View {
             .padding(.horizontal, 4)
             .frame(height: 23)
         }
-        .padding(.horizontal, 4)
         .padding(.top, 2)
         .frame(height: 28)
     }

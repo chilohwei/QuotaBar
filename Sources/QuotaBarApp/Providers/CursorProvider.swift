@@ -954,6 +954,28 @@ struct CursorProvider: Provider {
         return try JSONSerialization.jsonObject(with: data)
     }
 
+#if DEBUG
+    func parseCurrentPeriodUsageForTesting(
+        _ payload: Any,
+        email: String? = "fixture@example.com",
+        membershipType: String? = nil,
+        subscriptionStatus: String? = nil,
+        subscriptionPeriodEnd: Date? = nil
+    ) throws -> QuotaSnapshot {
+        let credentials = CursorCredentials(
+            accessToken: "fixture-access-token",
+            refreshToken: nil,
+            email: email,
+            membershipType: membershipType,
+            subscriptionStatus: subscriptionStatus,
+            subscriptionPeriodEnd: subscriptionPeriodEnd,
+            stateDatabasePath: nil,
+            source: "fixture"
+        )
+        return try parseCurrentPeriodUsage(payload, credentials: credentials)
+    }
+#endif
+
     private func parseCurrentPeriodUsage(_ payload: Any, credentials: CursorCredentials) throws -> QuotaSnapshot {
         let plan = firstDictionary(
             in: payload,

@@ -29,20 +29,25 @@ final class AppState: ObservableObject {
     private var refreshFailureCountByAccount: [UUID: Int] = [:]
     private var refreshBackoffUntilByAccount: [UUID: Date] = [:]
     private let maxConcurrentRefreshes = 4
-    private let autoRefreshInterval: TimeInterval = 60
-    private let autoRefreshJitter: TimeInterval = 10
+    private let autoRefreshInterval: TimeInterval = 5 * 60
+    private let autoRefreshJitter: TimeInterval = 30
+    private let foregroundRefreshFreshnessInterval: TimeInterval = 45
     private var supportedTools: [ToolKind] { providerRegistry.supportedTools }
+
+    private var supportedToolsPrioritizingSelectedTool: [ToolKind] {
+        guard supportedTools.contains(selectedTool) else { return supportedTools }
+        return [selectedTool] + supportedTools.filter { $0 != selectedTool }
+    }
 
     func bootstrap() {
         AppLog.app.info("Bootstrapping app state")
         selectedTool = .codex
+        loadPersistedStateForImmediateDisplay()
 
         Task {
             do {
                 let state = try await accountStore.load()
-                self.accounts = state.accounts
-                self.activeAccountByTool = state.activeAccountByTool.filter { self.supportedTools.contains($0.key) }
-                self.selectedTool = state.activeAccountByTool[.codex] == nil && state.activeAccountByTool[.cursor] != nil ? .cursor : .codex
+                applyPersistedState(state)
             } catch {
                 AppLog.app.error("Failed to load persisted state: \(String(describing: error), privacy: .private)")
                 self.accounts = []
@@ -50,15 +55,27 @@ final class AppState: ObservableObject {
                 self.selectedTool = .codex
             }
 
-            normalizeActiveSelections()
-            await normalizeAccountNamesIfNeeded()
             loadCachedQuotaSnapshots()
+            normalizeActiveSelections()
+            let initialSelectedTool = selectedTool
+            let initiallySelectedAccounts = accounts(for: initialSelectedTool)
+            primeRefreshState(for: initiallySelectedAccounts)
+            await refreshAccounts(initiallySelectedAccounts, forceRefresh: true)
+
             await syncInstalledCredentialsAtLaunch()
             normalizeActiveSelections()
             await applyActiveSelectionsToInstalledTools()
+            await normalizeAccountNamesIfNeeded()
+
+            let selectedAccounts = accounts(for: selectedTool)
+            if selectedTool != initialSelectedTool || shouldRefreshForForegroundDisplay(selectedAccounts) {
+                primeRefreshState(for: selectedAccounts)
+                await refreshAccounts(selectedAccounts, forceRefresh: true)
+            }
+
             loadCachedQuotaSnapshots()
-            await refreshAllAccounts()
             startAutoRefreshLoop()
+            await refreshRemainingAccountsInBackground(excluding: Set(selectedAccounts.map(\.id)))
             AppLog.app.info("App state bootstrap finished")
         }
     }
@@ -207,17 +224,33 @@ final class AppState: ObservableObject {
 
     func refreshSelectedTool() {
         let tool = selectedTool
+        primeRefreshState(for: accounts(for: tool))
         Task {
             await syncInstalledCurrentAccount(for: tool)
             let targetAccounts = accounts(for: tool)
+            primeRefreshState(for: targetAccounts)
             await refreshAccounts(targetAccounts, forceRefresh: true)
         }
     }
 
+    func prepareSelectedToolForDashboardPresentation() async {
+        let tool = selectedTool
+        await syncInstalledCurrentAccount(for: tool)
+
+        let targetAccounts = accounts(for: tool)
+        guard !targetAccounts.isEmpty else { return }
+        guard targetAccounts.contains(where: { quotaByAccount[$0.id] == nil }) else { return }
+
+        primeRefreshState(for: targetAccounts)
+        await refreshAccounts(targetAccounts, forceRefresh: true)
+    }
+
     func refreshAccount(_ account: Account) {
+        primeRefreshState(for: [account])
         Task {
             await syncInstalledCurrentAccount(for: account.tool)
             let target = accounts.first(where: { $0.id == account.id }) ?? account
+            primeRefreshState(for: [target])
             await refreshQuota(for: target, forceRefresh: true)
         }
     }
@@ -225,8 +258,17 @@ final class AppState: ObservableObject {
     func selectTool(_ tool: ToolKind) {
         guard supportedTools.contains(tool) else { return }
         selectedTool = tool
+        let targetAccounts = accounts(for: tool)
+        let shouldRefresh = shouldRefreshForForegroundDisplay(targetAccounts)
+        if shouldRefresh {
+            primeRefreshState(for: targetAccounts)
+        }
         Task {
             await syncInstalledCurrentAccount(for: tool)
+            let targetAccounts = accounts(for: tool)
+            guard shouldRefresh || shouldRefreshForForegroundDisplay(targetAccounts) else { return }
+            primeRefreshState(for: targetAccounts)
+            await refreshAccounts(targetAccounts, forceRefresh: true)
         }
     }
 
@@ -357,6 +399,25 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func loadPersistedStateForImmediateDisplay() {
+        do {
+            let state = try AccountStore.loadImmediately()
+            applyPersistedState(state)
+            normalizeActiveSelections()
+            loadCachedQuotaSnapshots()
+        } catch {
+            AppLog.app.error("Failed to load immediate persisted state: \(String(describing: error), privacy: .private)")
+        }
+    }
+
+    private func applyPersistedState(_ state: PersistedState) {
+        accounts = state.accounts
+        activeAccountByTool = state.activeAccountByTool.filter { supportedTools.contains($0.key) }
+        selectedTool = [.codex, .cursor, .claudeCode]
+            .first { activeAccountByTool[$0] != nil }
+            ?? .codex
+    }
+
     private func startAutoRefreshLoop() {
         refreshTask?.cancel()
         refreshTask = Task {
@@ -371,11 +432,19 @@ final class AppState: ObservableObject {
 
     private func refreshActiveAccounts() async {
         await syncInstalledCurrentAccounts()
-        await refreshAccounts(supportedTools.compactMap { activeAccount(for: $0) })
+        await refreshAccounts(supportedToolsPrioritizingSelectedTool.compactMap { activeAccount(for: $0) })
+    }
+
+    private func refreshRemainingAccountsInBackground(excluding refreshedAccountIDs: Set<UUID>) async {
+        let remainingAccounts = accounts.filter { account in
+            supportedTools.contains(account.tool) && !refreshedAccountIDs.contains(account.id)
+        }
+        guard !remainingAccounts.isEmpty else { return }
+        await refreshAccounts(remainingAccounts)
     }
 
     private func applyActiveSelectionsToInstalledTools() async {
-        for tool in supportedTools {
+        for tool in supportedToolsPrioritizingSelectedTool {
             await applyActiveSelectionToInstalledTool(tool)
         }
     }
@@ -394,7 +463,7 @@ final class AppState: ObservableObject {
     }
 
     private func syncInstalledCredentialsAtLaunch() async {
-        for tool in supportedTools {
+        for tool in supportedToolsPrioritizingSelectedTool {
             let provider = provider(for: tool)
 
             if let codexProvider = provider as? CodexProvider,
@@ -423,7 +492,7 @@ final class AppState: ObservableObject {
     }
 
     private func syncInstalledCurrentAccounts() async {
-        for tool in supportedTools {
+        for tool in supportedToolsPrioritizingSelectedTool {
             await syncInstalledCurrentAccount(for: tool)
         }
     }
@@ -463,10 +532,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func refreshAllAccounts() async {
-        await refreshAccounts(accounts.filter { supportedTools.contains($0.tool) })
-    }
-
     private func refreshAccounts(_ targetAccounts: [Account], forceRefresh: Bool = false) async {
         guard !targetAccounts.isEmpty else { return }
 
@@ -485,6 +550,34 @@ final class AppState: ObservableObject {
             }
 
             startIndex = endIndex
+        }
+    }
+
+    private func primeRefreshState(for targetAccounts: [Account]) {
+        for account in targetAccounts where supportedTools.contains(account.tool) {
+            guard !refreshingAccountIDs.contains(account.id) else { continue }
+            loadStateByAccount[account.id] = quotaByAccount[account.id] == nil ? .loadingInitial : .refreshing
+        }
+    }
+
+    private func shouldRefreshForForegroundDisplay(_ targetAccounts: [Account]) -> Bool {
+        targetAccounts.contains { account in
+            guard supportedTools.contains(account.tool) else { return false }
+            if refreshingAccountIDs.contains(account.id) {
+                return false
+            }
+
+            switch loadStateByAccount[account.id] {
+            case .loadingInitial, .refreshing:
+                return false
+            case .failed, .stale:
+                return true
+            case .idle, .none:
+                return quotaByAccount[account.id] == nil
+            case .loaded:
+                guard let snapshot = quotaByAccount[account.id] else { return true }
+                return Date().timeIntervalSince(snapshot.updatedAt) > foregroundRefreshFreshnessInterval
+            }
         }
     }
 

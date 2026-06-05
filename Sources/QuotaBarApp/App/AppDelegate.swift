@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = notification
         NSApp.setActivationPolicy(.accessory)
         NSApp.applicationIconImage = Branding.makeAppIcon()
+        appState.bootstrap()
         statusBarController = StatusBarController(appState: appState)
 
         Publishers.CombineLatest4(
@@ -25,8 +26,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusBarController?.updateStatusTitle()
             }
             .store(in: &cancellables)
-
-        appState.bootstrap()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -73,7 +73,15 @@ private struct LossyAccount: Decodable {
 }
 
 actor AccountStore {
+    nonisolated static func loadImmediately() throws -> PersistedState {
+        try loadPersistedState()
+    }
+
     func load() throws -> PersistedState {
+        try Self.loadPersistedState()
+    }
+
+    private nonisolated static func loadPersistedState() throws -> PersistedState {
         try AppPaths.ensureDirectories()
         guard FileManager.default.fileExists(atPath: AppPaths.accountsFile.path) else {
             return .empty

@@ -5,24 +5,26 @@ struct AccountCardView: View {
     let account: Account
     let language: AppLanguage
     let isActive: Bool
+    let isRecommended: Bool
     let isRefreshing: Bool
     let loadState: AccountLoadState
     let quota: QuotaSnapshot?
     let errorMessage: String?
     let canActivate: Bool
+    let isPrimaryVisibleCard: Bool
     let refreshCycleID: Int
     let onActivate: () -> Void
+    let onRefresh: () -> Void
     let onDelete: () -> Void
 
     @State private var isConfirmingDelete = false
     @State private var isHovering = false
-    @State private var showFullDisplayName = false
     @State private var refreshFeedback: CardRefreshFeedback = .idle
     @State private var activeRefreshCycleID: Int = 0
     @State private var wasRefreshingInActiveCycle = false
     @State private var hideRefreshFeedbackTask: Task<Void, Never>?
 
-    private let cardCornerRadius: CGFloat = 16
+    private let cardCornerRadius: CGFloat = 12
 
     private var text: AppText { AppText(language: language) }
 
@@ -36,13 +38,10 @@ struct AccountCardView: View {
     }
 
     private var displayName: String {
-        if showFullDisplayName {
-            return resolvedAccountName
-        }
         return compactedDisplayName
     }
 
-    private var canToggleDisplayName: Bool {
+    private var shouldShowFullNameHelp: Bool {
         compactedDisplayName != resolvedAccountName
     }
 
@@ -152,23 +151,22 @@ struct AccountCardView: View {
         }
     }
 
-    private var planBadgeItems: [(text: String, tint: Color, background: Color)] {
+    private var planSummaryBadge: (text: String, tint: Color, background: Color)? {
         guard let rawPlan = quota?.planName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !rawPlan.isEmpty else {
-            return []
+            return nil
         }
 
         let type = subscriptionType(from: rawPlan, tool: account.tool)
-        var items: [(text: String, tint: Color, background: Color)] = [
-            (type.label, type.tint, type.background)
-        ]
+        var parts = [type.label]
 
-        if account.tool != .claudeCode,
+        if type.isPaid,
+           account.tool != .claudeCode,
            let cycle = actualBillingCycle(from: rawPlan.lowercased()) {
-            items.append((text.billingCycle(cycle), Branding.warning, Branding.warningSoft))
+            parts.append(text.billingCycle(cycle))
         }
 
-        return items
+        return (parts.joined(separator: " · "), type.tint, type.background)
     }
 
     private func subscriptionType(from rawPlan: String, tool: ToolKind) -> SubscriptionType {
@@ -284,6 +282,10 @@ struct AccountCardView: View {
         remainingRatios.contains { $0 <= 0.001 }
     }
 
+    private var isInitialLoadingWithoutQuota: Bool {
+        quota == nil && (isRefreshing || loadState == .loadingInitial || loadState == .refreshing)
+    }
+
     private func actualBillingCycle(from lowercasedPlan: String) -> BillingCycle? {
         if lowercasedPlan.contains("annual")
             || lowercasedPlan.contains("yearly")
@@ -306,6 +308,7 @@ struct AccountCardView: View {
         if errorMessage != nil { return .error }
         if isRefreshing || loadState == .refreshing || loadState == .loadingInitial { return .refreshing }
         guard let quota else { return .pending }
+        if isStaleOrCachedQuota(quota) { return .stale }
         if quota.isQuotaBlocked == true { return .exhausted }
         if metrics.isEmpty {
             if account.tool == .claudeCode {
@@ -325,6 +328,13 @@ struct AccountCardView: View {
         if remainingRatio <= 0.001 { return .exhausted }
         if remainingRatio <= 0.20 { return .warning }
         return .healthy
+    }
+
+    private func isStaleOrCachedQuota(_ quota: QuotaSnapshot) -> Bool {
+        if loadState == .stale {
+            return true
+        }
+        return quota.source.range(of: "cache", options: .caseInsensitive) != nil
     }
 
     private var shouldShowStatusBadge: Bool {
@@ -355,16 +365,60 @@ struct AccountCardView: View {
 
     private var cardFill: Color {
         if isActive { return Branding.activeCardSurface }
-        if isHovering { return Branding.hoverCardSurface }
+        if isHovering { return Branding.activeCardSurface.opacity(0.72) }
         return Branding.cardSurface
     }
 
     private var cardStroke: Color {
-        isActive ? Branding.borderSelected : Branding.cardStroke
+        if isActive { return Branding.borderSelected }
+        if isHovering { return Branding.borderSelected.opacity(0.55) }
+        return Branding.cardStroke
     }
 
-    private var shouldShowActions: Bool {
-        isHovering || isActive
+    private var shouldRenderActions: Bool {
+        isPrimaryVisibleCard || isHovering
+    }
+
+    private var shouldShowRefreshAction: Bool {
+        shouldRenderActions
+    }
+
+    private var shouldShowDeleteAction: Bool {
+        shouldRenderActions
+    }
+
+    private var actionZoneWidth: CGFloat {
+        language == .english ? 132 : 104
+    }
+
+    private var metadataItems: [(text: String, tint: Color, weight: Font.Weight)] {
+        var items: [(text: String, tint: Color, weight: Font.Weight)] = []
+
+        if let planSummaryBadge {
+            items.append((planSummaryBadge.text, planSummaryBadge.tint, .semibold))
+        }
+
+        if isRecommended, !isActive {
+            items.append((text.string(.recommended), Branding.success, .semibold))
+        }
+
+        if shouldShowStatusBadge {
+            items.append((status.title(text), status.tint, .semibold))
+        }
+
+        if let refreshBadge {
+            items.append((refreshBadge.text, refreshBadge.tint, .semibold))
+        }
+
+        if let subscriptionDateText {
+            items.append((subscriptionDateText, Branding.inkSubtle, .regular))
+        }
+
+        return items
+    }
+
+    private var hasMetadataRow: Bool {
+        !metadataItems.isEmpty
     }
 
     private var footerMessage: (message: String, color: Color)? {
@@ -374,69 +428,32 @@ struct AccountCardView: View {
             }
             return (errorMessage, Branding.danger)
         }
-        if let note = quota?.note?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !note.isEmpty {
-            return (note, Branding.inkSubtle)
-        }
         return nil
     }
 
     private var hasFooterContent: Bool {
-        footerMessage != nil
+        false
     }
 
     private var secondaryPanelTitle: String {
         quota?.secondaryPanelTitle ?? "Weekly"
     }
 
+    private var contentSpacing: CGFloat {
+        useRingMetricLayout ? 8 : 12
+    }
+
+    private var verticalPadding: CGFloat {
+        useRingMetricLayout ? 12 : 13
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(displayName)
-                    .font(.system(size: 15.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Branding.inkStrong)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(canToggleDisplayName ? account.name : "")
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        guard canToggleDisplayName else { return }
-                        showFullDisplayName.toggle()
-                    }
+        VStack(alignment: .leading, spacing: contentSpacing) {
+            header
 
-                HStack(spacing: 7) {
-                    ForEach(Array(planBadgeItems.enumerated()), id: \.offset) { _, item in
-                        Badge(text: item.text, tint: item.tint, background: item.background)
-                    }
-
-                    if isActive {
-                        Badge(text: text.string(.current), tint: Branding.accentBlueDark, background: Branding.accentBlueSoft)
-                    }
-
-                    if shouldShowStatusBadge {
-                        Badge(text: status.title(text), tint: status.tint, background: status.background)
-                    }
-
-                    if let refreshBadge {
-                        Badge(text: refreshBadge.text, tint: refreshBadge.tint, background: refreshBadge.background)
-                    }
-
-                    if let subscriptionDateText {
-                        Text(subscriptionDateText)
-                            .font(.system(size: 10.5, weight: .regular))
-                            .foregroundStyle(Branding.inkSubtle)
-                            .lineLimit(1)
-                    }
-                }
-                .fixedSize()
-
-                Spacer(minLength: 8)
-
-                actionZone
-                    .fixedSize()
-            }
-
-            if useRingMetricLayout {
+            if isInitialLoadingWithoutQuota {
+                LoadingQuotaPlaceholder(useRingLayout: useRingMetricLayout, language: language)
+            } else if useRingMetricLayout {
                 CursorMetricRingStrip(
                     primary: quota?.primaryPanelMetric,
                     secondary: quota?.secondaryPanelMetric,
@@ -460,24 +477,36 @@ struct AccountCardView: View {
             footer
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 13)
-        .frame(minHeight: hasFooterContent ? 138 : 118)
+        .padding(.vertical, verticalPadding)
+        .frame(height: DashboardLayout.accountCardHeight, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
                 .fill(cardFill)
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .stroke(cardStroke, lineWidth: 1)
+                .stroke(cardStroke, lineWidth: isActive ? 1.2 : 1)
         )
+        .overlay(alignment: .topTrailing) {
+            actionZone
+                .frame(width: actionZoneWidth, height: 24, alignment: .trailing)
+                .opacity(shouldRenderActions ? 1 : 0)
+                .allowsHitTesting(shouldRenderActions)
+                .padding(.top, verticalPadding)
+                .padding(.trailing, 12)
+        }
         .shadow(
-            color: isActive ? Branding.shadowPopover : (isHovering ? Branding.hoverCardShadow : Branding.cardShadow),
-            radius: isActive ? 9 : (isHovering ? 7 : 4),
-            y: isActive ? 2.5 : 1.5
+            color: isActive ? Branding.shadowPopover.opacity(0.82) : Branding.cardShadow,
+            radius: isActive ? 7 : 4,
+            y: isActive ? 2 : 1.5
         )
         .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.14), value: isHovering)
-        .animation(.easeOut(duration: 0.14), value: isActive)
+        .contentShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
+        .onTapGesture {
+            guard canActivate, !isActive else { return }
+            onActivate()
+        }
+        .pointingHandCursor(canActivate && !isActive)
         .onChange(of: refreshCycleID) { _ in
             handleRefreshCycleChange()
         }
@@ -496,32 +525,68 @@ struct AccountCardView: View {
         }
     }
 
-    private var actionZone: some View {
-        HStack(spacing: 9) {
-            if canActivate {
-                Button(text.string(.switchAccount), action: onActivate)
-                    .disabled(isActive)
-                    .foregroundStyle(isActive ? Branding.inkSubtle : Branding.accentBlueDark)
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(displayName)
+                    .font(.system(size: 15.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Branding.inkStrong)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(shouldShowFullNameHelp ? account.name : "")
+                    .layoutPriority(1)
+
+                Spacer(minLength: 8)
             }
-            Button {
-                isConfirmingDelete = true
-            } label: {
-                if canActivate {
-                    Text(text.string(.delete))
-                } else {
-                    Image(systemName: "trash")
-                        .font(.system(size: 10.5, weight: .semibold))
-                }
+
+            if hasMetadataRow {
+                metadataRow
             }
-            .foregroundStyle(Branding.danger)
         }
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(Branding.inkMuted)
-        .buttonStyle(.plain)
-        .opacity(shouldShowActions ? 1 : 0)
-        .allowsHitTesting(shouldShowActions)
-        .accessibilityHidden(!shouldShowActions)
-        .animation(.easeOut(duration: 0.12), value: shouldShowActions)
+        .padding(.trailing, actionZoneWidth + 8)
+    }
+
+    private var metadataRow: some View {
+        HStack(spacing: 5) {
+            ForEach(Array(metadataItems.enumerated()), id: \.offset) { index, item in
+                if index > 0 {
+                    Circle()
+                        .fill(Branding.separatorDot)
+                        .frame(width: 3, height: 3)
+                }
+
+                InlineMetadataLabel(text: item.text, tint: item.tint, weight: item.weight)
+            }
+        }
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .clipped()
+    }
+
+    private var actionZone: some View {
+        HStack(spacing: 6) {
+            CardTextActionButton(
+                title: text.string(.refresh),
+                tint: Branding.accentBlueDark,
+                isEnabled: shouldShowRefreshAction && !isRefreshing,
+                action: onRefresh
+            )
+            .opacity(shouldShowRefreshAction ? 1 : 0)
+            .help(text.string(.refresh))
+
+            CardTextActionButton(
+                title: text.string(.delete),
+                tint: Branding.danger,
+                isDestructive: true,
+                isEnabled: shouldShowDeleteAction
+            ) {
+                isConfirmingDelete = true
+            }
+            .opacity(shouldShowDeleteAction ? 1 : 0)
+            .help(text.string(.delete))
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     @ViewBuilder
@@ -552,11 +617,7 @@ struct AccountCardView: View {
                 Branding.accentBlueSoft
             )
         case .success:
-            return (
-                refreshText(.success),
-                Branding.success,
-                Branding.successSoft
-            )
+            return nil
         }
     }
 
@@ -630,6 +691,99 @@ private enum CardRefreshFeedback: Equatable {
     case idle
     case refreshing
     case success
+}
+
+private struct CardTextActionButton: View {
+    let title: String
+    let tint: Color
+    var isDestructive = false
+    var isEnabled = true
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    private var textColor: Color {
+        if !isEnabled {
+            return Branding.inkSubtle
+        }
+        if isDestructive, !isHovering {
+            return Branding.danger.opacity(0.84)
+        }
+        return tint
+    }
+
+    private var backgroundColor: Color {
+        if !isEnabled {
+            return .clear
+        }
+        if isHovering {
+            return isDestructive
+                ? Branding.dangerSoft.opacity(0.54)
+                : Branding.accentBlueSoft.opacity(0.78)
+        }
+        return .clear
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11.5, weight: .semibold))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .foregroundStyle(textColor)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(backgroundColor)
+                )
+                .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { isHovering = $0 }
+        .pointingHandCursor(isEnabled)
+    }
+}
+
+private extension View {
+    func pointingHandCursor(_ isEnabled: Bool = true) -> some View {
+        background(CursorRegion(cursor: .pointingHand, isEnabled: isEnabled))
+    }
+}
+
+private struct CursorRegion: NSViewRepresentable {
+    let cursor: NSCursor
+    let isEnabled: Bool
+
+    func makeNSView(context: Context) -> CursorRegionView {
+        let view = CursorRegionView()
+        view.cursor = isEnabled ? cursor : nil
+        return view
+    }
+
+    func updateNSView(_ nsView: CursorRegionView, context: Context) {
+        nsView.cursor = isEnabled ? cursor : nil
+    }
+}
+
+private final class CursorRegionView: NSView {
+    var cursor: NSCursor? {
+        didSet {
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if let cursor {
+            addCursorRect(bounds, cursor: cursor)
+        }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
 }
 
 private enum AccountVisualStatus {
@@ -766,23 +920,17 @@ private enum ToolIconImageCache {
     }
 }
 
-private struct Badge: View {
+private struct InlineMetadataLabel: View {
     let text: String
     let tint: Color
-    let background: Color
+    let weight: Font.Weight
 
     var body: some View {
         Text(text)
-            .font(.system(size: 10.5, weight: .medium))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .foregroundStyle(tint)
-            .background(background, in: Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(Branding.borderSubtle, lineWidth: 0.5)
-            )
+            .font(.system(size: 10, weight: weight))
             .lineLimit(1)
+            .truncationMode(.tail)
+            .foregroundStyle(tint.opacity(0.82))
     }
 }
 
@@ -802,7 +950,7 @@ private struct CursorMetricRingStrip: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 10) {
             ForEach(Array(tiles.enumerated()), id: \.offset) { _, tile in
                 CursorMetricRingTile(
                     title: tile.title,
@@ -839,7 +987,7 @@ private struct CursorMetricRingTile: View {
     }
 
     var body: some View {
-        VStack(alignment: .center, spacing: 5) {
+        VStack(alignment: .center, spacing: 3) {
             Text(text.quotaLabel(title))
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(Branding.inkMuted)
@@ -848,12 +996,20 @@ private struct CursorMetricRingTile: View {
 
             ZStack {
                 MetricRing(value: ratio, tint: tint)
-                    .frame(width: 44, height: 44)
+                    .frame(width: 38, height: 38)
 
                 Text("\(Int((ratio * 100).rounded()))%")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(isKnown ? Branding.inkStrong : Branding.inkSubtle)
                     .monospacedDigit()
+                    .opacity(isKnown ? 1 : 0)
+
+                if !isKnown {
+                    Text("--")
+                        .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Branding.inkSubtle)
+                        .monospacedDigit()
+                }
             }
 
             if let resetAt = metric?.resetAt ?? fallbackResetAt {
@@ -864,7 +1020,76 @@ private struct CursorMetricRingTile: View {
                     .frame(maxWidth: .infinity, alignment: .center)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 84, alignment: .top)
+        .frame(maxWidth: .infinity, minHeight: 68, alignment: .top)
+    }
+}
+
+private struct LoadingQuotaPlaceholder: View {
+    let useRingLayout: Bool
+    let language: AppLanguage
+
+    private var text: AppText { AppText(language: language) }
+
+    var body: some View {
+        if useRingLayout {
+            HStack(alignment: .top, spacing: 10) {
+                ForEach(["Total", "Auto", "API"], id: \.self) { title in
+                    VStack(alignment: .center, spacing: 3) {
+                        Text(text.quotaLabel(title))
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(Branding.inkMuted)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .center)
+
+                        ZStack {
+                            MetricRing(value: 0, tint: Branding.inkSubtle)
+                                .frame(width: 38, height: 38)
+
+                            Text("--")
+                                .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Branding.inkSubtle)
+                                .monospacedDigit()
+                        }
+
+                        Text(text.string(.refreshing))
+                            .font(.system(size: 9.6, weight: .regular))
+                            .foregroundStyle(Branding.inkSubtle)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 68, alignment: .top)
+                }
+            }
+        } else {
+            HStack(spacing: 10) {
+                ForEach(["5h", "Weekly"], id: \.self) { title in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(text.quotaLabel(title))
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(Branding.inkMuted)
+                                Text(language == .english ? "Remaining" : (language == .traditionalChinese ? "剩餘" : "剩余"))
+                                    .font(.system(size: 10.5, weight: .regular))
+                                    .foregroundStyle(Branding.inkSubtle)
+                            }
+                            Spacer(minLength: 8)
+                            Text("--")
+                                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Branding.inkSubtle)
+                                .monospacedDigit()
+                        }
+
+                        RatioBar(value: 0, tint: Branding.inkSubtle)
+
+                        Text(text.string(.refreshing))
+                            .font(.system(size: 10.5, weight: .regular))
+                            .foregroundStyle(Branding.inkSubtle)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading)
+                }
+            }
+        }
     }
 }
 
@@ -880,7 +1105,6 @@ private struct MetricRing: View {
                 .trim(from: 0, to: min(max(value, 0), 1))
                 .stroke(tint, style: StrokeStyle(lineWidth: 3.6, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(.easeOut(duration: 0.55), value: value)
         }
     }
 }
@@ -965,7 +1189,6 @@ private struct RatioBar: View {
                 Capsule()
                     .fill(tint)
                     .frame(width: max(proxy.size.width * value, value > 0 ? 7 : 0))
-                    .animation(.easeOut(duration: 0.55), value: value)
             }
         }
         .frame(height: 7)

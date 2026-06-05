@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 final class LoginOutputBuffer: @unchecked Sendable {
@@ -15,6 +16,13 @@ final class LoginOutputBuffer: @unchecked Sendable {
         defer { lock.unlock() }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+private struct CodexLoginAttempt: Sendable {
+    let name: String
+    let arguments: [String]
+    let timeout: TimeInterval
+    let opensDevicePrompt: Bool
 }
 
 struct CodexImportedAccount: Sendable {
@@ -59,6 +67,7 @@ struct CodexProvider: Provider {
     private let refreshClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
     private let tokenRefreshInterval: TimeInterval = 8 * 24 * 60 * 60
     private let tokenRefreshLeeway: TimeInterval = 10 * 60
+    private let subscriptionRefreshInterval: TimeInterval = 12 * 60 * 60
     private let chatGPTUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 
     private static let liveSession: URLSession = {
@@ -94,12 +103,14 @@ struct CodexProvider: Provider {
     }
 
     func updateCurrentCredentials(_ secret: String) async throws {
-        try fileService.writeText(secret, to: activeAuthPath)
+        try ensureFileCredentialStore(at: activeConfigPath)
+        try fileService.writeTextWithBackup(secret, to: activeAuthPath, backupBaseName: "auth.json")
     }
 
     func persistRefreshedSecret(_ secret: String, for account: Account, isActive: Bool) async throws {
         let managedHome = account.settings.codexHomePath ?? AppPaths.managedCodexHomePath(accountID: account.id)
-        try fileService.writeText(secret, to: "\(managedHome)/auth.json")
+        try ensureFileCredentialStore(at: "\(managedHome)/config.toml")
+        try fileService.writeTextWithBackup(secret, to: "\(managedHome)/auth.json", backupBaseName: "auth.json")
         try upsertRegistryAccount(account: account, secret: secret, makeActive: isActive)
     }
 
@@ -117,17 +128,16 @@ struct CodexProvider: Provider {
 
     func importStoredAccounts() async throws -> [CodexImportedAccount] {
         guard fileService.fileExists(at: registryPath) else { return [] }
-        let registry = try loadJSONDictionary(at: registryPath)
-        let activeAccountKey = registry["active_account_key"] as? String
-        guard let rawAccounts = registry["accounts"] as? [[String: Any]] else { return [] }
+        let registry = try loadRegistryDocument()
+        let activeAccountKey = registry.activeAccountKey
 
-        return rawAccounts.compactMap { entry in
-            guard let accountKey = entry["account_key"] as? String,
+        return registry.accounts.compactMap { entry in
+            guard let accountKey = entry.accountKey,
                   !accountKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return nil
             }
 
-            let authMode = (entry["auth_mode"] as? String)?.lowercased()
+            let authMode = entry.authMode?.lowercased()
             guard authMode == nil || authMode == "chatgpt" else { return nil }
 
             let authPath = registryAuthSnapshotPath(accountKey: accountKey)
@@ -138,9 +148,9 @@ struct CodexProvider: Provider {
             }
 
             let name = [
-                entry["alias"] as? String,
-                entry["account_name"] as? String,
-                entry["email"] as? String
+                entry.alias,
+                entry.accountName,
+                entry.email
             ]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
@@ -166,9 +176,69 @@ struct CodexProvider: Provider {
             throw ProviderError.unsupported("未找到 Codex CLI。请先安装 Codex，或确认 codex 命令可用。")
         }
 
+        defer {
+            try? fileService.removeItemIfExists(at: scratchHome.path)
+        }
+
+        var failures: [String] = []
+        for attempt in codexLoginAttempts() {
+            do {
+                return try await runLoginAttempt(
+                    attempt,
+                    codexExecutable: codexExecutable,
+                    scratchHome: scratchHome
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                failures.append("\(attempt.name)：\(loginFailureMessage(error))")
+            }
+        }
+
+        let message = failures.isEmpty
+            ? "Codex 登录未完成，请重试"
+            : "Codex 登录失败：\(failures.joined(separator: "；"))"
+        throw ProviderError.unsupported(message)
+    }
+
+    private func codexLoginAttempts() -> [CodexLoginAttempt] {
+        let fileCredentialStoreOverride = #"cli_auth_credentials_store="file""#
+        return [
+            CodexLoginAttempt(
+                name: "浏览器登录",
+                arguments: ["login", "-c", fileCredentialStoreOverride],
+                timeout: 180,
+                opensDevicePrompt: false
+            ),
+            CodexLoginAttempt(
+                name: "兼容浏览器登录",
+                arguments: ["login"],
+                timeout: 180,
+                opensDevicePrompt: false
+            ),
+            CodexLoginAttempt(
+                name: "设备码登录",
+                arguments: ["login", "-c", fileCredentialStoreOverride, "--device-auth"],
+                timeout: 15 * 60,
+                opensDevicePrompt: true
+            ),
+            CodexLoginAttempt(
+                name: "兼容设备码登录",
+                arguments: ["login", "--device-auth"],
+                timeout: 15 * 60,
+                opensDevicePrompt: true
+            )
+        ]
+    }
+
+    private func runLoginAttempt(
+        _ attempt: CodexLoginAttempt,
+        codexExecutable: URL,
+        scratchHome: URL
+    ) async throws -> String {
         let process = Process()
         process.executableURL = codexExecutable
-        process.arguments = ["login"]
+        process.arguments = attempt.arguments
         var env = ProcessInfo.processInfo.environment
         env["CODEX_HOME"] = scratchHome.path
         env["PATH"] = augmentedPath(from: env["PATH"])
@@ -177,12 +247,25 @@ struct CodexProvider: Provider {
         let outputPipe = Pipe()
         process.standardOutput = outputPipe
         process.standardError = outputPipe
+        process.standardInput = FileHandle.nullDevice
         let loginOutput = LoginOutputBuffer()
+        let loginURLScanner = CodexLoginFallbackURLScanner()
+        let devicePromptScanner = attempt.opensDevicePrompt ? CodexDeviceAuthPromptScanner() : nil
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
             let chunk = String(data: data, encoding: .utf8) ?? ""
             loginOutput.append(chunk)
+            if let url = loginURLScanner.append(data) {
+                DispatchQueue.main.async {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            if let prompt = devicePromptScanner?.append(data) {
+                DispatchQueue.main.async {
+                    Self.presentDeviceAuthPrompt(prompt)
+                }
+            }
         }
 
         do {
@@ -196,11 +279,9 @@ struct CodexProvider: Provider {
             if process.isRunning {
                 process.terminate()
             }
-            try? fileService.removeItemIfExists(at: scratchHome.path)
         }
 
-        let timeout: TimeInterval = 180
-        let deadline = Date().addingTimeInterval(timeout)
+        let deadline = Date().addingTimeInterval(attempt.timeout)
         let scratchAuthPath = "\(scratchHome.path)/auth.json"
         while Date() < deadline {
             if Task.isCancelled {
@@ -225,7 +306,7 @@ struct CodexProvider: Provider {
         }
 
         if process.isRunning {
-            throw ProviderError.unsupported("Codex 浏览器登录超时，请重试")
+            throw ProviderError.unsupported(attempt.opensDevicePrompt ? "Codex 设备码登录超时，请重试" : "Codex 浏览器登录超时，请重试")
         }
 
         if process.terminationStatus == 0 {
@@ -250,6 +331,38 @@ struct CodexProvider: Provider {
         }
 
         throw ProviderError.missingFile(path: scratchAuthPath)
+    }
+
+    private func ensureFileCredentialStore(at configPath: String) throws {
+        let current = (try? fileService.readText(at: configPath)) ?? ""
+        let updated = current.upsertingTopLevelTOMLString(
+            key: "cli_auth_credentials_store",
+            value: "file"
+        )
+        guard updated != current else { return }
+        try fileService.writeTextWithBackup(updated, to: configPath, backupBaseName: "config.toml")
+    }
+
+    private func loginFailureMessage(_ error: Error) -> String {
+        if let localized = error as? LocalizedError,
+           let description = localized.errorDescription,
+           !description.isEmpty {
+            return description.strippingANSIControlSequences().singleLineCondensed(maxLength: 320)
+        }
+        return error.localizedDescription.strippingANSIControlSequences().singleLineCondensed(maxLength: 320)
+    }
+
+    @MainActor
+    private static func presentDeviceAuthPrompt(_ prompt: CodexDeviceAuthPrompt) {
+        NSWorkspace.shared.open(prompt.url)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(prompt.code, forType: .string)
+
+        let alert = NSAlert()
+        alert.messageText = "Codex 设备登录"
+        alert.informativeText = "已打开登录页面，验证码已复制到剪贴板：\(prompt.code)"
+        alert.addButton(withTitle: "知道了")
+        alert.runModal()
     }
 
     private func readValidatedAuthIfAvailable(at path: String) throws -> String? {
@@ -284,7 +397,9 @@ struct CodexProvider: Provider {
             "\(home)/.local/bin/codex",
             "\(home)/.npm-global/bin/codex",
             "\(home)/.bun/bin/codex",
-            "\(home)/.deno/bin/codex"
+            "\(home)/.deno/bin/codex",
+            "\(home)/.cargo/bin/codex",
+            "\(home)/.volta/bin/codex"
         ].map(URL.init(fileURLWithPath:))
 
         for url in pathCandidates + explicitCandidates {
@@ -304,6 +419,8 @@ struct CodexProvider: Provider {
             "\(home)/.npm-global/bin",
             "\(home)/.bun/bin",
             "\(home)/.deno/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/.volta/bin",
             "/usr/bin",
             "/bin",
             "/usr/sbin",
@@ -330,11 +447,12 @@ struct CodexProvider: Provider {
         try fileService.createDirectoryIfNeeded(at: managedHome)
 
         if fileService.fileExists(at: activeConfigPath) {
-            try fileService.copyItemReplacing(from: activeConfigPath, to: "\(managedHome)/config.toml")
+            try fileService.copyItemReplacingWithBackup(from: activeConfigPath, to: "\(managedHome)/config.toml", backupBaseName: "config.toml")
         }
+        try ensureFileCredentialStore(at: "\(managedHome)/config.toml")
 
         // Keep a per-account auth snapshot for local recovery.
-        try fileService.writeText(secret, to: "\(managedHome)/auth.json")
+        try fileService.writeTextWithBackup(secret, to: "\(managedHome)/auth.json", backupBaseName: "auth.json")
         try upsertRegistryAccount(account: updated, secret: secret, makeActive: false)
 
         return updated
@@ -348,14 +466,15 @@ struct CodexProvider: Provider {
         let managedHome = account.settings.codexHomePath ?? AppPaths.managedCodexHomePath(accountID: account.id)
         try fileService.createDirectoryIfNeeded(at: managedHome)
 
-        try fileService.writeText(secret, to: activeAuthPath)
-        try fileService.writeText(secret, to: "\(managedHome)/auth.json")
+        try fileService.writeTextWithBackup(secret, to: activeAuthPath, backupBaseName: "auth.json")
+        try fileService.writeTextWithBackup(secret, to: "\(managedHome)/auth.json", backupBaseName: "auth.json")
         try upsertRegistryAccount(account: account, secret: secret, makeActive: true)
 
         let managedConfigPath = "\(managedHome)/config.toml"
         if fileService.fileExists(at: managedConfigPath) {
-            try fileService.copyItemReplacing(from: managedConfigPath, to: activeConfigPath)
+            try fileService.copyItemReplacingWithBackup(from: managedConfigPath, to: activeConfigPath, backupBaseName: "config.toml")
         }
+        try ensureFileCredentialStore(at: activeConfigPath)
     }
 
     func deleteAccountArtifacts(account: Account) async throws {
@@ -578,17 +697,29 @@ struct CodexProvider: Provider {
             ?? credentials.accountID
             ?? registryMeta?.chatGPTAccountID
         let resolvedFallbackIdentifier = identity.email ?? registryMeta?.email
-        let subscriptionMeta = loadSubscriptionCacheMetadata(
+        var subscriptionMeta = loadSubscriptionCacheMetadata(
             accountKey: resolvedAccountKey,
             accountID: resolvedAccountID,
             email: resolvedFallbackIdentifier
         )
-        let fallbackPlanName = normalizedPlanName(
-            identity.plan ?? registryMeta?.planName ?? subscriptionMeta?.planName,
-            cycle: identity.cycle ?? registryMeta?.billingCycle ?? subscriptionMeta?.billingCycle
-        )
 
         if let accessToken = credentials.accessToken, !accessToken.isEmpty {
+            if let refreshedSubscription = await fetchSubscriptionIfNeeded(
+                accessToken: accessToken,
+                accountID: resolvedAccountID,
+                accountKey: resolvedAccountKey,
+                email: resolvedFallbackIdentifier,
+                existing: subscriptionMeta,
+                forceRefresh: forceRefresh
+            ) {
+                subscriptionMeta = refreshedSubscription
+            }
+
+            let fallbackPlanName = normalizedPlanName(
+                identity.plan ?? registryMeta?.planName ?? subscriptionMeta?.planName,
+                cycle: identity.cycle ?? registryMeta?.billingCycle ?? subscriptionMeta?.billingCycle
+            )
+
             do {
                 return try await fetchOAuthUsage(
                     accessToken: accessToken,
@@ -730,6 +861,12 @@ struct CodexProvider: Provider {
             if let cacheKey {
                 try? storeQuotaSnapshot(directSnapshot, cacheKey: cacheKey)
             }
+            try? updateStoredUsage(
+                directSnapshot,
+                accountKey: accountKey,
+                accountID: accountID,
+                email: fallbackAccountIdentifier
+            )
             try? storeSubscriptionCache(
                 directSnapshot,
                 accountKey: accountKey,
@@ -760,6 +897,12 @@ struct CodexProvider: Provider {
         if let cacheKey {
             try? storeQuotaSnapshot(snapshot, cacheKey: cacheKey)
         }
+        try? updateStoredUsage(
+            snapshot,
+            accountKey: accountKey,
+            accountID: accountID,
+            email: fallbackAccountIdentifier
+        )
         try? storeSubscriptionCache(
             snapshot,
             accountKey: accountKey,
@@ -784,6 +927,105 @@ struct CodexProvider: Provider {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
         return request
+    }
+
+    private func fetchSubscriptionIfNeeded(
+        accessToken: String,
+        accountID: String?,
+        accountKey: String?,
+        email: String?,
+        existing: SubscriptionCacheMetadata?,
+        forceRefresh: Bool
+    ) async -> SubscriptionCacheMetadata? {
+        if !forceRefresh,
+           let existing,
+           let fetchedAt = existing.fetchedAt,
+           Date().timeIntervalSince(fetchedAt) < subscriptionRefreshInterval {
+            return existing
+        }
+
+        guard let accountID = accountID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !accountID.isEmpty else {
+            return existing
+        }
+
+        do {
+            let url = resolveSubscriptionURL(codexHomePath: nil)
+            let request = makeOAuthSubscriptionRequest(url: url, accessToken: accessToken, accountID: accountID)
+            let data = try await dataWithOfficialSubscriptionFallback(
+                primaryRequest: request,
+                primaryURL: url,
+                accessToken: accessToken,
+                accountID: accountID
+            )
+            let payload = try JSONSerialization.jsonObject(with: data)
+            guard let metadata = parseSubscriptionMetadata(from: payload) else {
+                return existing
+            }
+            try? storeSubscriptionCache(metadata, accountKey: accountKey, accountID: accountID, email: email)
+            return metadata
+        } catch {
+            return existing
+        }
+    }
+
+    private func makeOAuthSubscriptionRequest(url: URL, accessToken: String, accountID: String) -> URLRequest {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "account_id", value: accountID)]
+        var request = URLRequest(url: components?.url ?? url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(chatGPTUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("no-cache, no-store, max-age=0", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+        request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+        return request
+    }
+
+    private func dataWithOfficialSubscriptionFallback(
+        primaryRequest: URLRequest,
+        primaryURL: URL,
+        accessToken: String,
+        accountID: String
+    ) async throws -> Data {
+        do {
+            return try await dataWithRetry(for: primaryRequest, operation: "Codex 订阅查询")
+        } catch {
+            guard shouldRetryAgainstOfficialUsageURL(for: error, primaryURL: primaryURL) else {
+                throw error
+            }
+            let fallbackRequest = makeOAuthSubscriptionRequest(
+                url: URL(string: "https://chatgpt.com/backend-api/subscriptions")!,
+                accessToken: accessToken,
+                accountID: accountID
+            )
+            return try await dataWithRetry(for: fallbackRequest, operation: "Codex 订阅查询(官方域名兜底)")
+        }
+    }
+
+    private func parseSubscriptionMetadata(from payload: Any) -> SubscriptionCacheMetadata? {
+        let planName = extractPlanName(from: payload)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let billingCycle = extractBillingCycle(from: payload)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subscriptionStatus = extractSubscriptionStatus(from: payload)
+        let metadata = SubscriptionCacheMetadata(
+            planName: (planName?.isEmpty == false) ? planName : nil,
+            billingCycle: (billingCycle?.isEmpty == false) ? billingCycle : nil,
+            accountValidUntil: extractSubscriptionActiveUntil(from: payload),
+            subscriptionWillRenew: extractSubscriptionWillRenew(from: payload, subscriptionStatus: subscriptionStatus),
+            subscriptionStatus: subscriptionStatus,
+            fetchedAt: Date()
+        )
+
+        let hasValue = metadata.planName != nil
+            || metadata.billingCycle != nil
+            || metadata.accountValidUntil != nil
+            || metadata.subscriptionWillRenew != nil
+            || metadata.subscriptionStatus != nil
+        return hasValue ? metadata : nil
     }
 
     private func dataWithOfficialFallback(
@@ -1031,12 +1273,26 @@ struct CodexProvider: Provider {
     }
 
     private func registryAuthSnapshotPath(accountKey: String) -> String {
-        let encoded = Data(accountKey.utf8)
+        "\(accountsDirectoryPath)/\(registryFileKey(for: accountKey)).auth.json"
+    }
+
+    private func registryFileKey(for accountKey: String) -> String {
+        guard keyNeedsFilenameEncoding(accountKey) else {
+            return accountKey
+        }
+        return Data(accountKey.utf8)
             .base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-        return "\(accountsDirectoryPath)/\(encoded).auth.json"
+    }
+
+    private func keyNeedsFilenameEncoding(_ key: String) -> Bool {
+        guard !key.isEmpty, key != ".", key != ".." else {
+            return true
+        }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+        return key.unicodeScalars.contains { !allowed.contains($0) }
     }
 
     private func upsertRegistryAccount(account: Account, secret: String, makeActive: Bool) throws {
@@ -1052,51 +1308,68 @@ struct CodexProvider: Provider {
         }
 
         try fileService.createDirectoryIfNeeded(at: accountsDirectoryPath)
-        try fileService.writeText(secret, to: registryAuthSnapshotPath(accountKey: accountKey))
+        try fileService.writeTextWithBackup(
+            secret,
+            to: registryAuthSnapshotPath(accountKey: accountKey),
+            backupBaseName: "\(registryFileKey(for: accountKey)).auth.json"
+        )
 
-        var registry = (try? loadJSONDictionary(at: registryPath)) ?? defaultRegistryDocument()
-        var accounts = registry["accounts"] as? [[String: Any]] ?? []
-        let nowMilliseconds = Int(Date().timeIntervalSince1970 * 1000)
-        let existingIndex = accounts.firstIndex { ($0["account_key"] as? String) == accountKey }
-        var entry = existingIndex.map { accounts[$0] } ?? [:]
+        var registry = (try? loadRegistryDocument()) ?? .empty
+        let nowSeconds = Int64(Date().timeIntervalSince1970)
+        let nowMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
+        let existingIndex = registry.accounts.firstIndex { $0.accountKey == accountKey }
+        var entry = existingIndex.map { registry.accounts[$0] } ?? CodexRegistryAccount(accountKey: accountKey)
         let displayName = account.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identityEmail = identity.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        entry["account_key"] = accountKey
-        entry["auth_mode"] = "chatgpt"
-        entry["chatgpt_account_id"] = chatGPTAccountID
-        entry["chatgpt_user_id"] = chatGPTUserID
-        entry["email"] = identity.email
-        entry["account_name"] = displayName.isEmpty ? identity.email : displayName
-        entry["alias"] = displayName.isEmpty ? identity.email : displayName
-        entry["plan"] = identity.plan?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        entry["created_at"] = entry["created_at"] ?? nowMilliseconds
-        entry["last_used_at"] = makeActive ? nowMilliseconds : (entry["last_used_at"] ?? nowMilliseconds)
+        entry.accountKey = accountKey
+        entry.authMode = "chatgpt"
+        entry.chatGPTAccountID = chatGPTAccountID
+        entry.chatGPTUserID = chatGPTUserID
+        entry.email = identityEmail
+        if !displayName.isEmpty {
+            entry.accountName = displayName
+        } else if entry.accountName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            entry.accountName = identityEmail
+        }
+        if entry.alias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+           !displayName.isEmpty,
+           displayName.lowercased() != identityEmail {
+            entry.alias = displayName
+        }
+        entry.plan = identity.plan?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        entry.createdAt = entry.createdAt ?? nowSeconds
+        entry.lastUsedAt = makeActive ? nowSeconds : (entry.lastUsedAt ?? nowSeconds)
 
         if let existingIndex {
-            accounts[existingIndex] = entry
+            registry.accounts[existingIndex] = entry
         } else {
-            accounts.append(entry)
+            registry.accounts.append(entry)
         }
 
-        registry["accounts"] = accounts
         if makeActive {
-            registry["active_account_key"] = accountKey
-            registry["active_account_activated_at_ms"] = nowMilliseconds
+            registry.activeAccountKey = accountKey
+            registry.activeAccountActivatedAtMs = nowMilliseconds
         }
-        try writeJSONDictionary(registry, to: registryPath)
+        try saveRegistryDocument(registry)
     }
 
     private func removeRegistryAccount(accountKey: String) throws {
         guard fileService.fileExists(at: registryPath) else { return }
-        var registry = try loadJSONDictionary(at: registryPath)
-        var accounts = registry["accounts"] as? [[String: Any]] ?? []
-        accounts.removeAll { ($0["account_key"] as? String) == accountKey }
-        registry["accounts"] = accounts
-        if (registry["active_account_key"] as? String) == accountKey {
-            registry["active_account_key"] = accounts.first?["account_key"]
-            registry["active_account_activated_at_ms"] = Int(Date().timeIntervalSince1970 * 1000)
+        var registry = try loadRegistryDocument()
+        registry.accounts.removeAll { $0.accountKey == accountKey }
+        if registry.activeAccountKey == accountKey {
+            registry.activeAccountKey = registry.accounts.first?.accountKey
+            registry.activeAccountActivatedAtMs = registry.activeAccountKey == nil
+                ? nil
+                : Int64(Date().timeIntervalSince1970 * 1000)
         }
-        try writeJSONDictionary(registry, to: registryPath)
+        try saveRegistryDocument(registry)
+        try removeStoredSubscription(accountKey: accountKey)
+        try fileService.backupItemIfExists(
+            at: registryAuthSnapshotPath(accountKey: accountKey),
+            backupBaseName: "\(registryFileKey(for: accountKey)).auth.json"
+        )
         try fileService.removeItemIfExists(at: registryAuthSnapshotPath(accountKey: accountKey))
     }
 
@@ -1115,33 +1388,25 @@ struct CodexProvider: Provider {
 
     private func loadRegistryAccountMetadata(accountKey: String) -> RegistryAccountMetadata? {
         guard fileService.fileExists(at: registryPath),
-              let registry = try? loadJSONDictionary(at: registryPath),
-              let rawAccounts = registry["accounts"] as? [[String: Any]] else {
+              let registry = try? loadRegistryDocument() else {
             return nil
         }
 
         let key = accountKey.lowercased()
-        guard let entry = rawAccounts.first(where: {
-            (($0["account_key"] as? String)?.lowercased() ?? "") == key
+        guard let entry = registry.accounts.first(where: {
+            ($0.accountKey?.lowercased() ?? "") == key
         }) else {
             return nil
         }
 
-        let accountID = (entry["chatgpt_account_id"] as? String)?
+        let accountID = entry.chatGPTAccountID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let email = (entry["email"] as? String)?
+        let email = entry.email?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        let planName = firstString(
-            in: entry,
-            keys: ["plan_name", "planName", "plan", "chatgpt_plan_type", "chatgptPlanType"]
-        )?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        let billingCycle = firstString(
-            in: entry,
-            keys: ["billing_cycle", "billingCycle", "cycle", "interval"]
-        )?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
+        let planName = entry.resolvedPlan?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let billingCycle = entry.extraFields.firstString(keys: ["billing_cycle", "billingCycle", "cycle", "interval"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return RegistryAccountMetadata(
             chatGPTAccountID: (accountID?.isEmpty == false) ? accountID : nil,
@@ -1157,6 +1422,7 @@ struct CodexProvider: Provider {
         let accountValidUntil: Date?
         let subscriptionWillRenew: Bool?
         let subscriptionStatus: String?
+        let fetchedAt: Date?
     }
 
     private func loadSubscriptionCacheMetadata(
@@ -1194,7 +1460,11 @@ struct CodexProvider: Provider {
                 keys: ["account_valid_until", "accountValidUntil", "valid_until", "validUntil", "current_period_end", "currentPeriodEnd"]
             ),
             subscriptionWillRenew: firstBool(in: entry, keys: ["subscription_will_renew", "subscriptionWillRenew", "will_renew", "willRenew"]),
-            subscriptionStatus: (subscriptionStatus?.isEmpty == false) ? subscriptionStatus : nil
+            subscriptionStatus: (subscriptionStatus?.isEmpty == false) ? subscriptionStatus : nil,
+            fetchedAt: findDate(
+                in: entry,
+                keys: ["fetched_at", "fetchedAt", "updated_at", "updatedAt", "updated_at_ms", "updatedAtMs"]
+            )
         )
     }
 
@@ -1260,8 +1530,29 @@ struct CodexProvider: Provider {
         accountID: String?,
         email: String?
     ) throws {
-        let planName = snapshot.planName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard planName?.isEmpty == false else { return }
+        let metadata = SubscriptionCacheMetadata(
+            planName: snapshot.planName,
+            billingCycle: nil,
+            accountValidUntil: snapshot.accountValidUntil,
+            subscriptionWillRenew: snapshot.subscriptionWillRenew,
+            subscriptionStatus: snapshot.subscriptionStatus,
+            fetchedAt: snapshot.updatedAt
+        )
+        try storeSubscriptionCache(metadata, accountKey: accountKey, accountID: accountID, email: email)
+    }
+
+    private func storeSubscriptionCache(
+        _ metadata: SubscriptionCacheMetadata,
+        accountKey: String?,
+        accountID: String?,
+        email: String?
+    ) throws {
+        let planName = metadata.planName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasSubscriptionDetails = planName?.isEmpty == false
+            || metadata.accountValidUntil != nil
+            || metadata.subscriptionWillRenew != nil
+            || metadata.subscriptionStatus?.isEmpty == false
+        guard hasSubscriptionDetails else { return }
 
         let storageKey = normalizedRegistryKey(accountKey)
             ?? accountID?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1281,9 +1572,11 @@ struct CodexProvider: Provider {
         entry["chatgpt_account_id"] = accountID?.trimmingCharacters(in: .whitespacesAndNewlines)
         entry["email"] = email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         entry["plan_name"] = planName
-        entry["account_valid_until"] = snapshot.accountValidUntil.map { ISO8601DateFormatter().string(from: $0) }
-        entry["subscription_will_renew"] = snapshot.subscriptionWillRenew
-        entry["subscription_status"] = snapshot.subscriptionStatus
+        entry["billing_cycle"] = metadata.billingCycle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        entry["account_valid_until"] = metadata.accountValidUntil.map { ISO8601DateFormatter().string(from: $0) }
+        entry["subscription_will_renew"] = metadata.subscriptionWillRenew
+        entry["subscription_status"] = metadata.subscriptionStatus
+        entry["fetched_at"] = Int64((metadata.fetchedAt ?? Date()).timeIntervalSince1970)
         entry["updated_at_ms"] = nowMilliseconds
 
         accounts[storageKey] = entry
@@ -1291,23 +1584,75 @@ struct CodexProvider: Provider {
         cache["accounts"] = accounts
         cache["updated_at_ms"] = nowMilliseconds
 
-        try writeJSONDictionary(cache, to: subscriptionsCachePath)
+        try writeJSONDictionary(cache, to: subscriptionsCachePath, backup: true)
     }
 
-    private func defaultRegistryDocument() -> [String: Any] {
-        [
-            "schema_version": 3,
-            "accounts": [],
-            "api": [
-                "account": true,
-                "usage": true
-            ],
-            "auto_switch": [
-                "enabled": false,
-                "threshold_5h_percent": 10,
-                "threshold_weekly_percent": 5
-            ]
-        ]
+    private func removeStoredSubscription(accountKey: String) throws {
+        guard fileService.fileExists(at: subscriptionsCachePath) else { return }
+        var cache = try loadJSONDictionary(at: subscriptionsCachePath)
+        guard var accounts = cache["accounts"] as? [String: Any],
+              accounts.removeValue(forKey: accountKey) != nil else {
+            return
+        }
+        cache["accounts"] = accounts
+        cache["updated_at_ms"] = Int(Date().timeIntervalSince1970 * 1000)
+        try writeJSONDictionary(cache, to: subscriptionsCachePath, backup: true)
+    }
+
+    private func loadRegistryDocument() throws -> CodexRegistryDocument {
+        guard fileService.fileExists(at: registryPath) else {
+            return .empty
+        }
+        let text = try fileService.readText(at: registryPath)
+        guard let data = text.data(using: .utf8) else {
+            throw ProviderError.invalidCredentials
+        }
+        return try JSONDecoder().decode(CodexRegistryDocument.self, from: data)
+    }
+
+    private func saveRegistryDocument(_ registry: CodexRegistryDocument) throws {
+        try fileService.createDirectoryIfNeeded(at: accountsDirectoryPath)
+        var normalized = registry
+        normalized.schemaVersion = CodexRegistrySchema.currentVersion
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(normalized)
+        let text = String(data: data, encoding: .utf8) ?? "{}"
+        try fileService.writeTextWithBackup(text, to: registryPath, backupBaseName: "registry.json")
+    }
+
+    private func updateStoredUsage(
+        _ snapshot: QuotaSnapshot,
+        accountKey: String?,
+        accountID: String?,
+        email: String?
+    ) throws {
+        guard let accountKey = normalizedRegistryKey(accountKey),
+              fileService.fileExists(at: registryPath) else {
+            return
+        }
+
+        var registry = try loadRegistryDocument()
+        guard let index = registry.accounts.firstIndex(where: { $0.accountKey == accountKey }) else {
+            return
+        }
+
+        let normalizedEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedEmail?.isEmpty == false {
+            registry.accounts[index].email = normalizedEmail
+        }
+        if let accountID = accountID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !accountID.isEmpty {
+            registry.accounts[index].chatGPTAccountID = accountID
+        }
+        registry.accounts[index].lastUsage = CodexStoredUsageSnapshot(snapshot: snapshot)
+        registry.accounts[index].lastUsageAt = Int64(snapshot.updatedAt.timeIntervalSince1970)
+        if let planType = registry.accounts[index].lastUsage?.planType,
+           planType != "unknown" {
+            registry.accounts[index].plan = planType
+        }
+
+        try saveRegistryDocument(registry)
     }
 
     private func loadJSONDictionary(at path: String) throws -> [String: Any] {
@@ -1319,10 +1664,14 @@ struct CodexProvider: Provider {
         return dict
     }
 
-    private func writeJSONDictionary(_ dict: [String: Any], to path: String) throws {
+    private func writeJSONDictionary(_ dict: [String: Any], to path: String, backup: Bool = false) throws {
         let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
         let text = String(data: data, encoding: .utf8) ?? "{}"
-        try fileService.writeText(text, to: path)
+        if backup {
+            try fileService.writeTextWithBackup(text, to: path, backupBaseName: URL(fileURLWithPath: fileService.expand(path: path)).lastPathComponent)
+        } else {
+            try fileService.writeText(text, to: path)
+        }
     }
 
     private func quotaCacheKey(
@@ -1403,6 +1752,20 @@ struct CodexProvider: Provider {
 
         let path = base.contains("/backend-api") ? "/wham/usage" : "/api/codex/usage"
         return URL(string: base + path) ?? URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+    }
+
+    private func resolveSubscriptionURL(codexHomePath: String?) -> URL {
+        let usageURL = resolveUsageURL(codexHomePath: codexHomePath)
+        let absolute = usageURL.absoluteString
+        if absolute.hasSuffix("/wham/usage") {
+            return URL(string: String(absolute.dropLast("/wham/usage".count)) + "/subscriptions")
+                ?? URL(string: "https://chatgpt.com/backend-api/subscriptions")!
+        }
+        if absolute.hasSuffix("/api/codex/usage") {
+            return URL(string: String(absolute.dropLast("/api/codex/usage".count)) + "/api/codex/subscriptions")
+                ?? URL(string: "https://chatgpt.com/backend-api/subscriptions")!
+        }
+        return URL(string: "https://chatgpt.com/backend-api/subscriptions")!
     }
 
     private func parseLastRefresh(_ raw: Any?) -> Date? {
@@ -1506,6 +1869,26 @@ struct CodexProvider: Provider {
         }
         return json["code"] as? String
     }
+
+#if DEBUG
+    func parseRateLimitPayloadForTesting(
+        _ payload: Any,
+        accountIdentifier: String? = "fixture@example.com",
+        planName: String? = nil,
+        accountValidUntil: Date? = nil,
+        subscriptionWillRenew: Bool? = nil,
+        subscriptionStatus: String? = nil
+    ) -> QuotaSnapshot? {
+        parseCodexRateLimitPayload(
+            payload,
+            fallbackAccountIdentifier: accountIdentifier,
+            fallbackPlanName: planName,
+            fallbackAccountValidUntil: accountValidUntil,
+            fallbackSubscriptionWillRenew: subscriptionWillRenew,
+            fallbackSubscriptionStatus: subscriptionStatus
+        )
+    }
+#endif
 
     private func parseCodexRateLimitPayload(
         _ payload: Any,
@@ -1743,6 +2126,157 @@ private struct CodexUsageIdentity {
     let email: String?
     let userID: String?
     let accountID: String?
+}
+
+private struct CodexDeviceAuthPrompt: Sendable {
+    let url: URL
+    let code: String
+}
+
+private final class CodexLoginFallbackURLScanner: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = ""
+    private var didFindURL = false
+
+    func append(_ data: Data) -> URL? {
+        guard !data.isEmpty,
+              let text = String(data: data, encoding: .utf8),
+              !text.isEmpty else {
+            return nil
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !didFindURL else { return nil }
+        buffer += text
+        if buffer.count > 8_000 {
+            buffer = String(buffer.suffix(8_000))
+        }
+
+        guard Self.containsBrowserOpenFailure(in: buffer),
+              let url = Self.extractFirstExternalLoginURL(from: buffer) else {
+            return nil
+        }
+
+        didFindURL = true
+        return url
+    }
+
+    private static func containsBrowserOpenFailure(in text: String) -> Bool {
+        let normalized = text.lowercased()
+        return normalized.contains("failed to open browser")
+            || normalized.contains("failed to open login url")
+            || normalized.contains("failed to open browser for login url")
+    }
+
+    private static func extractFirstExternalLoginURL(from text: String) -> URL? {
+        let pattern = #"https?://[^\s<>"']+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        let trailingPunctuation = CharacterSet(charactersIn: ".,;:)]}")
+
+        for match in regex.matches(in: text, range: range) {
+            guard let matchRange = Range(match.range, in: text) else { continue }
+            let rawURL = String(text[matchRange]).trimmingCharacters(in: trailingPunctuation)
+            guard let url = URL(string: rawURL),
+                  isExternalLoginURL(url) else {
+                continue
+            }
+            return url
+        }
+
+        return nil
+    }
+
+    private static func isExternalLoginURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased() else {
+            return false
+        }
+
+        if host == "localhost"
+            || host == "127.0.0.1"
+            || host == "::1"
+            || host.hasSuffix(".localhost") {
+            return false
+        }
+
+        return host == "auth.openai.com"
+            || host.hasSuffix(".auth.openai.com")
+            || host == "chatgpt.com"
+            || host.hasSuffix(".chatgpt.com")
+            || host == "openai.com"
+            || host.hasSuffix(".openai.com")
+    }
+}
+
+private final class CodexDeviceAuthPromptScanner: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = ""
+    private var didPresent = false
+
+    func append(_ data: Data) -> CodexDeviceAuthPrompt? {
+        guard !data.isEmpty,
+              let text = String(data: data, encoding: .utf8),
+              !text.isEmpty else {
+            return nil
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !didPresent else { return nil }
+        buffer += text.strippingANSIControlSequences()
+        if buffer.count > 8_000 {
+            buffer = String(buffer.suffix(8_000))
+        }
+
+        guard let url = Self.extractDeviceAuthURL(from: buffer),
+              let code = Self.extractDeviceCode(from: buffer) else {
+            return nil
+        }
+
+        didPresent = true
+        return CodexDeviceAuthPrompt(url: url, code: code)
+    }
+
+    private static func extractDeviceAuthURL(from text: String) -> URL? {
+        let pattern = #"https?://[^\s<>"']+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        let trailingPunctuation = CharacterSet(charactersIn: ".,;:)]}")
+
+        for match in regex.matches(in: text, range: range) {
+            guard let matchRange = Range(match.range, in: text) else { continue }
+            let rawURL = String(text[matchRange]).trimmingCharacters(in: trailingPunctuation)
+            guard let url = URL(string: rawURL),
+                  let host = url.host?.lowercased(),
+                  host == "auth.openai.com" || host.hasSuffix(".auth.openai.com") else {
+                continue
+            }
+            return url
+        }
+
+        return nil
+    }
+
+    private static func extractDeviceCode(from text: String) -> String? {
+        let pattern = #"\b[A-Z0-9]{4,6}-[A-Z0-9]{4,8}\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let matchRange = Range(match.range, in: text) else {
+            return nil
+        }
+        return String(text[matchRange])
+    }
 }
 
 extension CodexProvider {
@@ -2039,6 +2573,10 @@ extension CodexProvider {
                 .joined(separator: " ")
         }
 
+        if base.lowercased().contains("free") || base.lowercased() == "api" || base.lowercased().contains("api key") {
+            return base
+        }
+
         let cycleSource = [lower, rawCycle?.lowercased()].compactMap { $0 }.joined(separator: " ")
         if cycleSource.contains("annual")
             || cycleSource.contains("annually")
@@ -2082,6 +2620,70 @@ extension CodexProvider {
 }
 
 private extension String {
+    func strippingANSIControlSequences() -> String {
+        let escape = "\u{001B}"
+        return replacingOccurrences(
+            of: "\(escape)\\[[0-9;?]*[ -/]*[@-~]",
+            with: "",
+            options: .regularExpression
+        )
+    }
+
+    func singleLineCondensed(maxLength: Int) -> String {
+        let condensed = components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard condensed.count > maxLength else { return condensed }
+        return "\(condensed.prefix(maxLength))..."
+    }
+
+    func upsertingTopLevelTOMLString(key: String, value: String) -> String {
+        let assignment = "\(key) = \"\(value)\""
+        var lines = split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        var firstTableIndex: Int?
+        for index in lines.indices {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("[") {
+                firstTableIndex = index
+                break
+            }
+            guard trimmed.isEmpty == false,
+                  trimmed.hasPrefix("#") == false else {
+                continue
+            }
+            let parts = trimmed.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: true)
+            guard parts.count == 2 else { continue }
+            if parts[0].trimmingCharacters(in: .whitespacesAndNewlines) == key {
+                lines[index] = assignment
+                return lines.joined(separator: "\n").ensuringTrailingNewline()
+            }
+        }
+
+        if lines.isEmpty {
+            return "\(assignment)\n"
+        }
+
+        if let firstTableIndex {
+            lines.insert(assignment, at: firstTableIndex)
+            if firstTableIndex + 1 < lines.count,
+               lines[firstTableIndex + 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                lines.insert("", at: firstTableIndex + 1)
+            }
+            return lines.joined(separator: "\n").ensuringTrailingNewline()
+        }
+
+        if lines.last?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            lines.append("")
+        }
+        lines.append(assignment)
+        return lines.joined(separator: "\n").ensuringTrailingNewline()
+    }
+
+    func ensuringTrailingNewline() -> String {
+        hasSuffix("\n") ? self : "\(self)\n"
+    }
+
     func flatMapChatGPTBaseURL() -> String? {
         for rawLine in split(whereSeparator: \.isNewline) {
             let uncommented = rawLine

@@ -30,6 +30,12 @@ dist/
 *.log
 *.swp
 
+# Web app
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
 # Local git metadata backups
 .git.backup-*/
 

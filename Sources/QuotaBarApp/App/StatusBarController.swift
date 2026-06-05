@@ -1,10 +1,29 @@
 import AppKit
+import Combine
 import SwiftUI
+
+private final class DashboardPanel: NSPanel {
+    init() {
+        super.init(
+            contentRect: NSRect(origin: .zero, size: DashboardLayout.panelSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        isMovable = false
+        hidesOnDeactivate = false
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
 
 @MainActor
 final class StatusBarController: NSObject {
     private let statusItem: NSStatusItem
-    private let popover: NSPopover
+    private let dashboardPanel: DashboardPanel
     private var eventMonitor: Any?
     private let appState: AppState
     private let updateService = UpdateService()
@@ -16,11 +35,13 @@ final class StatusBarController: NSObject {
     private var updateProgressIndicator: NSProgressIndicator?
     private var updateProgressTitleLabel: NSTextField?
     private var updateProgressDetailLabel: NSTextField?
+    private var pendingPanelPresentationTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
 
     init(appState: AppState) {
         self.appState = appState
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        self.popover = NSPopover()
+        self.dashboardPanel = DashboardPanel()
         super.init()
 
         appState.registerUpdateActions(
@@ -36,9 +57,8 @@ final class StatusBarController: NSObject {
             }
         )
 
-        applyDebugUpdateBannerStateIfNeeded()
         configureStatusItem()
-        configurePopover()
+        configureDashboardPanel()
     }
 
     func shutdown() {
@@ -46,6 +66,9 @@ final class StatusBarController: NSObject {
             NSEvent.removeMonitor(eventMonitor)
             self.eventMonitor = nil
         }
+        pendingPanelPresentationTask?.cancel()
+        pendingPanelPresentationTask = nil
+        dashboardPanel.close()
     }
 
     func updateStatusTitle() {
@@ -73,25 +96,52 @@ final class StatusBarController: NSObject {
         button.target = self
     }
 
-    private func configurePopover() {
-        popover.behavior = .applicationDefined
-        popover.animates = true
-        popover.contentSize = NSSize(width: 430, height: 552)
+    private func configureDashboardPanel() {
+        let host = NSHostingController(
+            rootView: DashboardView(appState: appState)
+                .frame(width: DashboardLayout.panelWidth, height: DashboardLayout.fixedPanelHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        )
+        host.view.frame = NSRect(origin: .zero, size: DashboardLayout.panelSize)
+        host.preferredContentSize = DashboardLayout.panelSize
+        host.view.wantsLayer = true
+        host.view.layer?.cornerRadius = 12
+        host.view.layer?.cornerCurve = .continuous
+        host.view.layer?.masksToBounds = true
 
-        let host = NSHostingController(rootView: DashboardView(appState: appState))
-        popover.contentViewController = host
+        dashboardPanel.contentViewController = host
+        dashboardPanel.setContentSize(DashboardLayout.panelSize)
+        dashboardPanel.minSize = DashboardLayout.panelSize
+        dashboardPanel.maxSize = DashboardLayout.panelSize
+        dashboardPanel.isReleasedWhenClosed = false
+        dashboardPanel.isOpaque = false
+        dashboardPanel.backgroundColor = .clear
+        dashboardPanel.hasShadow = true
+        dashboardPanel.level = .statusBar
+        dashboardPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.popover.isShown else { return }
-                self.popover.performClose(nil)
+                guard let self, self.dashboardPanel.isVisible else { return }
+                self.dashboardPanel.close()
             }
         }
+
+        appState.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.dashboardPanel.isVisible else { return }
+                self.updateDashboardPanelSize()
+                DispatchQueue.main.async { [weak self] in
+                    self?.updateDashboardPanelSize()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     @objc private func handleStatusItemClick(_ sender: AnyObject?) {
         guard let event = NSApp.currentEvent else {
-            togglePopover(sender)
+            toggleDashboardPanel(sender)
             return
         }
 
@@ -100,18 +150,69 @@ final class StatusBarController: NSObject {
             return
         }
 
-        togglePopover(sender)
+        toggleDashboardPanel(sender)
     }
 
-    @objc private func togglePopover(_ sender: AnyObject?) {
+    @objc private func toggleDashboardPanel(_ sender: AnyObject?) {
         guard let button = statusItem.button else { return }
 
-        if popover.isShown {
-            popover.performClose(sender)
+        if dashboardPanel.isVisible {
+            pendingPanelPresentationTask?.cancel()
+            pendingPanelPresentationTask = nil
+            dashboardPanel.close()
         } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            NSApp.activate(ignoringOtherApps: true)
+            pendingPanelPresentationTask?.cancel()
+            pendingPanelPresentationTask = Task { [weak self] in
+                guard let self else { return }
+                await appState.prepareSelectedToolForDashboardPresentation()
+                guard !Task.isCancelled else { return }
+                self.presentDashboardPanel(relativeTo: button)
+            }
         }
+    }
+
+    private func updateDashboardPanelSize() {
+        dashboardPanel.setContentSize(DashboardLayout.panelSize)
+        dashboardPanel.contentViewController?.view.frame = NSRect(origin: .zero, size: DashboardLayout.panelSize)
+        dashboardPanel.contentViewController?.preferredContentSize = DashboardLayout.panelSize
+    }
+
+    private func presentDashboardPanel(relativeTo button: NSStatusBarButton) {
+        updateDashboardPanelSize()
+        dashboardPanel.setFrame(dashboardPanelFrame(relativeTo: button), display: false)
+        dashboardPanel.makeKeyAndOrderFront(nil)
+        updateDashboardPanelSize()
+        DispatchQueue.main.async { [weak self] in
+            self?.updateDashboardPanelSize()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        pendingPanelPresentationTask = nil
+    }
+
+    private func dashboardPanelFrame(relativeTo button: NSStatusBarButton) -> NSRect {
+        let statusFrame: NSRect
+        if let window = button.window {
+            statusFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
+        } else {
+            statusFrame = NSRect(
+                x: NSScreen.main?.visibleFrame.midX ?? 0,
+                y: NSScreen.main?.visibleFrame.maxY ?? 0,
+                width: NSStatusItem.squareLength,
+                height: NSStatusItem.squareLength
+            )
+        }
+
+        let screen = NSScreen.screens.first { $0.frame.intersects(statusFrame) } ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let panelSize = DashboardLayout.panelSize
+        let margin: CGFloat = 8
+        let gap: CGFloat = 6
+
+        var originX = statusFrame.midX - panelSize.width / 2
+        originX = min(max(originX, visibleFrame.minX + margin), visibleFrame.maxX - panelSize.width - margin)
+
+        let originY = max(visibleFrame.minY + margin, statusFrame.minY - panelSize.height - gap)
+        return NSRect(origin: NSPoint(x: originX, y: originY), size: panelSize)
     }
 
     private func applyMenuBarIcon(to button: NSStatusBarButton) {
@@ -129,8 +230,8 @@ final class StatusBarController: NSObject {
     }
 
     private func showContextMenu() {
-        if popover.isShown {
-            popover.performClose(nil)
+        if dashboardPanel.isVisible {
+            dashboardPanel.close()
         }
 
         let menu = NSMenu()
@@ -220,36 +321,6 @@ final class StatusBarController: NSObject {
         }
         appState.setLanguage(language)
         updateStatusTitle()
-    }
-
-    private func applyDebugUpdateBannerStateIfNeeded() {
-        let environment = ProcessInfo.processInfo.environment
-        guard let rawState = environment["QUOTABAR_DEBUG_UPDATE_STATE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-            !rawState.isEmpty else {
-            return
-        }
-
-        let version = environment["QUOTABAR_DEBUG_UPDATE_VERSION"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedVersion = version?.isEmpty == false ? version! : "1.0.2"
-
-        switch rawState {
-        case "available":
-            appState.updateBannerState = .available(version: resolvedVersion)
-        case "checking":
-            appState.updateBannerState = .checking
-        case "downloading":
-            let rawProgress = environment["QUOTABAR_DEBUG_UPDATE_PROGRESS"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let progress = rawProgress.flatMap(Double.init).map { min(max($0, 0), 1) }
-            appState.updateBannerState = .downloading(progress: progress)
-        case "installing":
-            appState.updateBannerState = .installing
-        default:
-            break
-        }
     }
 
     private func showUpdateResult(_ result: UpdateCheckResult) {

@@ -159,16 +159,9 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
     }
 
     var statusBarMetric: QuotaDisplayMetric? {
-        if let primary, primary.limit > 0 {
-            return .window(primary)
+        orderedMetrics.min { lhs, rhs in
+            (lhs.ratio ?? .infinity) < (rhs.ratio ?? .infinity)
         }
-        if let secondary, secondary.limit > 0 {
-            return .window(secondary)
-        }
-        if let creditsRemaining, let creditsTotal, creditsTotal > 0 {
-            return .credits(remaining: creditsRemaining, total: creditsTotal, periodEnd: periodEnd)
-        }
-        return nil
     }
 
     var orderedMetrics: [QuotaDisplayMetric] {

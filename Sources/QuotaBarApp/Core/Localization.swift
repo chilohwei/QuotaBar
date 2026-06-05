@@ -84,12 +84,11 @@ enum AppString: String {
     case quit
     case refresh
     case refreshing
+    case recommended
     case restartRequiredTitle
     case show
     case statusBarNoData
     case staleData
-    case switchAccount
-    case syncAccount
     case upToDateTitle
     case updateAvailableTitle
     case updateCheckFailedTitle
@@ -111,15 +110,6 @@ struct AppText {
         }
     }
 
-    func usagePanelTitle(tool: ToolKind) -> String {
-        switch language {
-        case .english:
-            return "\(tool.displayName) Usage"
-        case .simplifiedChinese, .traditionalChinese:
-            return "\(tool.displayName) 用量"
-        }
-    }
-
     var usageHeadline: String {
         switch language {
         case .english:
@@ -129,14 +119,15 @@ struct AppText {
         }
     }
 
-    func accountCount(_ count: Int) -> String {
+    func dashboardStats(count: Int, available: Int) -> String {
         switch language {
         case .english:
-            return count == 1 ? "1 account" : "\(count) accounts"
+            let accountText = count == 1 ? "1 account" : "\(count) accounts"
+            return "\(accountText) · \(available) available"
         case .simplifiedChinese:
-            return "\(count) 个账号"
+            return "\(count) 个账号 · \(available) 个可用"
         case .traditionalChinese:
-            return "\(count) 個帳號"
+            return "\(count) 個帳號 · \(available) 個可用"
         }
     }
 
@@ -168,17 +159,6 @@ struct AppText {
             return language == .english ? "Monthly" : (language == .traditionalChinese ? "月度" : "月度")
         case .annual:
             return language == .english ? "Annual" : (language == .traditionalChinese ? "年度" : "年度")
-        }
-    }
-
-    func subtitle(count: Int, activeName: String) -> String {
-        switch language {
-        case .english:
-            return "\(count) accounts, active \(activeName)"
-        case .simplifiedChinese:
-            return "\(count) 个账号，当前使用 \(activeName)"
-        case .traditionalChinese:
-            return "\(count) 個帳號，目前使用 \(activeName)"
         }
     }
 
@@ -428,12 +408,11 @@ struct AppText {
             .quit: "退出",
             .refresh: "刷新",
             .refreshing: "刷新中",
+            .recommended: "推荐",
             .restartRequiredTitle: "重启后生效",
             .show: "显示",
             .statusBarNoData: "QuotaBar",
             .staleData: "旧数据",
-            .switchAccount: "切换",
-            .syncAccount: "同步",
             .upToDateTitle: "已是最新版本",
             .updateAvailableTitle: "发现新版本",
             .updateCheckFailedTitle: "检查更新失败",
@@ -475,12 +454,11 @@ struct AppText {
             .quit: "退出",
             .refresh: "刷新",
             .refreshing: "刷新中",
+            .recommended: "推薦",
             .restartRequiredTitle: "重啟後生效",
             .show: "顯示",
             .statusBarNoData: "QuotaBar",
             .staleData: "舊資料",
-            .switchAccount: "切換",
-            .syncAccount: "同步",
             .upToDateTitle: "已是最新版本",
             .updateAvailableTitle: "發現新版本",
             .updateCheckFailedTitle: "檢查更新失敗",
@@ -522,12 +500,11 @@ struct AppText {
             .quit: "Quit",
             .refresh: "Refresh",
             .refreshing: "Refreshing",
+            .recommended: "Recommended",
             .restartRequiredTitle: "Restart required",
             .show: "Show",
             .statusBarNoData: "QuotaBar",
             .staleData: "Stale",
-            .switchAccount: "Switch",
-            .syncAccount: "Sync",
             .upToDateTitle: "Up to Date",
             .updateAvailableTitle: "Update Available",
             .updateCheckFailedTitle: "Update Check Failed",

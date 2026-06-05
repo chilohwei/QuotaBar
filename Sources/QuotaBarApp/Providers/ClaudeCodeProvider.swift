@@ -89,37 +89,15 @@ struct ClaudeCodeProvider: Provider {
         if let latest = try? await readClaudeCodeCredentials(),
            latest.loggedIn,
            claudeCredentialsRepresentSameAccount(latest, storedCredentials) {
-            try installQuotaBarStatusLine()
             credentials = mergeCredentials(preferred: latest, fallback: storedCredentials)
-            canUseLiveStatus = true
+            canUseLiveStatus = quotaBarStatusLineIsInstalled(settingsJSON: latest.claudeSettingsJSON)
         } else {
             credentials = storedCredentials
             canUseLiveStatus = false
         }
 
         let status = canUseLiveStatus ? (try? loadStatusLineSnapshot()) : nil
-        let primary = makeWindow(status: status, key: "five_hour", label: "5h")
-        let secondary = makeWindow(status: status, key: "seven_day", label: "7d")
-        let tertiary = makeContextWindow(status: status)
-        let note = statusNote(status: status, credentials: credentials)
-        let subscription = subscriptionInfo(status: status, credentials: credentials)
-
-        return QuotaSnapshot(
-            source: status == nil ? "Claude Code" : "Claude Code StatusLine",
-            accountIdentifier: readableIdentity(from: credentials),
-            planName: planName(credentials: credentials, status: status),
-            primary: primary,
-            secondary: secondary,
-            tertiary: tertiary,
-            creditsRemaining: nil,
-            creditsTotal: nil,
-            updatedAt: .init(),
-            accountValidUntil: subscription.accountValidUntil,
-            subscriptionWillRenew: subscription.willRenew,
-            subscriptionStatus: subscription.status,
-            isQuotaBlocked: isQuotaBlocked(primary: primary, secondary: secondary),
-            note: note
-        )
+        return makeQuotaSnapshot(status: status, credentials: credentials)
     }
 
     func recoverSecret(for account: Account) async throws -> String? {
@@ -469,6 +447,58 @@ struct ClaudeCodeProvider: Provider {
             used: min(max(usedPercentage, 0), 100),
             limit: 100,
             resetAt: nil
+        )
+    }
+
+#if DEBUG
+    func parseStatusLineSnapshotForTesting(
+        _ status: [String: Any],
+        authMethod: String? = "oauth",
+        apiProvider: String? = "firstParty",
+        userID: String? = "fixture-user",
+        authStatusJSON: String? = nil,
+        claudeSettingsJSON: String? = nil,
+        keychainCredentials: String? = nil
+    ) -> QuotaSnapshot {
+        let credentials = ClaudeCodeCredentials(
+            loggedIn: true,
+            authMethod: authMethod,
+            apiProvider: apiProvider,
+            userID: userID,
+            claudeExecutablePath: nil,
+            keychainCredentials: keychainCredentials,
+            authStatusJSON: authStatusJSON,
+            claudeSettingsJSON: claudeSettingsJSON,
+            claudeJSON: nil,
+            claudeCredentialsJSON: nil,
+            claudeAuthJSON: nil
+        )
+        return makeQuotaSnapshot(status: status, credentials: credentials)
+    }
+#endif
+
+    private func makeQuotaSnapshot(status: [String: Any]?, credentials: ClaudeCodeCredentials) -> QuotaSnapshot {
+        let primary = makeWindow(status: status, key: "five_hour", label: "5h")
+        let secondary = makeWindow(status: status, key: "seven_day", label: "7d")
+        let tertiary = makeContextWindow(status: status)
+        let note = statusNote(status: status, credentials: credentials)
+        let subscription = subscriptionInfo(status: status, credentials: credentials)
+
+        return QuotaSnapshot(
+            source: status == nil ? "Claude Code" : "Claude Code StatusLine",
+            accountIdentifier: readableIdentity(from: credentials),
+            planName: planName(credentials: credentials, status: status),
+            primary: primary,
+            secondary: secondary,
+            tertiary: tertiary,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: .init(),
+            accountValidUntil: subscription.accountValidUntil,
+            subscriptionWillRenew: subscription.willRenew,
+            subscriptionStatus: subscription.status,
+            isQuotaBlocked: isQuotaBlocked(primary: primary, secondary: secondary),
+            note: note
         )
     }
 
@@ -987,30 +1017,58 @@ struct ClaudeCodeProvider: Provider {
 }
 
 private extension ClaudeCodeProvider {
-    func installQuotaBarStatusLine() throws {
+    struct StatusLineInstallPaths {
+        let claudeDirectory: URL
+        let wrapperURL: URL
+        let originalURL: URL
+        let settingsURL: URL
+    }
+
+    var quotaBarStatusLineCommand: String {
+        "~/.claude/quotabar-statusline.zsh"
+    }
+
+    func statusLineInstallPaths() -> StatusLineInstallPaths {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let claudeDirectory = home.appendingPathComponent(".claude", isDirectory: true)
-        let wrapperURL = claudeDirectory.appendingPathComponent("quotabar-statusline.zsh")
-        let originalURL = claudeDirectory.appendingPathComponent("quotabar-statusline-original.json")
-        let settingsURL = claudeDirectory.appendingPathComponent("settings.json")
-        let wrapperCommand = "~/.claude/quotabar-statusline.zsh"
+        return StatusLineInstallPaths(
+            claudeDirectory: claudeDirectory,
+            wrapperURL: claudeDirectory.appendingPathComponent("quotabar-statusline.zsh"),
+            originalURL: claudeDirectory.appendingPathComponent("quotabar-statusline-original.json"),
+            settingsURL: claudeDirectory.appendingPathComponent("settings.json")
+        )
+    }
 
-        try FileManager.default.createDirectory(at: claudeDirectory, withIntermediateDirectories: true)
-        try writeStatusLineWrapper(to: wrapperURL, originalURL: originalURL)
+    func quotaBarStatusLineIsInstalled(settingsJSON: String?) -> Bool {
+        guard let settingsJSON,
+              let data = settingsJSON.data(using: .utf8),
+              let settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let statusLine = settings["statusLine"] as? [String: Any],
+              statusLine["command"] as? String == quotaBarStatusLineCommand else {
+            return false
+        }
+        return FileManager.default.isExecutableFile(atPath: statusLineInstallPaths().wrapperURL.path)
+    }
 
-        var settings = try loadSettings(from: settingsURL)
+    func installQuotaBarStatusLine() throws {
+        let paths = statusLineInstallPaths()
+
+        try FileManager.default.createDirectory(at: paths.claudeDirectory, withIntermediateDirectories: true)
+        try writeStatusLineWrapper(to: paths.wrapperURL, originalURL: paths.originalURL)
+
+        var settings = try loadSettings(from: paths.settingsURL)
         let currentStatusLine = settings["statusLine"] as? [String: Any]
         let currentCommand = currentStatusLine?["command"] as? String
-        if currentCommand != wrapperCommand {
-            try writeJSONObject(currentStatusLine ?? [:], to: originalURL)
+        if currentCommand != quotaBarStatusLineCommand {
+            try writeJSONObjectIfChanged(currentStatusLine ?? [:], to: paths.originalURL)
         }
 
         var nextStatusLine = currentStatusLine ?? [:]
         nextStatusLine["type"] = "command"
-        nextStatusLine["command"] = wrapperCommand
+        nextStatusLine["command"] = quotaBarStatusLineCommand
         nextStatusLine["refreshInterval"] = nextStatusLine["refreshInterval"] ?? 30
         settings["statusLine"] = nextStatusLine
-        try writeJSONObject(settings, to: settingsURL)
+        try writeJSONObjectIfChanged(settings, to: paths.settingsURL)
     }
 
     func loadSettings(from url: URL) throws -> [String: Any] {
@@ -1022,7 +1080,15 @@ private extension ClaudeCodeProvider {
         return settings
     }
 
-    func writeJSONObject(_ object: Any, to url: URL) throws {
+    func writeJSONObjectIfChanged(_ object: Any, to url: URL) throws {
+        let canonicalData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        if let currentData = try? Data(contentsOf: url),
+           let currentObject = try? JSONSerialization.jsonObject(with: currentData),
+           let currentCanonicalData = try? JSONSerialization.data(withJSONObject: currentObject, options: [.sortedKeys]),
+           currentCanonicalData == canonicalData {
+            return
+        }
+
         let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
@@ -1084,9 +1150,26 @@ private extension ClaudeCodeProvider {
         PY
         """
 
+        try writeTextIfChanged(script, to: url)
+        try setPosixPermissionsIfNeeded(0o700, for: url)
+    }
+
+    func writeTextIfChanged(_ text: String, to url: URL) throws {
+        if let current = try? String(contentsOf: url, encoding: .utf8),
+           current == text {
+            return
+        }
+
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try script.write(to: url, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    func setPosixPermissionsIfNeeded(_ permissions: Int, for url: URL) throws {
+        let current = try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        if current?.intValue == permissions {
+            return
+        }
+        try FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
     }
 
     func shellQuoted(_ value: String) -> String {
