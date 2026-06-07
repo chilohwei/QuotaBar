@@ -1,9 +1,16 @@
 import Foundation
 
+enum AccountRecommendationStrategy: String, CaseIterable, Identifiable, Sendable {
+    case preventWaste
+    case maximizeAvailability
+
+    var id: String { rawValue }
+}
+
 struct AccountListPresenter {
     private enum RecommendationPolicy {
         static let expiringSoonInterval: TimeInterval = 30 * 24 * 60 * 60
-        static let substantialRemainingRatio = 0.35
+        static let deadlineBucketInterval: TimeInterval = 60 * 60
     }
 
     static func visibleAccounts(
@@ -12,14 +19,16 @@ struct AccountListPresenter {
         activeID: UUID?,
         quotaByAccount: [UUID: QuotaSnapshot],
         loadStateByAccount: [UUID: AccountLoadState],
-        frozenOrder: [UUID]?
+        frozenOrder: [UUID]?,
+        recommendationStrategy: AccountRecommendationStrategy = .preventWaste
     ) -> [Account] {
         let sortedAccounts = sortedForStableDisplay(
             accounts,
             activeID: activeID,
             quotaByAccount: quotaByAccount,
             loadStateByAccount: loadStateByAccount,
-            frozenOrder: frozenOrder
+            frozenOrder: frozenOrder,
+            recommendationStrategy: recommendationStrategy
         )
 
         switch filter {
@@ -41,7 +50,8 @@ struct AccountListPresenter {
         accounts: [Account],
         activeID: UUID?,
         quotaByAccount: [UUID: QuotaSnapshot],
-        loadStateByAccount: [UUID: AccountLoadState]
+        loadStateByAccount: [UUID: AccountLoadState],
+        recommendationStrategy: AccountRecommendationStrategy = .preventWaste
     ) -> UUID? {
         let entries = sortEntries(
             accounts,
@@ -53,10 +63,30 @@ struct AccountListPresenter {
         return entries
             .filter(\.isAvailable)
             .filter { $0.dataQualityRank != .failed && $0.dataQualityRank != .unknown }
-            .sorted(by: recommendationPrecedes)
+            .sorted {
+                recommendationPrecedes($0, $1, strategy: recommendationStrategy)
+            }
             .first?
             .account
             .id
+    }
+
+    static func recommendationReasonStrategy(
+        for account: Account,
+        quotaByAccount: [UUID: QuotaSnapshot],
+        recommendationStrategy: AccountRecommendationStrategy
+    ) -> AccountRecommendationStrategy {
+        guard recommendationStrategy == .preventWaste else {
+            return .maximizeAvailability
+        }
+
+        let wasteDeadline = wasteDeadlineDate(account, quotaByAccount: quotaByAccount)
+        let snapshotUpdatedAt = snapshotUpdatedAtDate(account, quotaByAccount: quotaByAccount)
+        let secondsUntilDeadline = secondsUntilWasteDeadline(
+            wasteDeadline: wasteDeadline,
+            snapshotUpdatedAt: snapshotUpdatedAt
+        )
+        return isWasteDeadlineCandidate(secondsUntilDeadline) ? .preventWaste : .maximizeAvailability
     }
 
     static func isAccountAvailable(
@@ -96,7 +126,8 @@ struct AccountListPresenter {
         activeID: UUID?,
         quotaByAccount: [UUID: QuotaSnapshot],
         loadStateByAccount: [UUID: AccountLoadState],
-        frozenOrder: [UUID]?
+        frozenOrder: [UUID]?,
+        recommendationStrategy: AccountRecommendationStrategy
     ) -> [Account] {
         let entries = sortEntries(
             accounts,
@@ -126,7 +157,7 @@ struct AccountListPresenter {
                 return lhs.isActive
             }
 
-            return recommendationPrecedes(lhs, rhs)
+            return recommendationPrecedes(lhs, rhs, strategy: recommendationStrategy)
         }.map(\.account)
     }
 
@@ -142,10 +173,10 @@ struct AccountListPresenter {
         )
         let entries = accounts.map { account in
             let bottleneckRatio = bottleneckRemainingRatio(account, quotaByAccount: quotaByAccount)
-            let accountValidUntil = accountValidUntilDate(account, quotaByAccount: quotaByAccount)
+            let wasteDeadline = wasteDeadlineDate(account, quotaByAccount: quotaByAccount)
             let snapshotUpdatedAt = snapshotUpdatedAtDate(account, quotaByAccount: quotaByAccount)
-            let secondsUntilExpiry = secondsUntilExpiry(
-                accountValidUntil: accountValidUntil,
+            let secondsUntilWasteDeadline = secondsUntilWasteDeadline(
+                wasteDeadline: wasteDeadline,
                 snapshotUpdatedAt: snapshotUpdatedAt
             )
             return SortEntry(
@@ -163,14 +194,10 @@ struct AccountListPresenter {
                     quotaByAccount: quotaByAccount,
                     loadStateByAccount: loadStateByAccount
                 ),
-                isExpiringQuotaCandidate: isExpiringQuotaCandidate(
-                    bottleneckRatio: bottleneckRatio,
-                    secondsUntilExpiry: secondsUntilExpiry
-                ),
                 bottleneckRatio: bottleneckRatio,
                 earliestReset: earliestResetDate(account, quotaByAccount: quotaByAccount),
-                accountValidUntil: accountValidUntil,
-                secondsUntilExpiry: secondsUntilExpiry,
+                wasteDeadline: wasteDeadline,
+                secondsUntilWasteDeadline: secondsUntilWasteDeadline,
                 snapshotUpdatedAt: snapshotUpdatedAt
             )
         }
@@ -178,7 +205,11 @@ struct AccountListPresenter {
         return entries
     }
 
-    private static func recommendationPrecedes(_ lhs: SortEntry, _ rhs: SortEntry) -> Bool {
+    private static func recommendationPrecedes(
+        _ lhs: SortEntry,
+        _ rhs: SortEntry,
+        strategy: AccountRecommendationStrategy
+    ) -> Bool {
         if lhs.isAvailable != rhs.isAvailable {
             return lhs.isAvailable
         }
@@ -192,35 +223,16 @@ struct AccountListPresenter {
                 return lhs.dataQualityRank < rhs.dataQualityRank
             }
 
-            if lhs.isExpiringQuotaCandidate != rhs.isExpiringQuotaCandidate {
-                return lhs.isExpiringQuotaCandidate
-            }
-
-            if lhs.isExpiringQuotaCandidate, rhs.isExpiringQuotaCandidate {
-                let lhsExpiryBucket = expiryUrgencyBucket(lhs.secondsUntilExpiry)
-                let rhsExpiryBucket = expiryUrgencyBucket(rhs.secondsUntilExpiry)
-                if lhsExpiryBucket != rhsExpiryBucket {
-                    return lhsExpiryBucket < rhsExpiryBucket
+            switch strategy {
+            case .preventWaste:
+                if let decision = wasteDeadlineDecision(lhs, rhs) {
+                    return decision
                 }
+            case .maximizeAvailability:
+                break
             }
 
-            let lhsBucket = remainingBucket(lhs.bottleneckRatio)
-            let rhsBucket = remainingBucket(rhs.bottleneckRatio)
-            if lhsBucket != rhsBucket {
-                return lhsBucket > rhsBucket
-            }
-
-            if lhs.isActive != rhs.isActive {
-                return lhs.isActive
-            }
-
-            if lhs.bottleneckRatio != rhs.bottleneckRatio {
-                return lhs.bottleneckRatio > rhs.bottleneckRatio
-            }
-
-            if lhs.accountValidUntil != rhs.accountValidUntil {
-                return lhs.accountValidUntil > rhs.accountValidUntil
-            }
+            return availabilityDecision(lhs, rhs)
         } else if lhs.earliestReset != rhs.earliestReset {
             return lhs.earliestReset < rhs.earliestReset
         }
@@ -232,21 +244,101 @@ struct AccountListPresenter {
         return lhs.account.createdAt < rhs.account.createdAt
     }
 
-    private static func isExpiringQuotaCandidate(bottleneckRatio: Double, secondsUntilExpiry: TimeInterval) -> Bool {
-        guard bottleneckRatio >= RecommendationPolicy.substantialRemainingRatio else { return false }
-        guard secondsUntilExpiry > 0 else { return false }
-        return secondsUntilExpiry <= RecommendationPolicy.expiringSoonInterval
+    private static func wasteDeadlineDecision(_ lhs: SortEntry, _ rhs: SortEntry) -> Bool? {
+        if lhs.isWasteDeadlineCandidate != rhs.isWasteDeadlineCandidate {
+            return lhs.isWasteDeadlineCandidate
+        }
+
+        guard lhs.isWasteDeadlineCandidate, rhs.isWasteDeadlineCandidate else {
+            return nil
+        }
+
+        let lhsBucket = wasteDeadlineBucket(lhs.secondsUntilWasteDeadline)
+        let rhsBucket = wasteDeadlineBucket(rhs.secondsUntilWasteDeadline)
+        if lhsBucket != rhsBucket {
+            return lhsBucket < rhsBucket
+        }
+
+        if lhs.isActive != rhs.isActive {
+            return lhs.isActive
+        }
+
+        let lhsRemainingBucket = remainingBucket(lhs.bottleneckRatio)
+        let rhsRemainingBucket = remainingBucket(rhs.bottleneckRatio)
+        if lhsRemainingBucket != rhsRemainingBucket {
+            return lhsRemainingBucket > rhsRemainingBucket
+        }
+
+        if lhs.bottleneckRatio != rhs.bottleneckRatio {
+            return lhs.bottleneckRatio > rhs.bottleneckRatio
+        }
+
+        if lhs.wasteDeadline != rhs.wasteDeadline {
+            return lhs.wasteDeadline < rhs.wasteDeadline
+        }
+
+        return nil
     }
 
-    private static func secondsUntilExpiry(accountValidUntil: Date, snapshotUpdatedAt: Date) -> TimeInterval {
-        guard accountValidUntil != .distantFuture else { return .infinity }
+    private static func availabilityDecision(_ lhs: SortEntry, _ rhs: SortEntry) -> Bool {
+        let lhsBucket = remainingBucket(lhs.bottleneckRatio)
+        let rhsBucket = remainingBucket(rhs.bottleneckRatio)
+        if lhsBucket != rhsBucket {
+            return lhsBucket > rhsBucket
+        }
+
+        if lhs.isActive != rhs.isActive {
+            return lhs.isActive
+        }
+
+        if lhs.bottleneckRatio != rhs.bottleneckRatio {
+            return lhs.bottleneckRatio > rhs.bottleneckRatio
+        }
+
+        if lhs.wasteDeadline != rhs.wasteDeadline {
+            return lhs.wasteDeadline < rhs.wasteDeadline
+        }
+
+        if lhs.snapshotUpdatedAt != rhs.snapshotUpdatedAt {
+            return lhs.snapshotUpdatedAt > rhs.snapshotUpdatedAt
+        }
+
+        return lhs.account.createdAt < rhs.account.createdAt
+    }
+
+    private static func wasteDeadlineDate(
+        _ account: Account,
+        quotaByAccount: [UUID: QuotaSnapshot]
+    ) -> Date {
+        guard let quota = quotaByAccount[account.id] else { return .distantFuture }
+
+        var dates = quota.orderedMetrics.compactMap { metric -> Date? in
+            guard let ratio = metric.ratio, ratio > 0.001 else { return nil }
+            return metric.resetAt
+        }
+        if let accountValidUntil = quota.accountValidUntil {
+            dates.append(accountValidUntil)
+        }
+        return dates.min() ?? .distantFuture
+    }
+
+    private static func secondsUntilWasteDeadline(
+        wasteDeadline: Date,
+        snapshotUpdatedAt: Date
+    ) -> TimeInterval {
+        guard wasteDeadline != .distantFuture else { return .infinity }
         let reference = snapshotUpdatedAt == .distantPast ? Date() : snapshotUpdatedAt
-        return accountValidUntil.timeIntervalSince(reference)
+        return wasteDeadline.timeIntervalSince(reference)
     }
 
-    private static func expiryUrgencyBucket(_ seconds: TimeInterval) -> Int {
+    private static func wasteDeadlineBucket(_ seconds: TimeInterval) -> Int {
         guard seconds.isFinite, seconds > 0 else { return Int.max }
-        return Int((seconds / (24 * 60 * 60)).rounded(.down))
+        return Int((seconds / RecommendationPolicy.deadlineBucketInterval).rounded(.down))
+    }
+
+    private static func isWasteDeadlineCandidate(_ seconds: TimeInterval) -> Bool {
+        guard seconds.isFinite, seconds > 0 else { return false }
+        return seconds <= RecommendationPolicy.expiringSoonInterval
     }
 
     private static func remainingBucket(_ ratio: Double) -> Int {
@@ -325,13 +417,6 @@ struct AccountListPresenter {
         return quota.orderedMetrics.compactMap(\.resetAt).min() ?? .distantFuture
     }
 
-    private static func accountValidUntilDate(
-        _ account: Account,
-        quotaByAccount: [UUID: QuotaSnapshot]
-    ) -> Date {
-        quotaByAccount[account.id]?.accountValidUntil ?? .distantFuture
-    }
-
     private static func snapshotUpdatedAtDate(
         _ account: Account,
         quotaByAccount: [UUID: QuotaSnapshot]
@@ -346,12 +431,15 @@ struct AccountListPresenter {
         let isAvailable: Bool
         let availabilityRank: AvailabilityRank
         let dataQualityRank: DataQualityRank
-        let isExpiringQuotaCandidate: Bool
         let bottleneckRatio: Double
         let earliestReset: Date
-        let accountValidUntil: Date
-        let secondsUntilExpiry: TimeInterval
+        let wasteDeadline: Date
+        let secondsUntilWasteDeadline: TimeInterval
         let snapshotUpdatedAt: Date
+
+        var isWasteDeadlineCandidate: Bool {
+            AccountListPresenter.isWasteDeadlineCandidate(secondsUntilWasteDeadline)
+        }
     }
 
     private enum AvailabilityRank: Int, Comparable {

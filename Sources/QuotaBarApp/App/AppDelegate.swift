@@ -26,6 +26,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusBarController?.updateStatusTitle()
             }
             .store(in: &cancellables)
+
+        appState.$isStatusBarQuotaTextEnabled
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                self?.statusBarController?.updateStatusTitle()
+            }
+            .store(in: &cancellables)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -36,6 +36,7 @@ final class StatusBarController: NSObject {
     private var updateProgressTitleLabel: NSTextField?
     private var updateProgressDetailLabel: NSTextField?
     private var pendingPanelPresentationTask: Task<Void, Never>?
+    private var statusBarContentView: StatusBarQuotaContentView?
     private var cancellables = Set<AnyCancellable>()
 
     init(appState: AppState) {
@@ -56,6 +57,14 @@ final class StatusBarController: NSObject {
                 }
             }
         )
+        appState.registerLaunchAtLoginActions(
+            isEnabled: { [weak self] in
+                self?.launchAtLoginService.isEnabled ?? false
+            },
+            setEnabled: { [weak self] enabled in
+                self?.setLaunchAtLoginEnabled(enabled)
+            }
+        )
 
         configureStatusItem()
         configureDashboardPanel()
@@ -74,18 +83,77 @@ final class StatusBarController: NSObject {
     func updateStatusTitle() {
         guard let button = statusItem.button else { return }
 
+        var display: StatusBarQuotaDisplay?
         if let active = appState.activeAccount(for: appState.selectedTool),
            let quota = appState.quotaByAccount[active.id],
            let remainingRatio = statusBarRemainingRatio(from: quota) {
             let remaining = Int(max(remainingRatio * 100, 0).rounded())
-            button.toolTip = appState.text.statusBarTooltip(tool: appState.selectedTool, remainingPercent: remaining)
+            if appState.isStatusBarQuotaTextEnabled {
+                display = statusBarQuotaDisplay(tool: active.tool, quota: quota)
+            }
+            button.toolTip = appState.text.statusBarTooltip(
+                tool: appState.selectedTool,
+                remainingPercent: remaining,
+                accountName: active.name
+            )
         } else {
             button.toolTip = appState.text.string(.statusBarNoData)
         }
+        button.contentTintColor = nil
+        statusBarContentView?.configure(display: display)
+        statusItem.length = display?.preferredStatusItemLength ?? NSStatusItem.squareLength
+        button.setAccessibilityLabel(button.toolTip ?? appState.text.string(.statusBarNoData))
     }
 
     private func statusBarRemainingRatio(from quota: QuotaSnapshot) -> Double? {
         quota.statusBarMetric?.ratio
+    }
+
+    private func statusBarQuotaDisplay(tool: ToolKind, quota: QuotaSnapshot) -> StatusBarQuotaDisplay? {
+        switch tool {
+        case .codex:
+            return makeStatusBarQuotaDisplay(
+                top: quota.primaryPanelMetric,
+                bottom: quota.secondaryPanelMetric
+            )
+        case .cursor:
+            return makeStatusBarQuotaDisplay(
+                top: cursorCurrentMetric(from: quota),
+                bottom: quota.primaryPanelMetric
+            )
+        case .claudeCode:
+            return makeStatusBarQuotaDisplay(
+                top: quota.primaryPanelMetric ?? quota.tertiaryPanelMetric,
+                bottom: quota.secondaryPanelMetric
+            )
+        }
+    }
+
+    private func cursorCurrentMetric(from quota: QuotaSnapshot) -> QuotaDisplayMetric? {
+        [quota.secondaryPanelMetric, quota.tertiaryPanelMetric]
+            .compactMap { $0 }
+            .min { lhs, rhs in
+                (lhs.ratio ?? .infinity) < (rhs.ratio ?? .infinity)
+            } ?? quota.statusBarMetric
+    }
+
+    private func makeStatusBarQuotaDisplay(
+        top: QuotaDisplayMetric?,
+        bottom: QuotaDisplayMetric?
+    ) -> StatusBarQuotaDisplay? {
+        let resolvedTop = top ?? bottom
+        let resolvedBottom = bottom == resolvedTop ? nil : bottom
+        guard let topValue = quotaValue(for: resolvedTop) else { return nil }
+        return StatusBarQuotaDisplay(
+            top: topValue,
+            bottom: quotaValue(for: resolvedBottom)
+        )
+    }
+
+    private func quotaValue(for metric: QuotaDisplayMetric?) -> StatusBarQuotaValue? {
+        guard let ratio = metric?.ratio else { return nil }
+        let percent = Int((min(max(ratio, 0), 1) * 100).rounded())
+        return StatusBarQuotaValue(text: "\(percent)%", isZero: percent <= 0)
     }
 
     private func configureStatusItem() {
@@ -94,6 +162,7 @@ final class StatusBarController: NSObject {
         button.action = #selector(handleStatusItemClick(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         button.target = self
+        updateStatusTitle()
     }
 
     private func configureDashboardPanel() {
@@ -164,6 +233,7 @@ final class StatusBarController: NSObject {
             pendingPanelPresentationTask?.cancel()
             pendingPanelPresentationTask = Task { [weak self] in
                 guard let self else { return }
+                appState.refreshLaunchAtLoginState()
                 await appState.prepareSelectedToolForDashboardPresentation()
                 guard !Task.isCancelled else { return }
                 self.presentDashboardPanel(relativeTo: button)
@@ -219,14 +289,18 @@ final class StatusBarController: NSObject {
         let iconSize: CGFloat = 17.5
         let icon = Branding.makeMenuBarIcon(size: iconSize)
         icon.size = NSSize(width: iconSize, height: iconSize)
-        button.image = icon
-        button.imagePosition = .imageOnly
-        button.imageScaling = .scaleProportionallyDown
+        button.image = nil
         button.title = ""
 
-        if button.image == nil {
-            button.image = NSImage(systemSymbolName: "chart.bar.fill", accessibilityDescription: "QuotaBar")
-        }
+        let contentView = StatusBarQuotaContentView(icon: icon)
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(contentView)
+        NSLayoutConstraint.activate([
+            contentView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+            contentView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+            contentView.heightAnchor.constraint(equalToConstant: StatusBarQuotaContentView.preferredHeight)
+        ])
+        statusBarContentView = contentView
     }
 
     private func showContextMenu() {
@@ -304,14 +378,19 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func toggleLaunchAtLogin() {
+        setLaunchAtLoginEnabled(!launchAtLoginService.isEnabled)
+    }
+
+    private func setLaunchAtLoginEnabled(_ enabled: Bool) {
         do {
-            try launchAtLoginService.setEnabled(!launchAtLoginService.isEnabled)
+            try launchAtLoginService.setEnabled(enabled)
         } catch {
             showInformationalAlert(
                 title: appState.text.string(.launchAtLoginFailedTitle),
                 message: appState.text.launchAtLoginFailedMessage(resolvedErrorMessage(error))
             )
         }
+        appState.refreshLaunchAtLoginState()
     }
 
     @objc private func changeLanguage(_ sender: NSMenuItem) {
@@ -586,6 +665,150 @@ private final class UpdateProgressRelay: @unchecked Sendable {
     func report(_ progress: UpdateDownloadProgress) {
         Task { @MainActor [weak controller] in
             controller?.updateDownloadProgress(progress)
+        }
+    }
+}
+
+@MainActor
+private struct StatusBarQuotaDisplay {
+    let top: StatusBarQuotaValue
+    let bottom: StatusBarQuotaValue?
+
+    var preferredStatusItemLength: CGFloat {
+        let topWidth = top.text.size(withAttributes: [.font: StatusBarQuotaContentView.quotaFont]).width
+        let bottomWidth = bottom?.text.size(withAttributes: [.font: StatusBarQuotaContentView.quotaFont]).width ?? 0
+        let textWidth = ceil(max(topWidth, bottomWidth))
+        return max(NSStatusItem.squareLength, 25 + textWidth)
+    }
+}
+
+private struct StatusBarQuotaValue {
+    let text: String
+    let isZero: Bool
+}
+
+@MainActor
+private final class StatusBarQuotaContentView: NSView {
+    static let preferredHeight: CGFloat = 22
+    static let quotaFont = NSFont.monospacedDigitSystemFont(ofSize: 9.2, weight: .semibold)
+
+    private let imageView = NSImageView()
+    private let topLabel = NSTextField(labelWithString: "")
+    private let bottomLabel = NSTextField(labelWithString: "")
+
+    init(icon: NSImage) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = false
+
+        let iconCopy = icon.copy() as? NSImage ?? icon
+        iconCopy.isTemplate = true
+        imageView.image = iconCopy
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.contentTintColor = .labelColor
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+
+        configureLabel(topLabel)
+        configureLabel(bottomLabel)
+
+        addSubview(imageView)
+        addSubview(topLabel)
+        addSubview(bottomLabel)
+
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            imageView.widthAnchor.constraint(equalToConstant: 17.5),
+            imageView.heightAnchor.constraint(equalToConstant: 17.5),
+
+            topLabel.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 3.5),
+            topLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            bottomLabel.leadingAnchor.constraint(equalTo: topLabel.leadingAnchor),
+            bottomLabel.trailingAnchor.constraint(equalTo: topLabel.trailingAnchor)
+        ])
+
+        configure(display: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    func configure(display: StatusBarQuotaDisplay?) {
+        imageView.contentTintColor = .labelColor
+        topLabel.textColor = .labelColor
+        bottomLabel.textColor = .secondaryLabelColor
+
+        guard let display else {
+            topLabel.stringValue = ""
+            bottomLabel.stringValue = ""
+            topLabel.isHidden = true
+            bottomLabel.isHidden = true
+            updateTextConstraints(hasBottom: false, hasText: false)
+            invalidateIntrinsicContentSize()
+            return
+        }
+
+        topLabel.stringValue = display.top.text
+        bottomLabel.stringValue = display.bottom?.text ?? ""
+        topLabel.textColor = display.top.isZero ? .tertiaryLabelColor : .labelColor
+        bottomLabel.textColor = display.bottom?.isZero == true ? .tertiaryLabelColor : .labelColor
+        topLabel.isHidden = false
+        bottomLabel.isHidden = display.bottom == nil
+        updateTextConstraints(hasBottom: display.bottom != nil, hasText: true)
+        invalidateIntrinsicContentSize()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let labelWidth = max(
+            topLabel.intrinsicContentSize.width,
+            bottomLabel.isHidden ? 0 : bottomLabel.intrinsicContentSize.width
+        )
+        let width = 17.5 + (labelWidth > 0 ? 3.5 + labelWidth : 0)
+        return NSSize(width: ceil(width), height: Self.preferredHeight)
+    }
+
+    private func configureLabel(_ label: NSTextField) {
+        label.font = Self.quotaFont
+        label.alignment = .left
+        label.lineBreakMode = .byClipping
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    private var topCenterConstraint: NSLayoutConstraint?
+    private var topStackConstraint: NSLayoutConstraint?
+    private var bottomStackConstraint: NSLayoutConstraint?
+
+    private func updateTextConstraints(hasBottom: Bool, hasText: Bool) {
+        NSLayoutConstraint.deactivate(
+            [topCenterConstraint, topStackConstraint, bottomStackConstraint].compactMap { $0 }
+        )
+
+        guard hasText else {
+            topCenterConstraint = nil
+            topStackConstraint = nil
+            bottomStackConstraint = nil
+            return
+        }
+
+        if hasBottom {
+            topStackConstraint = topLabel.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -0.5)
+            bottomStackConstraint = bottomLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: -0.5)
+            topCenterConstraint = nil
+            NSLayoutConstraint.activate([topStackConstraint, bottomStackConstraint].compactMap { $0 })
+        } else {
+            topCenterConstraint = topLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+            topStackConstraint = nil
+            bottomStackConstraint = nil
+            topCenterConstraint?.isActive = true
         }
     }
 }

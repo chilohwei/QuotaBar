@@ -61,6 +61,7 @@ enum AppString: String {
     case checkForUpdates
     case checkingForUpdates
     case current
+    case currentBadge
     case delete
     case deleteLocalOnly
     case deletePromptTitle
@@ -76,6 +77,7 @@ enum AppString: String {
     case language
     case launchAtLogin
     case launchAtLoginFailedTitle
+    case menuBarQuotaText
     case nearLimit
     case noQuota
     case normal
@@ -83,9 +85,17 @@ enum AppString: String {
     case pendingRefresh
     case quit
     case refresh
+    case refreshOnOpen
     case refreshing
     case recommended
+    case recommendedReason
+    case recommendationStrategy
     case restartRequiredTitle
+    case settings
+    case settingsApp
+    case settingsDisplay
+    case settingsRecommendation
+    case settingsRefresh
     case show
     case statusBarNoData
     case staleData
@@ -94,6 +104,7 @@ enum AppString: String {
     case updateCheckFailedTitle
     case verifyingUpdate
     case waitingData
+    case useAccount
 }
 
 struct AppText {
@@ -138,6 +149,39 @@ struct AppText {
             return "可用账号 \(count)"
         case .traditionalChinese:
             return "可用帳號 \(count)"
+        }
+    }
+
+    func refreshAllAccounts(tool: ToolKind) -> String {
+        switch language {
+        case .english:
+            return "Refresh all \(tool.displayName) accounts"
+        case .simplifiedChinese:
+            return "刷新全部 \(tool.displayName) 账号"
+        case .traditionalChinese:
+            return "刷新全部 \(tool.displayName) 帳號"
+        }
+    }
+
+    func refreshAccount(_ accountName: String) -> String {
+        switch language {
+        case .english:
+            return "Refresh \(accountName)"
+        case .simplifiedChinese:
+            return "刷新 \(accountName)"
+        case .traditionalChinese:
+            return "刷新 \(accountName)"
+        }
+    }
+
+    func useAccount(_ accountName: String) -> String {
+        switch language {
+        case .english:
+            return "Use \(accountName)"
+        case .simplifiedChinese:
+            return "使用 \(accountName)"
+        case .traditionalChinese:
+            return "使用 \(accountName)"
         }
     }
 
@@ -216,14 +260,14 @@ struct AppText {
         }
     }
 
-    func statusBarTooltip(tool: ToolKind, remainingPercent: Int) -> String {
+    func statusBarTooltip(tool: ToolKind, remainingPercent: Int, accountName: String) -> String {
         switch language {
         case .english:
-            return "\(tool.displayName) remaining \(remainingPercent)%"
+            return "\(tool.displayName) \(accountName) remaining \(remainingPercent)%"
         case .simplifiedChinese:
-            return "\(tool.displayName) 剩余 \(remainingPercent)%"
+            return "\(tool.displayName) \(accountName) 剩余 \(remainingPercent)%"
         case .traditionalChinese:
-            return "\(tool.displayName) 剩餘 \(remainingPercent)%"
+            return "\(tool.displayName) \(accountName) 剩餘 \(remainingPercent)%"
         }
     }
 
@@ -248,6 +292,82 @@ struct AppText {
             return "刷新失败，正在显示上次数据：\(error)"
         case .traditionalChinese:
             return "刷新失敗，正在顯示上次資料：\(error)"
+        }
+    }
+
+    func resetAt(_ date: Date?) -> String {
+        let time = formatCompactDateTime(date)
+        switch language {
+        case .english:
+            return "Resets \(time)"
+        case .simplifiedChinese:
+            return "重置 \(time)"
+        case .traditionalChinese:
+            return "重置 \(time)"
+        }
+    }
+
+    func recommendationStrategyTitle(_ strategy: AccountRecommendationStrategy) -> String {
+        switch language {
+        case .english:
+            switch strategy {
+            case .preventWaste:
+                return "Spend first"
+            case .maximizeAvailability:
+                return "More quota first"
+            }
+        case .simplifiedChinese:
+            switch strategy {
+            case .preventWaste:
+                return "消耗优先"
+            case .maximizeAvailability:
+                return "余量优先"
+            }
+        case .traditionalChinese:
+            switch strategy {
+            case .preventWaste:
+                return "消耗優先"
+            case .maximizeAvailability:
+                return "餘量優先"
+            }
+        }
+    }
+
+    func recommendationReason(strategy: AccountRecommendationStrategy) -> String {
+        switch language {
+        case .english:
+            switch strategy {
+            case .preventWaste:
+                return "Spend first"
+            case .maximizeAvailability:
+                return "More quota first"
+            }
+        case .simplifiedChinese:
+            switch strategy {
+            case .preventWaste:
+                return "消耗优先"
+            case .maximizeAvailability:
+                return "余量优先"
+            }
+        case .traditionalChinese:
+            switch strategy {
+            case .preventWaste:
+                return "消耗優先"
+            case .maximizeAvailability:
+                return "餘量優先"
+            }
+        }
+    }
+
+    func updatedAt(_ date: Date?) -> String {
+        let time = formatCompactDateTime(date)
+        switch language {
+        case .english:
+            return "Updated \(time)"
+        case .simplifiedChinese:
+            return "更新 \(time)"
+        case .traditionalChinese:
+            return "更新 \(time)"
         }
     }
 
@@ -373,6 +493,7 @@ struct AppText {
             .checkForUpdates: "检查更新",
             .checkingForUpdates: "正在检查更新...",
             .current: "当前使用",
+            .currentBadge: "当前",
             .delete: "删除",
             .deleteLocalOnly: "仅删除本地记录，不影响线上账号。",
             .deletePromptTitle: "删除账号？",
@@ -386,6 +507,7 @@ struct AppText {
             .language: "语言",
             .launchAtLogin: "开机自启",
             .launchAtLoginFailedTitle: "开机自启设置失败",
+            .menuBarQuotaText: "菜单栏显示剩余额度",
             .nearLimit: "偏低",
             .noQuota: "无额度",
             .normal: "正常",
@@ -395,9 +517,17 @@ struct AppText {
             .pendingRefresh: "待刷新",
             .quit: "退出",
             .refresh: "刷新",
+            .refreshOnOpen: "打开面板自动刷新",
             .refreshing: "刷新中",
             .recommended: "推荐",
+            .recommendedReason: "消耗优先",
+            .recommendationStrategy: "推荐策略",
             .restartRequiredTitle: "重启后生效",
+            .settings: "设置",
+            .settingsApp: "应用",
+            .settingsDisplay: "显示",
+            .settingsRecommendation: "推荐",
+            .settingsRefresh: "刷新",
             .show: "显示",
             .statusBarNoData: "QuotaBar",
             .staleData: "旧数据",
@@ -405,7 +535,8 @@ struct AppText {
             .updateAvailableTitle: "发现新版本",
             .updateCheckFailedTitle: "检查更新失败",
             .verifyingUpdate: "正在校验安装包...",
-            .waitingData: "暂无数据"
+            .waitingData: "暂无数据",
+            .useAccount: "使用"
         ]
     }
 
@@ -419,6 +550,7 @@ struct AppText {
             .checkForUpdates: "檢查更新",
             .checkingForUpdates: "正在檢查更新...",
             .current: "目前使用",
+            .currentBadge: "目前",
             .delete: "刪除",
             .deleteLocalOnly: "僅刪除本機記錄，不影響線上帳號。",
             .deletePromptTitle: "刪除帳號？",
@@ -432,6 +564,7 @@ struct AppText {
             .language: "語言",
             .launchAtLogin: "開機自啟",
             .launchAtLoginFailedTitle: "開機自啟設定失敗",
+            .menuBarQuotaText: "選單列顯示剩餘額度",
             .nearLimit: "偏低",
             .noQuota: "無額度",
             .normal: "正常",
@@ -441,9 +574,17 @@ struct AppText {
             .pendingRefresh: "待刷新",
             .quit: "退出",
             .refresh: "刷新",
+            .refreshOnOpen: "打開面板自動刷新",
             .refreshing: "刷新中",
             .recommended: "推薦",
+            .recommendedReason: "消耗優先",
+            .recommendationStrategy: "推薦策略",
             .restartRequiredTitle: "重啟後生效",
+            .settings: "設定",
+            .settingsApp: "應用",
+            .settingsDisplay: "顯示",
+            .settingsRecommendation: "推薦",
+            .settingsRefresh: "刷新",
             .show: "顯示",
             .statusBarNoData: "QuotaBar",
             .staleData: "舊資料",
@@ -451,7 +592,8 @@ struct AppText {
             .updateAvailableTitle: "發現新版本",
             .updateCheckFailedTitle: "檢查更新失敗",
             .verifyingUpdate: "正在校驗安裝包...",
-            .waitingData: "暫無資料"
+            .waitingData: "暫無資料",
+            .useAccount: "使用"
         ]
     }
 
@@ -465,6 +607,7 @@ struct AppText {
             .checkForUpdates: "Check for Updates",
             .checkingForUpdates: "Checking for updates...",
             .current: "Active",
+            .currentBadge: "Active",
             .delete: "Delete",
             .deleteLocalOnly: "Removes local data only. Online access is unchanged.",
             .deletePromptTitle: "Delete account?",
@@ -478,6 +621,7 @@ struct AppText {
             .language: "Language",
             .launchAtLogin: "Launch at Login",
             .launchAtLoginFailedTitle: "Launch at Login Failed",
+            .menuBarQuotaText: "Show quota in menu bar",
             .nearLimit: "Low",
             .noQuota: "No quota",
             .normal: "OK",
@@ -487,9 +631,17 @@ struct AppText {
             .pendingRefresh: "Pending",
             .quit: "Quit",
             .refresh: "Refresh",
+            .refreshOnOpen: "Refresh on Open",
             .refreshing: "Refreshing",
             .recommended: "Recommended",
+            .recommendedReason: "Spend first",
+            .recommendationStrategy: "Recommendation",
             .restartRequiredTitle: "Restart required",
+            .settings: "Settings",
+            .settingsApp: "App",
+            .settingsDisplay: "Display",
+            .settingsRecommendation: "Recommend",
+            .settingsRefresh: "Refresh",
             .show: "Show",
             .statusBarNoData: "QuotaBar",
             .staleData: "Stale",
@@ -497,7 +649,8 @@ struct AppText {
             .updateAvailableTitle: "Update Available",
             .updateCheckFailedTitle: "Update Check Failed",
             .verifyingUpdate: "Verifying update...",
-            .waitingData: "No data"
+            .waitingData: "No data",
+            .useAccount: "Use"
         ]
     }
 }

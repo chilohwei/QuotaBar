@@ -6,6 +6,7 @@ struct AccountCardView: View {
     let language: AppLanguage
     let isActive: Bool
     let isRecommended: Bool
+    let recommendationReason: String?
     let isRefreshing: Bool
     let loadState: AccountLoadState
     let quota: QuotaSnapshot?
@@ -383,19 +384,26 @@ struct AccountCardView: View {
         shouldRenderActions
     }
 
-    private var shouldShowDeleteAction: Bool {
-        shouldRenderActions
-    }
-
     private var actionZoneWidth: CGFloat {
-        language == .english ? 132 : 104
+        if isActive {
+            return language == .english ? 126 : 100
+        }
+        return language == .english ? 172 : 138
     }
 
     private var metadataItems: [(text: String, tint: Color, weight: Font.Weight)] {
         var items: [(text: String, tint: Color, weight: Font.Weight)] = []
 
+        if isActive {
+            items.append((text.string(.currentBadge), Branding.accentBlueDark, .semibold))
+        }
+
         if let planSummaryBadge {
             items.append((planSummaryBadge.text, planSummaryBadge.tint, .semibold))
+        }
+
+        if isRecommended, !isActive {
+            items.append((recommendationReason ?? text.string(.recommendedReason), Branding.success, .semibold))
         }
 
         if shouldShowStatusBadge {
@@ -407,7 +415,7 @@ struct AccountCardView: View {
         }
 
         if let subscriptionDateText {
-            items.append((subscriptionDateText, Branding.inkSubtle, .regular))
+            items.append((subscriptionDateText, Branding.inkMuted, .medium))
         }
 
         return items
@@ -428,7 +436,7 @@ struct AccountCardView: View {
     }
 
     private var hasFooterContent: Bool {
-        false
+        footerMessage != nil
     }
 
     private var secondaryPanelTitle: String {
@@ -436,11 +444,17 @@ struct AccountCardView: View {
     }
 
     private var contentSpacing: CGFloat {
-        useRingMetricLayout ? 8 : 12
+        if hasFooterContent {
+            return 6
+        }
+        return useRingMetricLayout ? 8 : 12
     }
 
     private var verticalPadding: CGFloat {
-        useRingMetricLayout ? 12 : 13
+        if hasFooterContent {
+            return 11
+        }
+        return useRingMetricLayout ? 12 : 13
     }
 
     var body: some View {
@@ -460,11 +474,11 @@ struct AccountCardView: View {
             } else {
                 HStack(spacing: 10) {
                     if visibleMetrics.isEmpty {
-                        QuotaPanel(title: quota?.primary?.label ?? "5h", metric: quota?.primaryPanelMetric, language: language, compact: false)
-                        QuotaPanel(title: secondaryPanelTitle, metric: quota?.secondaryPanelMetric, language: language, compact: false)
+                        QuotaPanel(title: quota?.primary?.label ?? "5h", metric: quota?.primaryPanelMetric, language: language, compact: hasFooterContent)
+                        QuotaPanel(title: secondaryPanelTitle, metric: quota?.secondaryPanelMetric, language: language, compact: hasFooterContent)
                     } else {
                         ForEach(Array(visibleMetrics.enumerated()), id: \.offset) { _, metric in
-                            QuotaPanel(title: metric.title, metric: metric, language: language, compact: false)
+                            QuotaPanel(title: metric.title, metric: metric, language: language, compact: hasFooterContent)
                         }
                     }
                 }
@@ -503,6 +517,17 @@ struct AccountCardView: View {
             onActivate()
         }
         .pointingHandCursor(canActivate && !isActive)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(cardAccessibilityLabel)
+        .accessibilityHint(cardAccessibilityHint)
+        .accessibilityAction(named: Text(text.useAccount(resolvedAccountName))) {
+            guard canActivate, !isActive else { return }
+            onActivate()
+        }
+        .accessibilityAction(named: Text(text.refreshAccount(resolvedAccountName))) {
+            guard !isRefreshing else { return }
+            onRefresh()
+        }
         .onChange(of: refreshCycleID) { _ in
             handleRefreshCycleChange()
         }
@@ -519,6 +544,28 @@ struct AccountCardView: View {
         } message: {
             Text(text.string(.deleteLocalOnly))
         }
+    }
+
+    private var cardAccessibilityLabel: String {
+        var parts = [resolvedAccountName]
+        if isActive {
+            parts.append(text.string(.currentBadge))
+        }
+        parts.append(contentsOf: metadataItems.map(\.text))
+        if let quota {
+            parts.append(text.updatedAt(quota.updatedAt))
+        }
+        if let footerMessage {
+            parts.append(footerMessage.message)
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private var cardAccessibilityHint: String {
+        if isActive {
+            return text.refreshAccount(resolvedAccountName)
+        }
+        return text.useAccount(resolvedAccountName)
     }
 
     private var header: some View {
@@ -568,6 +615,18 @@ struct AccountCardView: View {
 
     private var actionZone: some View {
         HStack(spacing: 6) {
+            if !isActive {
+                CardTextActionButton(
+                    title: text.string(.useAccount),
+                    tint: Branding.success,
+                    isEnabled: canActivate
+                ) {
+                    onActivate()
+                }
+                .help(text.useAccount(resolvedAccountName))
+                .accessibilityLabel(text.useAccount(resolvedAccountName))
+            }
+
             CardTextActionButton(
                 title: text.string(.refresh),
                 tint: Branding.accentBlueDark,
@@ -575,18 +634,18 @@ struct AccountCardView: View {
                 action: onRefresh
             )
             .opacity(shouldShowRefreshAction ? 1 : 0)
-            .help(text.string(.refresh))
+            .help(text.refreshAccount(resolvedAccountName))
+            .accessibilityLabel(text.refreshAccount(resolvedAccountName))
 
             CardTextActionButton(
                 title: text.string(.delete),
                 tint: Branding.danger,
-                isDestructive: true,
-                isEnabled: shouldShowDeleteAction
+                isDestructive: true
             ) {
                 isConfirmingDelete = true
             }
-            .opacity(shouldShowDeleteAction ? 1 : 0)
             .help(text.string(.delete))
+            .accessibilityLabel(text.string(.delete))
         }
         .fixedSize(horizontal: true, vertical: false)
     }
@@ -597,10 +656,10 @@ struct AccountCardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 if let footerMessage {
                     Text(footerMessage.message)
-                        .font(.system(size: 11, weight: .regular))
+                        .font(.system(size: 10.2, weight: .regular))
                         .foregroundStyle(footerMessage.color)
-                        .lineLimit(nil)
-                        .multilineTextAlignment(.leading)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                         .fixedSize(horizontal: false, vertical: true)
                         .help(footerMessage.message)
                 }
@@ -619,10 +678,13 @@ struct AccountCardView: View {
                 Branding.accentBlueSoft
             )
         case .success:
-            return nil
+            return (
+                refreshText(.success),
+                Branding.success,
+                Branding.successSoft
+            )
         }
     }
-
     private func refreshText(_ state: CardRefreshFeedback) -> String {
         switch language {
         case .english:
@@ -741,50 +803,11 @@ private struct CardTextActionButton: View {
                 )
                 .contentShape(Capsule(style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.quotaInteractive(isEnabled: isEnabled))
         .disabled(!isEnabled)
+        .help(title)
+        .accessibilityLabel(title)
         .onHover { isHovering = $0 }
-        .pointingHandCursor(isEnabled)
-    }
-}
-
-private extension View {
-    func pointingHandCursor(_ isEnabled: Bool = true) -> some View {
-        background(CursorRegion(cursor: .pointingHand, isEnabled: isEnabled))
-    }
-}
-
-private struct CursorRegion: NSViewRepresentable {
-    let cursor: NSCursor
-    let isEnabled: Bool
-
-    func makeNSView(context: Context) -> CursorRegionView {
-        let view = CursorRegionView()
-        view.cursor = isEnabled ? cursor : nil
-        return view
-    }
-
-    func updateNSView(_ nsView: CursorRegionView, context: Context) {
-        nsView.cursor = isEnabled ? cursor : nil
-    }
-}
-
-private final class CursorRegionView: NSView {
-    var cursor: NSCursor? {
-        didSet {
-            window?.invalidateCursorRects(for: self)
-        }
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        if let cursor {
-            addCursorRect(bounds, cursor: cursor)
-        }
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
     }
 }
 
@@ -822,16 +845,6 @@ private enum AccountVisualStatus {
         }
     }
 
-    var background: Color {
-        switch self {
-        case .healthy: return Branding.successSoft
-        case .refreshing: return Branding.accentBlueSoft
-        case .pending, .noQuota: return Branding.chipSurface
-        case .stale: return Branding.warningSoft
-        case .warning: return Branding.warningSoft
-        case .exhausted, .error: return Branding.dangerSoft
-        }
-    }
 }
 
 struct ToolLogoIcon: View {
@@ -988,6 +1001,14 @@ private struct CursorMetricRingTile: View {
         return Branding.success
     }
 
+    private var percentTextColor: Color {
+        guard isKnown else { return Branding.inkSubtle }
+        if ratio <= 0.20 {
+            return tint
+        }
+        return Branding.inkStrong
+    }
+
     var body: some View {
         VStack(alignment: .center, spacing: 3) {
             Text(text.quotaLabel(title))
@@ -1002,7 +1023,7 @@ private struct CursorMetricRingTile: View {
 
                 Text("\(Int((ratio * 100).rounded()))%")
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(isKnown ? Branding.inkStrong : Branding.inkSubtle)
+                    .foregroundStyle(percentTextColor)
                     .monospacedDigit()
                     .opacity(isKnown ? 1 : 0)
 
@@ -1015,7 +1036,7 @@ private struct CursorMetricRingTile: View {
             }
 
             if let resetAt = metric?.resetAt ?? fallbackResetAt {
-                Text(text.formatCompactDateTime(resetAt))
+                Text(text.resetAt(resetAt))
                     .font(.system(size: 9.8, weight: .regular))
                     .foregroundStyle(Branding.inkSubtle)
                     .lineLimit(1)
@@ -1134,6 +1155,14 @@ private struct QuotaPanel: View {
         return Branding.success
     }
 
+    private var percentTextColor: Color {
+        guard state.isKnown else { return Branding.inkSubtle }
+        if state.ratio <= 0.20 {
+            return tint
+        }
+        return Branding.inkStrong
+    }
+
     var body: some View {
         let resolved = state
 
@@ -1153,14 +1182,14 @@ private struct QuotaPanel: View {
 
                 Text(resolved.isKnown ? "\(Int((resolved.ratio * 100).rounded()))%" : "--")
                     .font(.system(size: compact ? 14.5 : 20, weight: .semibold, design: .rounded))
-                    .foregroundStyle(resolved.isKnown ? Branding.inkStrong : Branding.inkSubtle)
+                    .foregroundStyle(percentTextColor)
                     .monospacedDigit()
             }
 
             RatioBar(value: resolved.isKnown ? resolved.ratio : 0, tint: tint)
 
             if resolved.isKnown, let resetAt = resolved.resetAt {
-                Text(text.formatCompactDateTime(resetAt))
+                Text(text.resetAt(resetAt))
                     .font(.system(size: compact ? 10 : 10.5, weight: .regular))
                     .foregroundStyle(Branding.inkSubtle)
                     .lineLimit(1)

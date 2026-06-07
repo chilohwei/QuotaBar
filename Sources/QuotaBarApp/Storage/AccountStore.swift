@@ -3,20 +3,17 @@ import Foundation
 struct PersistedState: Codable {
     var accounts: [Account]
     var activeAccountByTool: [ToolKind: UUID]
-    var lowQuotaThreshold: Double
 
-    static let empty = PersistedState(accounts: [], activeAccountByTool: [:], lowQuotaThreshold: 0.15)
+    static let empty = PersistedState(accounts: [], activeAccountByTool: [:])
 
     private enum CodingKeys: String, CodingKey {
         case accounts
         case activeAccountByTool
-        case lowQuotaThreshold
     }
 
-    init(accounts: [Account], activeAccountByTool: [ToolKind: UUID], lowQuotaThreshold: Double) {
+    init(accounts: [Account], activeAccountByTool: [ToolKind: UUID]) {
         self.accounts = accounts
         self.activeAccountByTool = activeAccountByTool
-        self.lowQuotaThreshold = lowQuotaThreshold
     }
 
     init(from decoder: Decoder) throws {
@@ -25,7 +22,6 @@ struct PersistedState: Codable {
         accounts = lossyAccounts.compactMap(\.account)
 
         activeAccountByTool = try Self.decodeActiveAccounts(from: container)
-        lowQuotaThreshold = try container.decodeIfPresent(Double.self, forKey: .lowQuotaThreshold) ?? 0.15
     }
 
     func encode(to encoder: Encoder) throws {
@@ -35,7 +31,6 @@ struct PersistedState: Codable {
             result[item.key.rawValue] = item.value
         }
         try container.encode(rawActiveAccounts, forKey: .activeAccountByTool)
-        try container.encode(lowQuotaThreshold, forKey: .lowQuotaThreshold)
     }
 
     private static func decodeActiveAccounts(

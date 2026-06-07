@@ -13,6 +13,10 @@ enum DashboardLayout {
     static let headerListSpacing: CGFloat = 12
     static let listFooterSpacing: CGFloat = 8
     static let bottomReserve: CGFloat = 12
+    static let updateNoticeHeight: CGFloat = 36
+    static let settingsPanelWidth: CGFloat = 252
+    static let settingsPopoverMargin: CGFloat = 12
+    static let settingsPopoverGap: CGFloat = 7
 
     static var maxAccountListHeight: CGFloat {
         CGFloat(maxVisibleAccountCards) * accountCardHeight
@@ -28,10 +32,12 @@ enum DashboardLayout {
 
 struct DashboardView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var accountFilter: AccountFilter = .all
     @State private var refreshCycleID: Int = 0
     @State private var isToolMenuPresented: Bool = false
     @State private var isFilterMenuPresented: Bool = false
+    @State private var isSettingsMenuPresented: Bool = false
     @State private var frozenAccountOrderByTool: [ToolKind: [UUID]] = [:]
     @State private var lastVisibleAccountOrderByTool: [ToolKind: [UUID]] = [:]
 
@@ -48,7 +54,8 @@ struct DashboardView: View {
             activeID: appState.activeAccountByTool[appState.selectedTool],
             quotaByAccount: appState.quotaByAccount,
             loadStateByAccount: appState.loadStateByAccount,
-            frozenOrder: effectiveFrozenOrder
+            frozenOrder: effectiveFrozenOrder,
+            recommendationStrategy: appState.recommendationStrategy
         )
         guard isRefreshingSelectedTool,
               let frozenOrder = effectiveFrozenOrder,
@@ -67,6 +74,15 @@ struct DashboardView: View {
 
     private var preferredPanelHeight: CGFloat {
         DashboardLayout.fixedPanelHeight
+    }
+
+    private var accountListHeight: CGFloat {
+        let updateNoticeReserve = shouldShowUpdateNotice
+            ? DashboardLayout.updateNoticeHeight + DashboardLayout.stackSpacing
+            : 0
+        let minimumUsefulHeight = CGFloat(DashboardLayout.maxVisibleAccountCards - 1) * DashboardLayout.accountCardHeight
+            + CGFloat(DashboardLayout.maxVisibleAccountCards - 2) * DashboardLayout.accountCardSpacing
+        return max(DashboardLayout.accountListHeight - updateNoticeReserve, minimumUsefulHeight)
     }
 
     private var isRefreshingSelectedTool: Bool {
@@ -92,32 +108,48 @@ struct DashboardView: View {
             accounts: toolAccounts,
             activeID: appState.activeAccountByTool[appState.selectedTool],
             quotaByAccount: appState.quotaByAccount,
-            loadStateByAccount: appState.loadStateByAccount
+            loadStateByAccount: appState.loadStateByAccount,
+            recommendationStrategy: appState.recommendationStrategy
         )
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Spacer()
-                .frame(height: DashboardLayout.headerListSpacing)
-            accountList
-            Spacer()
-                .frame(height: DashboardLayout.listFooterSpacing)
-            footerBar
-            Spacer(minLength: DashboardLayout.bottomReserve)
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 0) {
+                header
+                if shouldShowUpdateNotice {
+                    Spacer()
+                        .frame(height: DashboardLayout.stackSpacing)
+                    updateNoticeBar
+                }
+                Spacer()
+                    .frame(height: DashboardLayout.headerListSpacing)
+                accountList
+                Spacer()
+                    .frame(height: DashboardLayout.listFooterSpacing)
+                footerBar
+                Spacer(minLength: DashboardLayout.bottomReserve)
+            }
+            .padding(.top, 8)
+            .padding(.horizontal, 18)
+
         }
-        .overlay(alignment: .top) {
-            if shouldShowUpdateNotice {
-                updateNoticeBar
-                    .padding(.top, DashboardLayout.headerHeight + DashboardLayout.stackSpacing)
-                    .zIndex(2)
-                    .transition(.opacity)
+        .frame(width: DashboardLayout.panelWidth, height: preferredPanelHeight, alignment: .top)
+        .overlayPreferenceValue(SettingsButtonAnchorKey.self) { anchor in
+            GeometryReader { proxy in
+                if isSettingsMenuPresented {
+                    ZStack(alignment: .topLeading) {
+                        settingsDismissLayer
+                            .zIndex(9)
+
+                        if let anchor {
+                            settingsPopover(anchorFrame: proxy[anchor])
+                                .zIndex(10)
+                        }
+                    }
+                }
             }
         }
-        .padding(.top, 8)
-        .padding(.horizontal, 18)
-        .frame(width: DashboardLayout.panelWidth, height: preferredPanelHeight, alignment: .top)
         .background(Branding.pageBackground)
         .foregroundStyle(Branding.ink)
         .alert(text.string(.restartRequiredTitle), isPresented: restartRequiredAlertBinding) {
@@ -126,9 +158,6 @@ struct DashboardView: View {
             }
         } message: {
             Text(appState.restartRequiredMessage ?? "")
-        }
-        .transaction { transaction in
-            transaction.animation = nil
         }
         .alert(text.string(.addAccountFailedTitle), isPresented: addAccountErrorAlertBinding) {
             Button(text.string(.ok)) {
@@ -209,6 +238,16 @@ struct DashboardView: View {
         return state == .refreshing || state == .loadingInitial
     }
 
+    private func setSettingsMenuPresented(_ isPresented: Bool) {
+        withAnimation(settingsPopoverAnimation) {
+            isSettingsMenuPresented = isPresented
+        }
+    }
+
+    private var settingsPopoverAnimation: Animation? {
+        reduceMotion ? nil : .easeOut(duration: 0.16)
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
@@ -243,10 +282,40 @@ struct DashboardView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .layoutPriority(1)
+
+            headerSettingsButton
+                .fixedSize()
         }
-        .frame(height: 16, alignment: .center)
+        .frame(height: 20, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipped()
+    }
+
+    private var headerSettingsButton: some View {
+        Button {
+            setSettingsMenuPresented(!isSettingsMenuPresented)
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(isSettingsMenuPresented ? Branding.accentBlueDark : Branding.inkMuted)
+                .frame(width: 20, height: 18)
+                .background(
+                    RoundedRectangle(cornerRadius: 5.5, style: .continuous)
+                        .fill(isSettingsMenuPresented ? Branding.accentBlueSoft : Branding.controlSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5.5, style: .continuous)
+                        .stroke(
+                            isSettingsMenuPresented ? Branding.accentBlue.opacity(0.18) : Branding.controlStroke,
+                            lineWidth: 1
+                        )
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
+        }
+        .buttonStyle(.quotaInteractive())
+        .help(text.string(.settings))
+        .accessibilityLabel(text.string(.settings))
+        .anchorPreference(key: SettingsButtonAnchorKey.self, value: .bounds) { $0 }
     }
 
     private func compactHeaderAccountName(_ value: String) -> String {
@@ -308,13 +377,16 @@ struct DashboardView: View {
                         )
                 )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.quotaInteractive())
+            .help(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
+            .accessibilityLabel(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
         }
         .frame(width: 126, height: 32, alignment: .trailing)
     }
 
     private var headerRefreshButton: some View {
-        let isEnabled = !isRefreshingSelectedTool && !toolAccounts.isEmpty
+        let isBusy = isRefreshingSelectedTool
+        let isEnabled = !isBusy && !toolAccounts.isEmpty
 
         return Button {
             guard isEnabled else { return }
@@ -322,27 +394,38 @@ struct DashboardView: View {
             refreshCycleID += 1
             appState.refreshSelectedTool()
         } label: {
-            Image(systemName: "arrow.clockwise")
+            HeaderRefreshGlyph(isRefreshing: isBusy)
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(isEnabled ? Branding.inkMuted : Branding.inkSubtle)
-                .opacity(isEnabled ? 1 : 0.58)
+                .foregroundStyle(headerRefreshButtonTint(isEnabled: isEnabled, isBusy: isBusy))
+                .opacity(isEnabled || isBusy ? 1 : 0.58)
                 .frame(width: 36, height: 32)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Branding.controlSurface)
+                        .fill(isBusy ? Branding.accentBlueSoft : Branding.controlSurface)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Branding.controlStroke, lineWidth: 1)
+                        .stroke(
+                            isBusy ? Branding.accentBlue.opacity(0.18) : Branding.controlStroke,
+                            lineWidth: 1
+                        )
                 )
                 .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.quotaInteractive(isEnabled: isEnabled || isBusy))
         .disabled(!isEnabled)
-        .help(text.string(.refresh))
+        .help(text.refreshAllAccounts(tool: appState.selectedTool))
+        .accessibilityLabel(text.refreshAllAccounts(tool: appState.selectedTool))
         .transaction { transaction in
             transaction.animation = nil
         }
+    }
+
+    private func headerRefreshButtonTint(isEnabled: Bool, isBusy: Bool) -> Color {
+        if isBusy {
+            return Branding.accentBlueDark
+        }
+        return isEnabled ? Branding.inkMuted : Branding.inkSubtle
     }
 
     private var toolSwitchMenu: some View {
@@ -412,7 +495,9 @@ struct DashboardView: View {
                                 .fill(appState.selectedTool == tool ? Branding.menuItemSelectedSurface : Color.clear)
                         )
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.quotaInteractive())
+                    .help(tool.displayName)
+                    .accessibilityLabel(tool.displayName)
                 }
             }
             .padding(8)
@@ -427,7 +512,9 @@ struct DashboardView: View {
             )
             .shadow(color: Branding.shadowPopover, radius: 18, y: 8)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.quotaInteractive())
+        .help(appState.selectedTool.displayName)
+        .accessibilityLabel(appState.selectedTool.displayName)
         .fixedSize()
     }
 
@@ -456,53 +543,77 @@ struct DashboardView: View {
     @ViewBuilder
     private var accountList: some View {
         let accounts = visibleAccounts
-        let listHeight = DashboardLayout.accountListHeight
+        let listHeight = accountListHeight
 
-        ScrollView(.vertical, showsIndicators: false) {
-            ZStack(alignment: .topLeading) {
-                ScrollIndicatorHider()
-                    .frame(width: 0, height: 0)
-                    .allowsHitTesting(false)
+        ScrollViewReader { scrollProxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                ZStack(alignment: .topLeading) {
+                    ScrollIndicatorHider()
+                        .frame(width: 0, height: 0)
+                        .allowsHitTesting(false)
 
-                if toolAccounts.isEmpty {
-                    emptyState
-                } else if accounts.isEmpty {
-                    filteredEmptyState
-                } else {
-                    LazyVStack(spacing: DashboardLayout.accountCardSpacing) {
-                        ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
-                            AccountCardView(
-                                account: account,
-                                language: appState.language,
-                                isActive: appState.activeAccountByTool[appState.selectedTool] == account.id,
-                                isRecommended: recommendedAccountID == account.id,
-                                isRefreshing: isAccountRefreshing(account),
-                                loadState: accountLoadState(account),
-                                quota: appState.quotaByAccount[account.id],
-                                errorMessage: appState.errorByAccount[account.id],
-                                canActivate: true,
-                                isPrimaryVisibleCard: index == 0,
-                                refreshCycleID: refreshCycleID,
-                                onActivate: { appState.activateAccount(account) },
-                                onRefresh: { appState.refreshAccount(account) },
-                                onDelete: { appState.deleteAccount(account) }
-                            )
-                            .transaction { transaction in
-                                if isRefreshingSelectedTool {
-                                    transaction.animation = nil
+                    if toolAccounts.isEmpty {
+                        emptyState
+                    } else if accounts.isEmpty {
+                        filteredEmptyState
+                    } else {
+                        LazyVStack(spacing: DashboardLayout.accountCardSpacing) {
+                            ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
+                                AccountCardView(
+                                    account: account,
+                                    language: appState.language,
+                                    isActive: appState.activeAccountByTool[appState.selectedTool] == account.id,
+                                    isRecommended: recommendedAccountID == account.id,
+                                    recommendationReason: recommendationReason(for: account),
+                                    isRefreshing: isAccountRefreshing(account),
+                                    loadState: accountLoadState(account),
+                                    quota: appState.quotaByAccount[account.id],
+                                    errorMessage: appState.errorByAccount[account.id],
+                                    canActivate: true,
+                                    isPrimaryVisibleCard: index == 0,
+                                    refreshCycleID: refreshCycleID,
+                                    onActivate: { appState.activateAccount(account) },
+                                    onRefresh: { appState.refreshAccount(account) },
+                                    onDelete: { appState.deleteAccount(account) }
+                                )
+                                .transaction { transaction in
+                                    if isRefreshingSelectedTool {
+                                        transaction.animation = nil
+                                    }
                                 }
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .top)
                     }
-                    .frame(maxWidth: .infinity, alignment: .top)
                 }
+                .id(AccountListScrollTarget.top)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .frame(maxWidth: .infinity, alignment: .top)
+            .scrollIndicators(.never, axes: .vertical)
+            .clipped()
+            .frame(height: listHeight)
+            .frame(maxWidth: .infinity)
+            .onChange(of: refreshCycleID) { _ in
+                scrollAccountListToTop(using: scrollProxy)
+            }
         }
-        .scrollIndicators(.never, axes: .vertical)
-        .clipped()
-        .frame(height: listHeight)
-        .frame(maxWidth: .infinity)
+    }
+
+    private func recommendationReason(for account: Account) -> String {
+        let reasonStrategy = AccountListPresenter.recommendationReasonStrategy(
+            for: account,
+            quotaByAccount: appState.quotaByAccount,
+            recommendationStrategy: appState.recommendationStrategy
+        )
+        return text.recommendationReason(strategy: reasonStrategy)
+    }
+
+    private func scrollAccountListToTop(using scrollProxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.22)) {
+                scrollProxy.scrollTo(AccountListScrollTarget.top, anchor: .top)
+            }
+        }
     }
 
     private var restartRequiredAlertBinding: Binding<Bool> {
@@ -560,8 +671,10 @@ struct DashboardView: View {
                         .stroke(Branding.controlStroke, lineWidth: 1)
                 )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.quotaInteractive())
             .fixedSize()
+            .help(currentFilterTitle)
+            .accessibilityLabel(currentFilterTitle)
             .popover(isPresented: $isFilterMenuPresented, arrowEdge: .bottom) {
                 VStack(spacing: 4) {
                     footerFilterOption(
@@ -600,12 +713,386 @@ struct DashboardView: View {
             }
             .font(.system(size: 11.5, weight: .regular))
             .foregroundStyle(Branding.inkMuted.opacity(0.92))
-            .buttonStyle(.plain)
+            .buttonStyle(.quotaInteractive())
+            .help(text.string(.quit))
+            .accessibilityLabel(text.string(.quit))
             .padding(.horizontal, 4)
             .frame(height: 23)
         }
         .padding(.top, 2)
         .frame(height: 28)
+    }
+
+    private var settingsPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            settingsSection(title: text.string(.settingsDisplay)) {
+                languageSegmentedControl
+
+                settingsToggleRow(
+                    title: text.string(.menuBarQuotaText),
+                    iconName: "gauge.with.dots.needle.50percent",
+                    isOn: statusBarQuotaTextBinding
+                )
+            }
+
+            settingsSection(title: text.string(.settingsRecommendation)) {
+                recommendationStrategyControl
+            }
+
+            settingsSection(title: text.string(.settingsRefresh)) {
+                settingsToggleRow(
+                    title: text.string(.refreshOnOpen),
+                    iconName: "arrow.clockwise.circle",
+                    isOn: refreshOnOpenBinding
+                )
+            }
+
+            settingsSection(title: text.string(.settingsApp)) {
+                settingsToggleRow(
+                    title: text.string(.launchAtLogin),
+                    iconName: "power.circle",
+                    isOn: launchAtLoginBinding
+                )
+
+                settingsActionRow(
+                    title: settingsUpdateActionTitle,
+                    iconName: settingsUpdateIconName,
+                    isEnabled: isSettingsUpdateActionEnabled
+                ) {
+                    runSettingsUpdateAction()
+                }
+            }
+        }
+        .padding(10)
+        .frame(width: DashboardLayout.settingsPanelWidth)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Branding.menuSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Branding.borderSubtle, lineWidth: 1)
+        )
+        .shadow(color: Branding.shadowPopover, radius: 18, y: 8)
+    }
+
+    private var settingsDismissLayer: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture {
+                setSettingsMenuPresented(false)
+            }
+    }
+
+    private func settingsPopover(anchorFrame: CGRect) -> some View {
+        let panelX = settingsPopoverX(anchorFrame: anchorFrame)
+        let arrowLeading = settingsPopoverArrowLeading(anchorFrame: anchorFrame, panelX: panelX)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            PopoverArrowShape()
+                .fill(Branding.menuSurface)
+                .frame(width: 22, height: 10)
+                .overlay(
+                    PopoverArrowShape()
+                        .stroke(Branding.borderSubtle, lineWidth: 1)
+                )
+                .padding(.leading, arrowLeading)
+                .zIndex(2)
+
+            settingsPanel
+                .offset(y: -1)
+                .zIndex(1)
+        }
+        .frame(width: DashboardLayout.settingsPanelWidth, alignment: .leading)
+        .offset(
+            x: panelX,
+            y: anchorFrame.maxY + DashboardLayout.settingsPopoverGap
+        )
+        .transition(settingsPopoverTransition(anchorFrame: anchorFrame))
+        .animation(settingsPopoverAnimation, value: isSettingsMenuPresented)
+    }
+
+    private func settingsPopoverTransition(anchorFrame: CGRect) -> AnyTransition {
+        if reduceMotion {
+            return .opacity
+        }
+        let panelX = settingsPopoverX(anchorFrame: anchorFrame)
+        let anchorX = UnitPoint(
+            x: min(max((anchorFrame.midX - panelX) / DashboardLayout.settingsPanelWidth, 0), 1),
+            y: 0
+        )
+        return .asymmetric(
+            insertion: .scale(scale: 0.985, anchor: anchorX).combined(with: .opacity),
+            removal: .opacity
+        )
+    }
+
+    private func settingsPopoverX(anchorFrame: CGRect) -> CGFloat {
+        let preferredX = anchorFrame.midX - DashboardLayout.settingsPanelWidth / 2
+        let minimumX = DashboardLayout.settingsPopoverMargin
+        let maximumX = DashboardLayout.panelWidth - DashboardLayout.settingsPanelWidth - DashboardLayout.settingsPopoverMargin
+        return min(max(preferredX, minimumX), maximumX)
+    }
+
+    private func settingsPopoverArrowLeading(anchorFrame: CGRect, panelX: CGFloat) -> CGFloat {
+        let arrowWidth: CGFloat = 22
+        let minimumLeading: CGFloat = 12
+        let maximumLeading = DashboardLayout.settingsPanelWidth - arrowWidth - minimumLeading
+        return min(max(anchorFrame.midX - panelX - arrowWidth / 2, minimumLeading), maximumLeading)
+    }
+
+    private var languageSegmentedControl: some View {
+        HStack(spacing: 4) {
+            ForEach(AppLanguage.allCases) { language in
+                Button {
+                    withAnimation(settingsPopoverAnimation) {
+                        appState.setLanguage(language)
+                    }
+                } label: {
+                    Text(language.displayName)
+                        .font(.system(size: 11.5, weight: appState.language == language ? .semibold : .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.88)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 27)
+                        .foregroundStyle(appState.language == language ? Branding.accentBlueDark : Branding.inkMuted)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(appState.language == language ? Branding.menuItemSelectedSurface : Color.clear)
+                        )
+                }
+                .buttonStyle(.quotaInteractive())
+                .help(language.displayName)
+                .accessibilityLabel(language.displayName)
+            }
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Branding.controlSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Branding.controlStroke, lineWidth: 1)
+        )
+        .animation(settingsPopoverAnimation, value: appState.language)
+    }
+
+    private var recommendationStrategyControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(text.string(.recommendationStrategy))
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(Branding.inkMuted)
+                .padding(.leading, 2)
+
+            HStack(spacing: 4) {
+                ForEach(AccountRecommendationStrategy.allCases) { strategy in
+                    Button {
+                        withAnimation(settingsPopoverAnimation) {
+                            appState.setRecommendationStrategy(strategy)
+                        }
+                    } label: {
+                        Text(text.recommendationStrategyTitle(strategy))
+                            .font(.system(size: 11.2, weight: appState.recommendationStrategy == strategy ? .semibold : .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.86)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 27)
+                            .foregroundStyle(appState.recommendationStrategy == strategy ? Branding.accentBlueDark : Branding.inkMuted)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(appState.recommendationStrategy == strategy ? Branding.menuItemSelectedSurface : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.quotaInteractive())
+                    .help(text.recommendationStrategyTitle(strategy))
+                    .accessibilityLabel(text.recommendationStrategyTitle(strategy))
+                }
+            }
+            .padding(3)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Branding.controlSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Branding.controlStroke, lineWidth: 1)
+            )
+            .animation(settingsPopoverAnimation, value: appState.recommendationStrategy)
+        }
+    }
+
+    private func settingsSection<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Branding.inkMuted)
+                .padding(.leading, 2)
+
+            VStack(spacing: 4) {
+                content()
+            }
+        }
+    }
+
+    private func settingsToggleRow(title: String, iconName: String, isOn: Binding<Bool>) -> some View {
+        Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                settingsRowIcon(iconName)
+
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Branding.inkStrong)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.88)
+
+                Spacer(minLength: 8)
+
+                Toggle("", isOn: .constant(isOn.wrappedValue))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .allowsHitTesting(false)
+            }
+            .padding(.leading, 9)
+            .padding(.trailing, 8)
+            .frame(height: 32)
+            .background(settingsRowBackground)
+        }
+        .buttonStyle(.quotaInteractive())
+        .help(title)
+        .accessibilityLabel(title)
+        .animation(settingsPopoverAnimation, value: isOn.wrappedValue)
+    }
+
+    private func settingsActionRow(
+        title: String,
+        iconName: String,
+        isEnabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                settingsRowIcon(iconName)
+
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(isEnabled ? Branding.inkStrong : Branding.inkSubtle)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.88)
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(isEnabled ? Branding.inkSubtle : Branding.inkSubtle.opacity(0.48))
+            }
+            .padding(.leading, 9)
+            .padding(.trailing, 10)
+            .frame(height: 32)
+            .background(settingsRowBackground)
+            .opacity(isEnabled ? 1 : 0.68)
+        }
+        .buttonStyle(.quotaInteractive(isEnabled: isEnabled))
+        .disabled(!isEnabled)
+        .help(title)
+        .accessibilityLabel(title)
+    }
+
+    private func settingsRowIcon(_ iconName: String) -> some View {
+        Image(systemName: iconName)
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(Branding.inkMuted)
+            .frame(width: 15)
+    }
+
+    private var settingsRowBackground: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Branding.controlSurface)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Branding.controlStroke, lineWidth: 1)
+            )
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding {
+            appState.isLaunchAtLoginEnabled
+        } set: { enabled in
+            appState.setLaunchAtLoginEnabledFromDashboard(enabled)
+        }
+    }
+
+    private var refreshOnOpenBinding: Binding<Bool> {
+        Binding {
+            appState.isRefreshOnOpenEnabled
+        } set: { enabled in
+            appState.setRefreshOnOpenEnabled(enabled)
+        }
+    }
+
+    private var statusBarQuotaTextBinding: Binding<Bool> {
+        Binding {
+            appState.isStatusBarQuotaTextEnabled
+        } set: { enabled in
+            appState.setStatusBarQuotaTextEnabled(enabled)
+        }
+    }
+
+    private var settingsUpdateActionTitle: String {
+        switch appState.updateBannerState {
+        case .available:
+            return text.string(.downloadAndInstall)
+        case .checking:
+            return text.string(.checkingForUpdates)
+        case .downloading:
+            return text.string(.downloadingUpdate)
+        case .installing:
+            return text.string(.installingUpdate)
+        case .idle:
+            return text.string(.checkForUpdates)
+        }
+    }
+
+    private var settingsUpdateIconName: String {
+        switch appState.updateBannerState {
+        case .available:
+            return "arrow.down.circle.fill"
+        case .checking:
+            return "magnifyingglass"
+        case .downloading:
+            return "arrow.down.circle"
+        case .installing:
+            return "gearshape.2"
+        case .idle:
+            return "arrow.down.circle"
+        }
+    }
+
+    private var isSettingsUpdateActionEnabled: Bool {
+        switch appState.updateBannerState {
+        case .idle, .available:
+            return true
+        case .checking, .downloading, .installing:
+            return false
+        }
+    }
+
+    private func runSettingsUpdateAction() {
+        switch appState.updateBannerState {
+        case .available:
+            appState.installAvailableUpdateFromDashboard()
+        case .idle:
+            appState.checkForUpdatesFromDashboard()
+        case .checking, .downloading, .installing:
+            break
+        }
+        setSettingsMenuPresented(false)
     }
 
     private var shouldShowUpdateNotice: Bool {
@@ -658,8 +1145,10 @@ struct DashboardView: View {
                     .stroke(updateNoticeTint.opacity(0.14), lineWidth: 1)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.quotaInteractive(isEnabled: isUpdateNoticeEnabled))
         .disabled(!isUpdateNoticeEnabled)
+        .help(updateNoticeTitle)
+        .accessibilityLabel(updateNoticeTitle)
         .opacity(isUpdateNoticeEnabled ? 1 : 0.94)
     }
 
@@ -804,7 +1293,9 @@ struct DashboardView: View {
                     .fill(isSelected ? Branding.menuItemSelectedSurface : Color.clear)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.quotaInteractive())
+        .help(title)
+        .accessibilityLabel(title)
     }
 
     private var emptyState: some View {
@@ -838,6 +1329,53 @@ struct DashboardView: View {
         .padding(.vertical, 58)
     }
 
+}
+
+private enum AccountListScrollTarget: Hashable {
+    case top
+}
+
+private struct SettingsButtonAnchorKey: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
+private struct PopoverArrowShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct HeaderRefreshGlyph: View {
+    let isRefreshing: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @ViewBuilder
+    var body: some View {
+        if reduceMotion {
+            Image(systemName: isRefreshing ? "arrow.clockwise.circle" : "arrow.clockwise")
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isRefreshing)) { context in
+                Image(systemName: "arrow.clockwise")
+                    .rotationEffect(.degrees(isRefreshing ? rotationDegrees(at: context.date) : 0))
+            }
+        }
+    }
+
+    private func rotationDegrees(at date: Date) -> Double {
+        let duration = 0.85
+        let progress = date.timeIntervalSinceReferenceDate
+            .truncatingRemainder(dividingBy: duration) / duration
+        return progress * 360
+    }
 }
 
 private struct ScrollIndicatorHider: NSViewRepresentable {

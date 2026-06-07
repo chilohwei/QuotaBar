@@ -13,6 +13,10 @@ final class AppState: ObservableObject {
     @Published var restartRequiredMessage: String?
     @Published var addAccountErrorMessage: String?
     @Published var updateBannerState: AppUpdateBannerState = .idle
+    @Published var isLaunchAtLoginEnabled = false
+    @Published var isRefreshOnOpenEnabled: Bool = AppPreferences.refreshOnOpenEnabled
+    @Published var isStatusBarQuotaTextEnabled: Bool = AppPreferences.statusBarQuotaTextEnabled
+    @Published var recommendationStrategy: AccountRecommendationStrategy = AppPreferences.recommendationStrategy
 
     private let accountStore = AccountStore()
     private let secretStore = SecretStoreService()
@@ -21,6 +25,8 @@ final class AppState: ObservableObject {
     private let refreshBackoffPolicy = RefreshBackoffPolicy()
     private var checkForUpdatesAction: (() -> Void)?
     private var installAvailableUpdateAction: (() -> Void)?
+    private var launchAtLoginEnabledProvider: (() -> Bool)?
+    private var setLaunchAtLoginEnabledAction: ((Bool) -> Void)?
 
     private var refreshTask: Task<Void, Never>?
     private var addAccountTask: Task<Void, Never>?
@@ -236,6 +242,7 @@ final class AppState: ObservableObject {
     func prepareSelectedToolForDashboardPresentation() async {
         let tool = selectedTool
         await syncInstalledCurrentAccount(for: tool)
+        guard isRefreshOnOpenEnabled else { return }
 
         let targetAccounts = accounts(for: tool)
         guard !targetAccounts.isEmpty else { return }
@@ -295,6 +302,41 @@ final class AppState: ObservableObject {
 
     func installAvailableUpdateFromDashboard() {
         installAvailableUpdateAction?()
+    }
+
+    func registerLaunchAtLoginActions(
+        isEnabled: @escaping () -> Bool,
+        setEnabled: @escaping (Bool) -> Void
+    ) {
+        launchAtLoginEnabledProvider = isEnabled
+        setLaunchAtLoginEnabledAction = setEnabled
+        refreshLaunchAtLoginState()
+    }
+
+    func refreshLaunchAtLoginState() {
+        isLaunchAtLoginEnabled = launchAtLoginEnabledProvider?() ?? false
+    }
+
+    func setLaunchAtLoginEnabledFromDashboard(_ enabled: Bool) {
+        setLaunchAtLoginEnabledAction?(enabled)
+    }
+
+    func setRefreshOnOpenEnabled(_ enabled: Bool) {
+        guard isRefreshOnOpenEnabled != enabled else { return }
+        isRefreshOnOpenEnabled = enabled
+        AppPreferences.setRefreshOnOpenEnabled(enabled)
+    }
+
+    func setStatusBarQuotaTextEnabled(_ enabled: Bool) {
+        guard isStatusBarQuotaTextEnabled != enabled else { return }
+        isStatusBarQuotaTextEnabled = enabled
+        AppPreferences.setStatusBarQuotaTextEnabled(enabled)
+    }
+
+    func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {
+        guard recommendationStrategy != strategy else { return }
+        recommendationStrategy = strategy
+        AppPreferences.setRecommendationStrategy(strategy)
     }
 
     @discardableResult
@@ -674,8 +716,7 @@ final class AppState: ObservableObject {
     private func persistState() async throws {
         let state = PersistedState(
             accounts: accounts,
-            activeAccountByTool: activeAccountByTool,
-            lowQuotaThreshold: PersistedState.empty.lowQuotaThreshold
+            activeAccountByTool: activeAccountByTool
         )
         try await accountStore.save(state)
     }
@@ -946,4 +987,43 @@ final class AppState: ObservableObject {
         return true
     }
 
+}
+
+private enum AppPreferences {
+    private static let refreshOnOpenKey = "QuotaBar.RefreshOnOpenEnabled"
+    private static let statusBarQuotaTextKey = "QuotaBar.StatusBarQuotaTextEnabled"
+    private static let recommendationStrategyKey = "QuotaBar.RecommendationStrategy"
+
+    static var refreshOnOpenEnabled: Bool {
+        bool(forKey: refreshOnOpenKey, defaultValue: true)
+    }
+
+    static var statusBarQuotaTextEnabled: Bool {
+        bool(forKey: statusBarQuotaTextKey, defaultValue: true)
+    }
+
+    static var recommendationStrategy: AccountRecommendationStrategy {
+        guard let rawValue = UserDefaults.standard.string(forKey: recommendationStrategyKey),
+              let strategy = AccountRecommendationStrategy(rawValue: rawValue) else {
+            return .preventWaste
+        }
+        return strategy
+    }
+
+    static func setRefreshOnOpenEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: refreshOnOpenKey)
+    }
+
+    static func setStatusBarQuotaTextEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: statusBarQuotaTextKey)
+    }
+
+    static func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {
+        UserDefaults.standard.set(strategy.rawValue, forKey: recommendationStrategyKey)
+    }
+
+    private static func bool(forKey key: String, defaultValue: Bool) -> Bool {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
+        return UserDefaults.standard.bool(forKey: key)
+    }
 }

@@ -100,8 +100,8 @@ struct AccountListPresenterTests {
         #expect(recommendedID == recommended.id)
     }
 
-    @Test("recommended account id chooses safest available account")
-    func recommendedAccountIDChoosesSafestAvailable() {
+    @Test("recommended account falls back to more quota when no deadline is known")
+    func recommendedAccountFallsBackToMoreQuotaWhenNoDeadlineIsKnown() {
         let lowQuota = Account(id: UUID(), tool: .codex, name: "low", createdAt: Date(timeIntervalSince1970: 1))
         let highQuota = Account(id: UUID(), tool: .codex, name: "high", createdAt: Date(timeIntervalSince1970: 2))
         let exhausted = Account(id: UUID(), tool: .codex, name: "exhausted", createdAt: Date(timeIntervalSince1970: 3))
@@ -140,13 +140,13 @@ struct AccountListPresenterTests {
         #expect(recommended == active.id)
     }
 
-    @Test("recommended account prefers expiring quota with substantial remaining usage")
-    func recommendedAccountPrefersExpiringQuotaWithSubstantialRemainingUsage() {
+    @Test("recommended account prefers quota window that resets soon")
+    func recommendedAccountPrefersQuotaWindowThatResetsSoon() {
         let highButFar = Account(id: UUID(), tool: .codex, name: "high-far", createdAt: Date(timeIntervalSince1970: 1))
         let lowerButSoon = Account(id: UUID(), tool: .codex, name: "lower-soon", createdAt: Date(timeIntervalSince1970: 2))
         let quotaByAccount = [
-            highButFar.id: snapshot(remaining: 90, accountValidUntil: Date(timeIntervalSince1970: 4_000_000)),
-            lowerButSoon.id: snapshot(remaining: 40, accountValidUntil: Date(timeIntervalSince1970: 36_000))
+            highButFar.id: snapshot(remaining: 90, resetAt: Date(timeIntervalSince1970: 4_000_000)),
+            lowerButSoon.id: snapshot(remaining: 40, resetAt: Date(timeIntervalSince1970: 36_000))
         ]
 
         let recommended = AccountListPresenter.recommendedAccountID(
@@ -159,8 +159,8 @@ struct AccountListPresenterTests {
         #expect(recommended == lowerButSoon.id)
     }
 
-    @Test("recommended account ignores near expiry without substantial remaining quota")
-    func recommendedAccountIgnoresNearExpiryWithoutSubstantialRemainingQuota() {
+    @Test("recommended account prefers low remaining quota before it expires")
+    func recommendedAccountPrefersLowRemainingQuotaBeforeItExpires() {
         let lowSoon = Account(id: UUID(), tool: .codex, name: "low-soon", createdAt: Date(timeIntervalSince1970: 1))
         let highLater = Account(id: UUID(), tool: .codex, name: "high-later", createdAt: Date(timeIntervalSince1970: 2))
         let quotaByAccount = [
@@ -173,6 +173,26 @@ struct AccountListPresenterTests {
             activeID: nil,
             quotaByAccount: quotaByAccount,
             loadStateByAccount: [:]
+        )
+
+        #expect(recommended == lowSoon.id)
+    }
+
+    @Test("maximize availability strategy keeps recommending the account with more quota")
+    func maximizeAvailabilityStrategyKeepsRecommendingMoreQuota() {
+        let lowSoon = Account(id: UUID(), tool: .codex, name: "low-soon", createdAt: Date(timeIntervalSince1970: 1))
+        let highLater = Account(id: UUID(), tool: .codex, name: "high-later", createdAt: Date(timeIntervalSince1970: 2))
+        let quotaByAccount = [
+            lowSoon.id: snapshot(remaining: 25, accountValidUntil: Date(timeIntervalSince1970: 36_000)),
+            highLater.id: snapshot(remaining: 90, accountValidUntil: Date(timeIntervalSince1970: 4_000_000))
+        ]
+
+        let recommended = AccountListPresenter.recommendedAccountID(
+            accounts: [lowSoon, highLater],
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:],
+            recommendationStrategy: .maximizeAvailability
         )
 
         #expect(recommended == highLater.id)
@@ -333,13 +353,13 @@ struct AccountListPresenterTests {
         #expect(result.map(\.id) == [highWeekly.id, lowWeekly.id])
     }
 
-    @Test("available accounts prioritize expiring quota with substantial remaining usage")
-    func availableAccountsPrioritizeExpiringQuotaWithSubstantialRemainingUsage() {
+    @Test("available accounts prioritize quota that resets soon")
+    func availableAccountsPrioritizeQuotaThatResetsSoon() {
         let highButFar = Account(id: UUID(), tool: .codex, name: "high-far", createdAt: Date(timeIntervalSince1970: 1))
         let lowerButSoon = Account(id: UUID(), tool: .codex, name: "low-soon", createdAt: Date(timeIntervalSince1970: 2))
         let quotaByAccount = [
-            highButFar.id: snapshot(remaining: 90, accountValidUntil: Date(timeIntervalSince1970: 1_800_000)),
-            lowerButSoon.id: snapshot(remaining: 40, accountValidUntil: Date(timeIntervalSince1970: 36_000))
+            highButFar.id: snapshot(remaining: 90, resetAt: Date(timeIntervalSince1970: 1_800_000)),
+            lowerButSoon.id: snapshot(remaining: 40, resetAt: Date(timeIntervalSince1970: 36_000))
         ]
 
         let result = AccountListPresenter.visibleAccounts(
@@ -354,8 +374,8 @@ struct AccountListPresenterTests {
         #expect(result.map(\.id) == [lowerButSoon.id, highButFar.id])
     }
 
-    @Test("near expiry account is not prioritized when little quota remains")
-    func nearExpiryAccountIsNotPrioritizedWhenLittleQuotaRemains() {
+    @Test("near expiry account is prioritized even when little quota remains")
+    func nearExpiryAccountIsPrioritizedEvenWhenLittleQuotaRemains() {
         let lowSoon = Account(id: UUID(), tool: .codex, name: "low-soon", createdAt: Date(timeIntervalSince1970: 1))
         let highLater = Account(id: UUID(), tool: .codex, name: "high-later", createdAt: Date(timeIntervalSince1970: 2))
         let quotaByAccount = [
@@ -372,11 +392,11 @@ struct AccountListPresenterTests {
             frozenOrder: nil
         )
 
-        #expect(result.map(\.id) == [highLater.id, lowSoon.id])
+        #expect(result.map(\.id) == [lowSoon.id, highLater.id])
     }
 
-    @Test("near expiry account is not prioritized when remaining quota is only moderate")
-    func nearExpiryAccountIsNotPrioritizedWhenRemainingQuotaIsOnlyModerate() {
+    @Test("near expiry account is prioritized when remaining quota is moderate")
+    func nearExpiryAccountIsPrioritizedWhenRemainingQuotaIsModerate() {
         let moderateSoon = Account(id: UUID(), tool: .codex, name: "moderate-soon", createdAt: Date(timeIntervalSince1970: 1))
         let highLater = Account(id: UUID(), tool: .codex, name: "high-later", createdAt: Date(timeIntervalSince1970: 2))
         let quotaByAccount = [
@@ -393,7 +413,7 @@ struct AccountListPresenterTests {
             frozenOrder: nil
         )
 
-        #expect(result.map(\.id) == [highLater.id, moderateSoon.id])
+        #expect(result.map(\.id) == [moderateSoon.id, highLater.id])
     }
 
     @Test("available accounts with equal utilization fall back to freshest snapshot")
