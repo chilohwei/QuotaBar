@@ -757,8 +757,8 @@ private final class StatusBarQuotaContentView: NSView {
 
         topLabel.stringValue = display.top.text
         bottomLabel.stringValue = display.bottom?.text ?? ""
-        topLabel.textColor = display.top.isZero ? .tertiaryLabelColor : .labelColor
-        bottomLabel.textColor = display.bottom?.isZero == true ? .tertiaryLabelColor : .labelColor
+        topLabel.textColor = statusBarQuotaTextColor(isZero: display.top.isZero)
+        bottomLabel.textColor = statusBarQuotaTextColor(isZero: display.bottom?.isZero == true)
         topLabel.isHidden = false
         bottomLabel.isHidden = display.bottom == nil
         updateTextConstraints(hasBottom: display.bottom != nil, hasText: true)
@@ -781,6 +781,10 @@ private final class StatusBarQuotaContentView: NSView {
         label.setContentCompressionResistancePriority(.required, for: .horizontal)
         label.setContentHuggingPriority(.required, for: .horizontal)
         label.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    private func statusBarQuotaTextColor(isZero: Bool) -> NSColor {
+        isZero ? .labelColor.withAlphaComponent(0.92) : .labelColor
     }
 
     private var topCenterConstraint: NSLayoutConstraint?

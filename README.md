@@ -1,15 +1,18 @@
 # QuotaBar
 
+[English](./README.en.md) | 简体中文
+
 QuotaBar 是一款 macOS 菜单栏工具，帮助你集中查看 Codex、Cursor、Claude Code 的账号额度，并在需要时快速切换本机正在使用的账号。
 
 <img width="456" height="578" alt="image" src="https://github.com/user-attachments/assets/bc6afa8b-e196-4be5-9982-061f453814f3" />
 
 ## 核心功能
 
-- 菜单栏常驻：从 macOS 菜单栏快速查看当前账号额度。
+- 菜单栏常驻：从 macOS 菜单栏直接查看当前账号剩余额度。
 - 多工具支持：支持 Codex、Cursor、Claude Code。
 - 额度查看：展示剩余额度、用量状态、重置周期和更新时间。
 - 多账号管理：支持添加、查看、删除和切换本机账号。
+- 智能推荐：支持按「消耗优先」或「余量优先」排序，推荐更适合当前使用的账号。
 - 可用账号筛选：快速找出仍有可用额度的账号。
 - 状态提醒：额度不足、无额度、刷新失败等状态会在面板中清晰展示。
 - 手动刷新：需要确认最新状态时，可以随时刷新。
