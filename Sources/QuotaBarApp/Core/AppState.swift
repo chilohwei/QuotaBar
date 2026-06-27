@@ -15,8 +15,8 @@ final class AppState: ObservableObject {
     @Published var updateBannerState: AppUpdateBannerState = .idle
     @Published var isLaunchAtLoginEnabled = false
     @Published var isRefreshOnOpenEnabled: Bool = AppPreferences.refreshOnOpenEnabled
-    @Published var isStatusBarQuotaTextEnabled: Bool = AppPreferences.statusBarQuotaTextEnabled
     @Published var recommendationStrategy: AccountRecommendationStrategy = AppPreferences.recommendationStrategy
+    @Published var menuBarVisibleTools: Set<ToolKind> = AppPreferences.menuBarVisibleTools
 
     private let accountStore = AccountStore()
     private let secretStore = SecretStoreService()
@@ -327,16 +327,23 @@ final class AppState: ObservableObject {
         AppPreferences.setRefreshOnOpenEnabled(enabled)
     }
 
-    func setStatusBarQuotaTextEnabled(_ enabled: Bool) {
-        guard isStatusBarQuotaTextEnabled != enabled else { return }
-        isStatusBarQuotaTextEnabled = enabled
-        AppPreferences.setStatusBarQuotaTextEnabled(enabled)
-    }
-
     func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {
         guard recommendationStrategy != strategy else { return }
         recommendationStrategy = strategy
         AppPreferences.setRecommendationStrategy(strategy)
+    }
+
+    func isToolVisibleInMenuBar(_ tool: ToolKind) -> Bool {
+        menuBarVisibleTools.contains(tool)
+    }
+
+    func setToolVisibleInMenuBar(_ tool: ToolKind, _ visible: Bool) {
+        if visible {
+            menuBarVisibleTools.insert(tool)
+        } else {
+            menuBarVisibleTools.remove(tool)
+        }
+        AppPreferences.setMenuBarVisibleTools(menuBarVisibleTools)
     }
 
     @discardableResult
@@ -686,6 +693,17 @@ final class AppState: ObservableObject {
                 secret: refreshedSecret
             )
             let renamed = updateAccountIdentityIfNeeded(accountID: account.id, identity: snapshot.accountIdentifier)
+            if shouldPreserveExistingClaudeQuota(snapshot, for: account) {
+                errorByAccount[account.id] = nil
+                loadStateByAccount[account.id] = .stale
+                refreshFailureCountByAccount[account.id] = nil
+                refreshBackoffUntilByAccount[account.id] = nil
+                if renamed || settingsChanged || readableNameUpdated {
+                    try await persistState()
+                }
+                AppLog.refresh.info("Preserved existing Claude Code quota for account \(account.id.uuidString, privacy: .public) while waiting for statusLine data")
+                return
+            }
             quotaByAccount[account.id] = snapshot
             errorByAccount[account.id] = nil
             loadStateByAccount[account.id] = .loaded
@@ -711,6 +729,21 @@ final class AppState: ObservableObject {
             errorByAccount[account.id] = "刷新失败: \(resolvedErrorMessage(error))"
             loadStateByAccount[account.id] = quotaByAccount[account.id] == nil ? .failed : .stale
         }
+    }
+
+    private func shouldPreserveExistingClaudeQuota(_ snapshot: QuotaSnapshot, for account: Account) -> Bool {
+        guard account.tool == .claudeCode,
+              snapshot.orderedMetrics.isEmpty,
+              quotaByAccount[account.id]?.orderedMetrics.isEmpty == false else {
+            return false
+        }
+
+        if snapshot.source == "Claude Code" {
+            return true
+        }
+
+        return snapshot.source == "Claude Code StatusLine"
+            && snapshot.planName == "Claude.ai"
     }
 
     private func persistState() async throws {
@@ -991,15 +1024,24 @@ final class AppState: ObservableObject {
 
 private enum AppPreferences {
     private static let refreshOnOpenKey = "QuotaBar.RefreshOnOpenEnabled"
-    private static let statusBarQuotaTextKey = "QuotaBar.StatusBarQuotaTextEnabled"
     private static let recommendationStrategyKey = "QuotaBar.RecommendationStrategy"
+    private static let menuBarVisibleToolsKey = "QuotaBar.MenuBarVisibleTools"
 
     static var refreshOnOpenEnabled: Bool {
         bool(forKey: refreshOnOpenKey, defaultValue: true)
     }
 
-    static var statusBarQuotaTextEnabled: Bool {
-        bool(forKey: statusBarQuotaTextKey, defaultValue: true)
+    static var menuBarVisibleTools: Set<ToolKind> {
+        // Absent key (first launch) means show everything; an explicitly empty
+        // saved array is honored as "show none".
+        guard let raw = UserDefaults.standard.array(forKey: menuBarVisibleToolsKey) as? [String] else {
+            return Set(ToolKind.allCases)
+        }
+        return Set(raw.compactMap(ToolKind.init(rawValue:)))
+    }
+
+    static func setMenuBarVisibleTools(_ tools: Set<ToolKind>) {
+        UserDefaults.standard.set(tools.map(\.rawValue), forKey: menuBarVisibleToolsKey)
     }
 
     static var recommendationStrategy: AccountRecommendationStrategy {
@@ -1012,10 +1054,6 @@ private enum AppPreferences {
 
     static func setRefreshOnOpenEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: refreshOnOpenKey)
-    }
-
-    static func setStatusBarQuotaTextEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: statusBarQuotaTextKey)
     }
 
     static func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {

@@ -27,8 +27,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        appState.$isStatusBarQuotaTextEnabled
-            .removeDuplicates()
+        appState.$accounts
+            .debounce(for: .milliseconds(40), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.statusBarController?.updateStatusTitle()
+            }
+            .store(in: &cancellables)
+
+        appState.$menuBarVisibleTools
+            .debounce(for: .milliseconds(40), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 self?.statusBarController?.updateStatusTitle()
             }

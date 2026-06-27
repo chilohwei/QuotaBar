@@ -77,7 +77,6 @@ enum AppString: String {
     case language
     case launchAtLogin
     case launchAtLoginFailedTitle
-    case menuBarQuotaText
     case nearLimit
     case noQuota
     case normal
@@ -93,7 +92,8 @@ enum AppString: String {
     case restartRequiredTitle
     case settings
     case settingsApp
-    case settingsDisplay
+    case settingsMenuBar
+    case menuBarToolsHint
     case settingsRecommendation
     case settingsRefresh
     case show
@@ -507,7 +507,6 @@ struct AppText {
             .language: "语言",
             .launchAtLogin: "开机自启",
             .launchAtLoginFailedTitle: "开机自启设置失败",
-            .menuBarQuotaText: "菜单栏显示剩余额度",
             .nearLimit: "偏低",
             .noQuota: "无额度",
             .normal: "正常",
@@ -525,7 +524,8 @@ struct AppText {
             .restartRequiredTitle: "重启后生效",
             .settings: "设置",
             .settingsApp: "应用",
-            .settingsDisplay: "显示",
+            .settingsMenuBar: "菜单栏",
+            .menuBarToolsHint: "选择在菜单栏显示哪些工具的额度",
             .settingsRecommendation: "推荐",
             .settingsRefresh: "刷新",
             .show: "显示",
@@ -564,7 +564,6 @@ struct AppText {
             .language: "語言",
             .launchAtLogin: "開機自啟",
             .launchAtLoginFailedTitle: "開機自啟設定失敗",
-            .menuBarQuotaText: "選單列顯示剩餘額度",
             .nearLimit: "偏低",
             .noQuota: "無額度",
             .normal: "正常",
@@ -582,7 +581,8 @@ struct AppText {
             .restartRequiredTitle: "重啟後生效",
             .settings: "設定",
             .settingsApp: "應用",
-            .settingsDisplay: "顯示",
+            .settingsMenuBar: "選單列",
+            .menuBarToolsHint: "選擇在選單列顯示哪些工具的額度",
             .settingsRecommendation: "推薦",
             .settingsRefresh: "刷新",
             .show: "顯示",
@@ -621,7 +621,6 @@ struct AppText {
             .language: "Language",
             .launchAtLogin: "Launch at Login",
             .launchAtLoginFailedTitle: "Launch at Login Failed",
-            .menuBarQuotaText: "Show quota in menu bar",
             .nearLimit: "Low",
             .noQuota: "No quota",
             .normal: "OK",
@@ -639,7 +638,8 @@ struct AppText {
             .restartRequiredTitle: "Restart required",
             .settings: "Settings",
             .settingsApp: "App",
-            .settingsDisplay: "Display",
+            .settingsMenuBar: "Menu Bar",
+            .menuBarToolsHint: "Choose which tools show quota in the menu bar",
             .settingsRecommendation: "Recommend",
             .settingsRefresh: "Refresh",
             .show: "Show",

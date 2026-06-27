@@ -83,77 +83,63 @@ final class StatusBarController: NSObject {
     func updateStatusTitle() {
         guard let button = statusItem.button else { return }
 
-        var display: StatusBarQuotaDisplay?
-        if let active = appState.activeAccount(for: appState.selectedTool),
-           let quota = appState.quotaByAccount[active.id],
-           let remainingRatio = statusBarRemainingRatio(from: quota) {
-            let remaining = Int(max(remainingRatio * 100, 0).rounded())
-            if appState.isStatusBarQuotaTextEnabled {
-                display = statusBarQuotaDisplay(tool: active.tool, quota: quota)
-            }
-            button.toolTip = appState.text.statusBarTooltip(
-                tool: appState.selectedTool,
-                remainingPercent: remaining,
-                accountName: active.name
-            )
-        } else {
-            button.toolTip = appState.text.string(.statusBarNoData)
-        }
+        let entries = statusBarQuotaEntries()
+        let display = entries.isEmpty ? nil : StatusBarQuotaDisplay(items: entries)
+
+        button.toolTip = statusBarTooltip(for: entries)
         button.contentTintColor = nil
         statusBarContentView?.configure(display: display)
         statusItem.length = display?.preferredStatusItemLength ?? NSStatusItem.squareLength
         button.setAccessibilityLabel(button.toolTip ?? appState.text.string(.statusBarNoData))
     }
 
-    private func statusBarRemainingRatio(from quota: QuotaSnapshot) -> Double? {
-        quota.statusBarMetric?.ratio
-    }
+    private func statusBarQuotaEntries() -> [StatusBarQuotaEntry] {
+        ToolKind.allCases.compactMap { tool in
+            guard appState.isToolVisibleInMenuBar(tool),
+                  let active = appState.activeAccount(for: tool),
+                  let quota = appState.quotaByAccount[active.id] else {
+                return nil
+            }
 
-    private func statusBarQuotaDisplay(tool: ToolKind, quota: QuotaSnapshot) -> StatusBarQuotaDisplay? {
-        switch tool {
-        case .codex:
-            return makeStatusBarQuotaDisplay(
-                top: quota.primaryPanelMetric,
-                bottom: quota.secondaryPanelMetric
-            )
-        case .cursor:
-            return makeStatusBarQuotaDisplay(
-                top: cursorCurrentMetric(from: quota),
-                bottom: quota.primaryPanelMetric
-            )
-        case .claudeCode:
-            return makeStatusBarQuotaDisplay(
-                top: quota.primaryPanelMetric ?? quota.tertiaryPanelMetric,
-                bottom: quota.secondaryPanelMetric
+            // Two stacked lines next to the logo: top = primary window (e.g. 5h),
+            // bottom = secondary window (e.g. weekly). Read live from the snapshot.
+            let lines = [quota.primaryPanelMetric, quota.secondaryPanelMetric]
+                .compactMap(quotaLine(for:))
+            guard !lines.isEmpty else { return nil }
+
+            let remainingRatio = statusBarRemainingRatio(from: quota) ?? 0
+            return StatusBarQuotaEntry(
+                tool: tool,
+                accountName: active.name,
+                remainingPercent: Int(max(remainingRatio * 100, 0).rounded()),
+                lines: lines
             )
         }
     }
 
-    private func cursorCurrentMetric(from quota: QuotaSnapshot) -> QuotaDisplayMetric? {
-        [quota.secondaryPanelMetric, quota.tertiaryPanelMetric]
-            .compactMap { $0 }
-            .min { lhs, rhs in
-                (lhs.ratio ?? .infinity) < (rhs.ratio ?? .infinity)
-            } ?? quota.statusBarMetric
+    private func statusBarRemainingRatio(from quota: QuotaSnapshot) -> Double? {
+        quota.statusBarMetric?.ratio
     }
 
-    private func makeStatusBarQuotaDisplay(
-        top: QuotaDisplayMetric?,
-        bottom: QuotaDisplayMetric?
-    ) -> StatusBarQuotaDisplay? {
-        let resolvedTop = top ?? bottom
-        let resolvedBottom = bottom == resolvedTop ? nil : bottom
-        guard let topValue = quotaValue(for: resolvedTop) else { return nil }
-        return StatusBarQuotaDisplay(
-            top: topValue,
-            bottom: quotaValue(for: resolvedBottom)
-        )
+    private func statusBarTooltip(for entries: [StatusBarQuotaEntry]) -> String {
+        guard !entries.isEmpty else {
+            return appState.text.string(.statusBarNoData)
+        }
+        return entries
+            .map { entry in
+                appState.text.statusBarTooltip(
+                    tool: entry.tool,
+                    remainingPercent: entry.remainingPercent,
+                    accountName: entry.accountName
+                )
+            }
+            .joined(separator: "\n")
     }
 
-    private func quotaValue(for metric: QuotaDisplayMetric?) -> StatusBarQuotaValue? {
+    private func quotaLine(for metric: QuotaDisplayMetric?) -> StatusBarQuotaLine? {
         guard let ratio = metric?.ratio else { return nil }
         let percent = Int((min(max(ratio, 0), 1) * 100).rounded())
-        return StatusBarQuotaValue(text: "\(percent)%", isZero: percent <= 0)
+        return StatusBarQuotaLine(text: "\(percent)%", isZero: percent <= 0)
     }
 
     private func configureStatusItem() {
@@ -292,7 +278,7 @@ final class StatusBarController: NSObject {
         button.image = nil
         button.title = ""
 
-        let contentView = StatusBarQuotaContentView(icon: icon)
+        let contentView = StatusBarQuotaContentView(fallbackIcon: icon)
         contentView.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(contentView)
         NSLayoutConstraint.activate([
@@ -669,63 +655,81 @@ private final class UpdateProgressRelay: @unchecked Sendable {
     }
 }
 
-@MainActor
-private struct StatusBarQuotaDisplay {
-    let top: StatusBarQuotaValue
-    let bottom: StatusBarQuotaValue?
-
-    var preferredStatusItemLength: CGFloat {
-        let topWidth = top.text.size(withAttributes: [.font: StatusBarQuotaContentView.quotaFont]).width
-        let bottomWidth = bottom?.text.size(withAttributes: [.font: StatusBarQuotaContentView.quotaFont]).width ?? 0
-        let textWidth = ceil(max(topWidth, bottomWidth))
-        return max(NSStatusItem.squareLength, 25 + textWidth)
-    }
+private struct StatusBarQuotaEntry {
+    let tool: ToolKind
+    let accountName: String
+    let remainingPercent: Int
+    let lines: [StatusBarQuotaLine]
 }
 
-private struct StatusBarQuotaValue {
+private struct StatusBarQuotaLine {
     let text: String
     let isZero: Bool
 }
 
 @MainActor
+private struct StatusBarQuotaDisplay {
+    let items: [StatusBarQuotaEntry]
+
+    var contentWidth: CGFloat {
+        let itemWidths = items
+            .map(StatusBarQuotaItemView.itemWidth(for:))
+            .reduce(0, +)
+        return ceil(
+            StatusBarQuotaContentView.contentHorizontalInset * 2
+                + StatusBarQuotaContentView.logoSize
+                + StatusBarQuotaContentView.logoQuotaSpacing
+                + itemWidths
+        )
+    }
+
+    var preferredStatusItemLength: CGFloat {
+        max(NSStatusItem.squareLength, contentWidth + 4)
+    }
+}
+
+@MainActor
 private final class StatusBarQuotaContentView: NSView {
     static let preferredHeight: CGFloat = 22
-    static let quotaFont = NSFont.monospacedDigitSystemFont(ofSize: 9.2, weight: .semibold)
+    static let contentHeight: CGFloat = 20
+    static let contentHorizontalInset: CGFloat = 2
+    static let logoSize: CGFloat = 17
+    static let logoQuotaSpacing: CGFloat = 6
 
-    private let imageView = NSImageView()
-    private let topLabel = NSTextField(labelWithString: "")
-    private let bottomLabel = NSTextField(labelWithString: "")
+    private let logoImageView = NSImageView()
+    private let stackView = NSStackView()
+    private var currentDisplay: StatusBarQuotaDisplay?
 
-    init(icon: NSImage) {
+    init(fallbackIcon: NSImage) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = false
 
-        let iconCopy = icon.copy() as? NSImage ?? icon
+        let iconCopy = fallbackIcon.copy() as? NSImage ?? fallbackIcon
         iconCopy.isTemplate = true
-        imageView.image = iconCopy
-        imageView.imageScaling = .scaleProportionallyDown
-        imageView.contentTintColor = .labelColor
-        imageView.translatesAutoresizingMaskIntoConstraints = false
+        logoImageView.image = iconCopy
+        logoImageView.imageScaling = .scaleProportionallyDown
+        logoImageView.contentTintColor = .labelColor
+        logoImageView.translatesAutoresizingMaskIntoConstraints = false
 
-        configureLabel(topLabel)
-        configureLabel(bottomLabel)
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.distribution = .gravityAreas
+        stackView.spacing = 0
+        stackView.translatesAutoresizingMaskIntoConstraints = false
 
-        addSubview(imageView)
-        addSubview(topLabel)
-        addSubview(bottomLabel)
+        addSubview(logoImageView)
+        addSubview(stackView)
 
         NSLayoutConstraint.activate([
-            imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            imageView.widthAnchor.constraint(equalToConstant: 17.5),
-            imageView.heightAnchor.constraint(equalToConstant: 17.5),
+            logoImageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.contentHorizontalInset),
+            logoImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            logoImageView.widthAnchor.constraint(equalToConstant: Self.logoSize),
+            logoImageView.heightAnchor.constraint(equalToConstant: Self.logoSize),
 
-            topLabel.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 3.5),
-            topLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-
-            bottomLabel.leadingAnchor.constraint(equalTo: topLabel.leadingAnchor),
-            bottomLabel.trailingAnchor.constraint(equalTo: topLabel.trailingAnchor)
+            stackView.leadingAnchor.constraint(equalTo: logoImageView.trailingAnchor, constant: Self.logoQuotaSpacing),
+            stackView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.contentHorizontalInset),
+            stackView.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
 
         configure(display: nil)
@@ -741,78 +745,315 @@ private final class StatusBarQuotaContentView: NSView {
     }
 
     func configure(display: StatusBarQuotaDisplay?) {
-        imageView.contentTintColor = .labelColor
-        topLabel.textColor = .labelColor
-        bottomLabel.textColor = .secondaryLabelColor
+        currentDisplay = display
+        logoImageView.contentTintColor = .labelColor
 
         guard let display else {
-            topLabel.stringValue = ""
-            bottomLabel.stringValue = ""
-            topLabel.isHidden = true
-            bottomLabel.isHidden = true
-            updateTextConstraints(hasBottom: false, hasText: false)
+            removeQuotaItems()
+            stackView.isHidden = true
             invalidateIntrinsicContentSize()
             return
         }
 
-        topLabel.stringValue = display.top.text
-        bottomLabel.stringValue = display.bottom?.text ?? ""
-        topLabel.textColor = statusBarQuotaTextColor(isZero: display.top.isZero)
-        bottomLabel.textColor = statusBarQuotaTextColor(isZero: display.bottom?.isZero == true)
-        topLabel.isHidden = false
-        bottomLabel.isHidden = display.bottom == nil
-        updateTextConstraints(hasBottom: display.bottom != nil, hasText: true)
+        removeQuotaItems()
+        stackView.isHidden = false
+
+        for item in display.items {
+            stackView.addArrangedSubview(StatusBarQuotaItemView(item: item))
+        }
+
         invalidateIntrinsicContentSize()
     }
 
     override var intrinsicContentSize: NSSize {
-        let labelWidth = max(
-            topLabel.intrinsicContentSize.width,
-            bottomLabel.isHidden ? 0 : bottomLabel.intrinsicContentSize.width
+        NSSize(
+            width: currentDisplay?.contentWidth ?? Self.logoSize + Self.contentHorizontalInset * 2,
+            height: Self.preferredHeight
         )
-        let width = 17.5 + (labelWidth > 0 ? 3.5 + labelWidth : 0)
-        return NSSize(width: ceil(width), height: Self.preferredHeight)
     }
 
-    private func configureLabel(_ label: NSTextField) {
-        label.font = Self.quotaFont
-        label.alignment = .left
-        label.lineBreakMode = .byClipping
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.translatesAutoresizingMaskIntoConstraints = false
+    private func removeQuotaItems() {
+        for subview in stackView.arrangedSubviews {
+            stackView.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
     }
+}
 
-    private func statusBarQuotaTextColor(isZero: Bool) -> NSColor {
-        isZero ? .labelColor.withAlphaComponent(0.92) : .labelColor
-    }
+@MainActor
+private final class StatusBarQuotaItemView: NSView {
+    static let lineFont = NSFont.monospacedDigitSystemFont(ofSize: 8.0, weight: .semibold)
+    private static let toolIconSize: CGFloat = 14
+    private static let iconTextSpacing: CGFloat = 3.5
+    private static let lineHeight: CGFloat = 10
+    private static let lineSpacing: CGFloat = 0
+    private static let separatorWidth: CGFloat = 1
+    private static let separatorLeading: CGFloat = 6
+    private static let separatorTrailing: CGFloat = 6
 
-    private var topCenterConstraint: NSLayoutConstraint?
-    private var topStackConstraint: NSLayoutConstraint?
-    private var bottomStackConstraint: NSLayoutConstraint?
+    private let separatorView = NSView()
+    private let toolLogoView: StatusBarToolLogoView
+    private let labelStack = NSStackView()
+    private let item: StatusBarQuotaEntry
 
-    private func updateTextConstraints(hasBottom: Bool, hasText: Bool) {
-        NSLayoutConstraint.deactivate(
-            [topCenterConstraint, topStackConstraint, bottomStackConstraint].compactMap { $0 }
-        )
+    init(item: StatusBarQuotaEntry) {
+        self.item = item
+        self.toolLogoView = StatusBarToolLogoView(tool: item.tool, size: Self.toolIconSize)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
 
-        guard hasText else {
-            topCenterConstraint = nil
-            topStackConstraint = nil
-            bottomStackConstraint = nil
-            return
+        separatorView.wantsLayer = true
+        separatorView.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.52).cgColor
+        separatorView.translatesAutoresizingMaskIntoConstraints = false
+
+        labelStack.orientation = .vertical
+        labelStack.alignment = .leading
+        labelStack.spacing = Self.lineSpacing
+        labelStack.distribution = .fillEqually
+        labelStack.translatesAutoresizingMaskIntoConstraints = false
+
+        for line in item.lines {
+            let label = NSTextField(labelWithString: line.text)
+            label.font = Self.lineFont
+            label.textColor = line.isZero
+                ? .systemRed
+                : .labelColor
+            label.alignment = .left
+            label.lineBreakMode = .byClipping
+            label.setContentCompressionResistancePriority(.required, for: .horizontal)
+            label.setContentHuggingPriority(.required, for: .horizontal)
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.heightAnchor.constraint(equalToConstant: Self.lineHeight).isActive = true
+            labelStack.addArrangedSubview(label)
         }
 
-        if hasBottom {
-            topStackConstraint = topLabel.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -0.5)
-            bottomStackConstraint = bottomLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: -0.5)
-            topCenterConstraint = nil
-            NSLayoutConstraint.activate([topStackConstraint, bottomStackConstraint].compactMap { $0 })
+        addSubview(separatorView)
+        addSubview(toolLogoView)
+        addSubview(labelStack)
+
+        NSLayoutConstraint.activate([
+            separatorView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.separatorLeading),
+            separatorView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            separatorView.widthAnchor.constraint(equalToConstant: Self.separatorWidth),
+            separatorView.heightAnchor.constraint(equalToConstant: 12),
+
+            toolLogoView.leadingAnchor.constraint(equalTo: separatorView.trailingAnchor, constant: Self.separatorTrailing),
+            toolLogoView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            toolLogoView.widthAnchor.constraint(equalToConstant: Self.toolIconSize),
+            toolLogoView.heightAnchor.constraint(equalToConstant: Self.toolIconSize),
+
+            labelStack.leadingAnchor.constraint(equalTo: toolLogoView.trailingAnchor, constant: Self.iconTextSpacing),
+            labelStack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            labelStack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(
+            width: Self.itemWidth(for: item),
+            height: StatusBarQuotaContentView.contentHeight
+        )
+    }
+
+    static func itemWidth(for item: StatusBarQuotaEntry) -> CGFloat {
+        let widest = item.lines
+            .map { $0.text.size(withAttributes: [.font: lineFont]).width }
+            .max() ?? 0
+        return ceil(
+            separatorLeading
+                + separatorWidth
+                + separatorTrailing
+                + toolIconSize
+                + iconTextSpacing
+                + widest
+        )
+    }
+}
+
+@MainActor
+private final class StatusBarToolLogoView: NSView {
+    private let tool: ToolKind
+    private let logoSize: CGFloat
+    private let imageView = NSImageView()
+
+    init(tool: ToolKind, size: CGFloat) {
+        self.tool = tool
+        self.logoSize = size
+        super.init(frame: NSRect(origin: .zero, size: NSSize(width: size, height: size)))
+        translatesAutoresizingMaskIntoConstraints = false
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            imageView.topAnchor.constraint(equalTo: topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+
+        updateImage()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: logoSize, height: logoSize)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateImage()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateImage()
+    }
+
+    private func updateImage() {
+        imageView.image = StatusBarToolLogoImageCache.image(
+            for: tool,
+            size: logoSize,
+            color: resolvedIconColor()
+        )
+    }
+
+    private func resolvedIconColor() -> NSColor {
+        let appearance = effectiveAppearance
+        let fallback = Self.fallbackIconColor(for: appearance)
+        var color = fallback
+        appearance.performAsCurrentDrawingAppearance {
+            color = NSColor.labelColor.usingColorSpace(.deviceRGB) ?? fallback
+        }
+        return color
+    }
+
+    private static func fallbackIconColor(for appearance: NSAppearance) -> NSColor {
+        let match = appearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight])
+        return match == .darkAqua || match == .vibrantDark ? .white : .black
+    }
+}
+
+@MainActor
+enum StatusBarToolLogoImageCache {
+    private static var tintedCache: [String: NSImage] = [:]
+
+    static func image(for tool: ToolKind, size: CGFloat, color: NSColor) -> NSImage {
+        let resolvedColor = color.usingColorSpace(.deviceRGB) ?? .labelColor
+        let key = [
+            tool.rawValue,
+            String(format: "%.2f", size),
+            String(format: "%.3f", resolvedColor.redComponent),
+            String(format: "%.3f", resolvedColor.greenComponent),
+            String(format: "%.3f", resolvedColor.blueComponent),
+            String(format: "%.3f", resolvedColor.alphaComponent)
+        ].joined(separator: "-")
+
+        if let cached = tintedCache[key] {
+            return cached
+        }
+
+        let sourceImage: NSImage
+        if let url = AppResourceLocator.url(
+            forResource: tool.logoResourceName,
+            withExtension: "png",
+            subdirectory: "Logos"
+        ),
+           let loaded = NSImage(contentsOf: url) {
+            sourceImage = loaded
         } else {
-            topCenterConstraint = topLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
-            topStackConstraint = nil
-            bottomStackConstraint = nil
-            topCenterConstraint?.isActive = true
+            sourceImage = fallbackTemplateImage(for: tool)
+        }
+
+        let image = rasterizedIcon(from: sourceImage, size: size, color: resolvedColor)
+        tintedCache[key] = image
+        return image
+    }
+
+    private static func rasterizedIcon(from image: NSImage, size: CGFloat, color: NSColor) -> NSImage {
+        guard let tiff = image.tiffRepresentation,
+              let source = NSBitmapImageRep(data: tiff),
+              let output = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: source.pixelsWide,
+                pixelsHigh: source.pixelsHigh,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+              ) else {
+            let fallback = image.copy() as? NSImage ?? image
+            fallback.size = NSSize(width: size, height: size)
+            fallback.isTemplate = true
+            return fallback
+        }
+
+        let resolvedColor = color.usingColorSpace(.deviceRGB) ?? .white
+        let hasAlpha = source.hasAlpha
+        for y in 0 ..< source.pixelsHigh {
+            for x in 0 ..< source.pixelsWide {
+                guard let color = source.colorAt(x: x, y: y),
+                      let rgb = color.usingColorSpace(.deviceRGB) else {
+                    output.setColor(.clear, atX: x, y: y)
+                    continue
+                }
+
+                let alpha = hasAlpha
+                    ? rgb.alphaComponent
+                    : alphaFromLuminance(red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent)
+                output.setColor(
+                    NSColor(
+                        deviceRed: resolvedColor.redComponent,
+                        green: resolvedColor.greenComponent,
+                        blue: resolvedColor.blueComponent,
+                        alpha: alpha * resolvedColor.alphaComponent
+                    ),
+                    atX: x,
+                    y: y
+                )
+            }
+        }
+
+        let rendered = NSImage(size: NSSize(width: size, height: size))
+        rendered.addRepresentation(output)
+        rendered.isTemplate = false
+        return rendered
+    }
+
+    private static func alphaFromLuminance(red: CGFloat, green: CGFloat, blue: CGFloat) -> CGFloat {
+        let luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722
+        if luminance <= 0.08 { return 0 }
+        if luminance >= 0.26 { return 1 }
+        return (luminance - 0.08) / 0.18
+    }
+
+    private static func fallbackTemplateImage(for tool: ToolKind) -> NSImage {
+        switch tool {
+        case .codex:
+            return Branding.makeBrandMarkIcon(size: 32, monochrome: true)
+        case .cursor:
+            return NSImage(systemSymbolName: "cube.fill", accessibilityDescription: nil)
+                ?? NSImage(systemSymbolName: "square.grid.2x2.fill", accessibilityDescription: nil)
+                ?? Branding.makeBrandMarkIcon(size: 32, monochrome: true)
+        case .claudeCode:
+            return NSImage(systemSymbolName: "asterisk", accessibilityDescription: nil)
+                ?? Branding.makeBrandMarkIcon(size: 32, monochrome: true)
         }
     }
+
 }

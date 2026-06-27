@@ -31,10 +31,14 @@ struct ClaudeCodeProvider: Provider {
 
     func authenticateViaBrowser() async throws -> String {
         do {
+            let previous = try? await readClaudeCodeCredentials()
             try await runClaudeAuthLogin(timeout: 300)
             let credentials = try await readClaudeCodeCredentials()
             guard credentials.loggedIn else {
                 throw ProviderError.unsupported(claudeLoginRequiredMessage)
+            }
+            if shouldClearStatusLineSnapshot(previous: previous, next: credentials) {
+                try? fileService.removeItemIfExists(at: AppPaths.claudeCodeStatusFile.path)
             }
             try installQuotaBarStatusLine()
             return try encodeCredentials(credentials)
@@ -56,6 +60,7 @@ struct ClaudeCodeProvider: Provider {
 
     func activate(account: Account, secret: String) async throws {
         let stored = try parseCredentials(secret)
+        let previous = try? await readClaudeCodeCredentials()
         var replacedCredentials = false
         if hasRestorableClaudeArtifacts(stored) {
             try restoreClaudeArtifacts(from: stored)
@@ -72,7 +77,7 @@ struct ClaudeCodeProvider: Provider {
               claudeCredentialsRepresentSameAccount(latest, stored) else {
             throw ProviderError.unsupported("Claude Code 切换后读取到的账号不一致；请在 Claude Code 中切到该账号后重新添加。")
         }
-        if replacedCredentials {
+        if replacedCredentials, shouldClearStatusLineSnapshot(previous: previous, next: stored) {
             try? fileService.removeItemIfExists(at: AppPaths.claudeCodeStatusFile.path)
         }
         try installQuotaBarStatusLine()
@@ -819,6 +824,14 @@ struct ClaudeCodeProvider: Provider {
         }
 
         return false
+    }
+
+    private func shouldClearStatusLineSnapshot(
+        previous: ClaudeCodeCredentials?,
+        next: ClaudeCodeCredentials
+    ) -> Bool {
+        guard let previous, previous.loggedIn else { return true }
+        return !claudeCredentialsRepresentSameAccount(previous, next)
     }
 
     private func legacyIdentity(from credentials: ClaudeCodeCredentials) -> String {

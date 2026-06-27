@@ -12,12 +12,12 @@ struct AccountCardView: View {
     let quota: QuotaSnapshot?
     let errorMessage: String?
     let canActivate: Bool
-    let isPrimaryVisibleCard: Bool
     let refreshCycleID: Int
     let onActivate: () -> Void
     let onRefresh: () -> Void
     let onDelete: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isConfirmingDelete = false
     @State private var isHovering = false
     @State private var refreshFeedback: CardRefreshFeedback = .idle
@@ -25,7 +25,7 @@ struct AccountCardView: View {
     @State private var wasRefreshingInActiveCycle = false
     @State private var hideRefreshFeedbackTask: Task<Void, Never>?
 
-    private let cardCornerRadius: CGFloat = 12
+    private let cardCornerRadius: CGFloat = Branding.radiusCard
 
     private var text: AppText { AppText(language: language) }
 
@@ -104,41 +104,9 @@ struct AccountCardView: View {
             }
         }
 
-        var tint: Color {
-            switch self {
-            case .free:
-                return Branding.inkMuted
-            case .apiKey, .plus, .team:
-                return Branding.accentBlueDark
-            case .pro, .claudeFirstParty:
-                return Branding.success
-            case .proPlus, .ultra, .max, .unlimited, .claudeProvider:
-                return Branding.warning
-            case .enterprise:
-                return Branding.inkStrong
-            case .unknown:
-                return Branding.accentBlueDark
-            }
-        }
-
-        var background: Color {
-            switch self {
-            case .free:
-                return Branding.chipSurface
-            case .apiKey, .plus:
-                return Branding.accentBlueSoft
-            case .team:
-                return Branding.activeChipSurface
-            case .pro, .claudeFirstParty:
-                return Branding.successSoft
-            case .proPlus, .ultra, .max, .unlimited, .claudeProvider:
-                return Branding.warningSoft
-            case .enterprise:
-                return Branding.metricSurface
-            case .unknown:
-                return Branding.accentBlueSoft
-            }
-        }
+        // Plan name is descriptive metadata, not a status, so it stays neutral —
+        // only quota health (green/amber/red) and the active state (blue) carry hue.
+        var tint: Color { Branding.inkMuted }
 
         var isPaid: Bool {
             switch self {
@@ -152,7 +120,7 @@ struct AccountCardView: View {
         }
     }
 
-    private var planSummaryBadge: (text: String, tint: Color, background: Color)? {
+    private var planSummaryBadge: (text: String, tint: Color)? {
         guard let rawPlan = quota?.planName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !rawPlan.isEmpty else {
             return nil
@@ -167,7 +135,7 @@ struct AccountCardView: View {
             parts.append(text.billingCycle(cycle))
         }
 
-        return (parts.joined(separator: " · "), type.tint, type.background)
+        return (parts.joined(separator: " · "), type.tint)
     }
 
     private func subscriptionType(from rawPlan: String, tool: ToolKind) -> SubscriptionType {
@@ -268,10 +236,6 @@ struct AccountCardView: View {
         return items
     }
 
-    private var useRingMetricLayout: Bool {
-        account.tool == .cursor
-    }
-
     private var hasAnyQuotaRemaining: Bool {
         if remainingRatios.contains(where: { $0 > 0.001 }) {
             return true
@@ -342,12 +306,6 @@ struct AccountCardView: View {
         if shouldHideRefreshingStatusBadge {
             return false
         }
-        if useRingMetricLayout, status == .noQuota {
-            // Cursor ring tiles already communicate zero quota via 0%,
-            // so suppress the duplicate "No Quota" badge.
-            return false
-        }
-
         switch status {
         case .healthy, .warning, .exhausted:
             return false
@@ -365,30 +323,32 @@ struct AccountCardView: View {
     }
 
     private var cardFill: Color {
-        if isActive { return Branding.activeCardSurface }
-        if isHovering { return Branding.activeCardSurface.opacity(0.72) }
+        if isActive {
+            return isHovering ? Branding.activeHoverCardSurface : Branding.activeCardSurface
+        }
+        if isHovering { return Branding.hoverCardSurface }
         return Branding.cardSurface
     }
 
     private var cardStroke: Color {
         if isActive { return Branding.borderSelected }
-        if isHovering { return Branding.borderSelected.opacity(0.55) }
-        return Branding.cardStroke
+        if isHovering { return Branding.borderSelected.opacity(0.44) }
+        return Branding.controlStroke.opacity(0.64)
     }
 
-    private var shouldRenderActions: Bool {
-        isPrimaryVisibleCard || isHovering
+    private var shouldRevealActions: Bool {
+        isActive || isHovering
     }
 
-    private var shouldShowRefreshAction: Bool {
-        shouldRenderActions
-    }
-
+    // Trailing space the header reserves so the account name never collides with
+    // the text action buttons. English labels are wider than the CJK ones.
     private var actionZoneWidth: CGFloat {
-        if isActive {
-            return language == .english ? 126 : 100
+        switch language {
+        case .english:
+            return isActive ? 120 : 156
+        default:
+            return isActive ? 86 : 124
         }
-        return language == .english ? 172 : 138
     }
 
     private var metadataItems: [(text: String, tint: Color, weight: Font.Weight)] {
@@ -398,8 +358,9 @@ struct AccountCardView: View {
             items.append((text.string(.currentBadge), Branding.accentBlueDark, .semibold))
         }
 
+        // Descriptive plan info reads as secondary text, not an alert.
         if let planSummaryBadge {
-            items.append((planSummaryBadge.text, planSummaryBadge.tint, .semibold))
+            items.append((planSummaryBadge.text, planSummaryBadge.tint, .medium))
         }
 
         if isRecommended, !isActive {
@@ -414,8 +375,9 @@ struct AccountCardView: View {
             items.append((refreshBadge.text, refreshBadge.tint, .semibold))
         }
 
+        // Renewal date is the lowest-priority metadata — quietest tone.
         if let subscriptionDateText {
-            items.append((subscriptionDateText, Branding.inkMuted, .medium))
+            items.append((subscriptionDateText, Branding.inkSubtle, .regular))
         }
 
         return items
@@ -443,18 +405,28 @@ struct AccountCardView: View {
         quota?.secondaryPanelTitle ?? "Weekly"
     }
 
+    private var metricTiles: [(title: String, metric: QuotaDisplayMetric?)] {
+        if visibleMetrics.isEmpty {
+            return [
+                (quota?.primary?.label ?? "5h", quota?.primaryPanelMetric),
+                (secondaryPanelTitle, quota?.secondaryPanelMetric)
+            ]
+        }
+        return visibleMetrics.map { ($0.title, $0) }
+    }
+
     private var contentSpacing: CGFloat {
         if hasFooterContent {
             return 6
         }
-        return useRingMetricLayout ? 8 : 12
+        return 9
     }
 
     private var verticalPadding: CGFloat {
         if hasFooterContent {
-            return 11
+            return 10
         }
-        return useRingMetricLayout ? 12 : 13
+        return 11
     }
 
     var body: some View {
@@ -462,26 +434,13 @@ struct AccountCardView: View {
             header
 
             if isInitialLoadingWithoutQuota {
-                LoadingQuotaPlaceholder(useRingLayout: useRingMetricLayout, language: language)
-            } else if useRingMetricLayout {
-                CursorMetricRingStrip(
-                    primary: quota?.primaryPanelMetric,
-                    secondary: quota?.secondaryPanelMetric,
-                    tertiary: quota?.tertiaryPanelMetric,
+                LoadingQuotaPlaceholder(language: language)
+            } else {
+                CompactQuotaMetricStrip(
+                    tiles: metricTiles,
                     fallbackResetAt: quota?.periodEnd,
                     language: language
                 )
-            } else {
-                HStack(spacing: 10) {
-                    if visibleMetrics.isEmpty {
-                        QuotaPanel(title: quota?.primary?.label ?? "5h", metric: quota?.primaryPanelMetric, language: language, compact: hasFooterContent)
-                        QuotaPanel(title: secondaryPanelTitle, metric: quota?.secondaryPanelMetric, language: language, compact: hasFooterContent)
-                    } else {
-                        ForEach(Array(visibleMetrics.enumerated()), id: \.offset) { _, metric in
-                            QuotaPanel(title: metric.title, metric: metric, language: language, compact: hasFooterContent)
-                        }
-                    }
-                }
             }
 
             footer
@@ -495,22 +454,26 @@ struct AccountCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .stroke(cardStroke, lineWidth: isActive ? 1.2 : 1)
+                .stroke(cardStroke, lineWidth: isActive ? 1.15 : 1)
         )
         .overlay(alignment: .topTrailing) {
             actionZone
                 .frame(width: actionZoneWidth, height: 24, alignment: .trailing)
-                .opacity(shouldRenderActions ? 1 : 0)
-                .allowsHitTesting(shouldRenderActions)
+                .opacity(shouldRevealActions ? 1 : 0)
+                .allowsHitTesting(shouldRevealActions)
+                .accessibilityHidden(!shouldRevealActions)
                 .padding(.top, verticalPadding)
                 .padding(.trailing, 12)
         }
         .shadow(
-            color: isActive ? Branding.shadowPopover.opacity(0.82) : Branding.cardShadow,
-            radius: isActive ? 7 : 4,
-            y: isActive ? 2 : 1.5
+            color: isActive ? Branding.shadowPopover.opacity(0.58) : Branding.cardShadow.opacity(0.82),
+            radius: isActive ? Branding.activeCardShadowRadius : Branding.cardShadowRadius,
+            y: isActive ? Branding.activeCardShadowY : Branding.cardShadowY
         )
         .onHover { isHovering = $0 }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isHovering)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: shouldRevealActions)
+        .animation(reduceMotion ? nil : .quotaFluid, value: isActive)
         .contentShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
         .onTapGesture {
             guard canActivate, !isActive else { return }
@@ -605,6 +568,7 @@ struct AccountCardView: View {
                 }
 
                 InlineMetadataLabel(text: item.text, tint: item.tint, weight: item.weight)
+                    .metadataActivePill(isActive && item.text == text.string(.currentBadge))
             }
         }
         .lineLimit(1)
@@ -614,11 +578,12 @@ struct AccountCardView: View {
     }
 
     private var actionZone: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 2) {
             if !isActive {
                 CardTextActionButton(
                     title: text.string(.useAccount),
-                    tint: Branding.success,
+                    tint: Branding.actionActivate,
+                    softTint: Branding.actionActivateSoft,
                     isEnabled: canActivate
                 ) {
                     onActivate()
@@ -629,18 +594,18 @@ struct AccountCardView: View {
 
             CardTextActionButton(
                 title: text.string(.refresh),
-                tint: Branding.accentBlueDark,
-                isEnabled: shouldShowRefreshAction && !isRefreshing,
+                tint: Branding.actionRefresh,
+                softTint: Branding.actionRefreshSoft,
+                isEnabled: !isRefreshing,
                 action: onRefresh
             )
-            .opacity(shouldShowRefreshAction ? 1 : 0)
             .help(text.refreshAccount(resolvedAccountName))
             .accessibilityLabel(text.refreshAccount(resolvedAccountName))
 
             CardTextActionButton(
                 title: text.string(.delete),
-                tint: Branding.danger,
-                isDestructive: true
+                tint: Branding.actionDestructive,
+                softTint: Branding.actionDestructiveSoft
             ) {
                 isConfirmingDelete = true
             }
@@ -667,21 +632,19 @@ struct AccountCardView: View {
         }
     }
 
-    private var refreshBadge: (text: String, tint: Color, background: Color)? {
+    private var refreshBadge: (text: String, tint: Color)? {
         switch refreshFeedback {
         case .idle:
             return nil
         case .refreshing:
             return (
                 refreshText(.refreshing),
-                Branding.accentBlueDark,
-                Branding.accentBlueSoft
+                Branding.accentBlueDark
             )
         case .success:
             return (
                 refreshText(.success),
-                Branding.success,
-                Branding.successSoft
+                Branding.success
             )
         }
     }
@@ -760,54 +723,49 @@ private enum CardRefreshFeedback: Equatable {
 private struct CardTextActionButton: View {
     let title: String
     let tint: Color
-    var isDestructive = false
+    let softTint: Color
     var isEnabled = true
     let action: () -> Void
 
     @State private var isHovering = false
 
+    // Keep the semantic tint visible at rest; hover adds only a soft affordance.
     private var textColor: Color {
         if !isEnabled {
-            return Branding.inkSubtle
+            return Branding.inkSubtle.opacity(0.5)
         }
-        if isDestructive, !isHovering {
-            return Branding.danger.opacity(0.84)
+        if !isHovering {
+            return tint.opacity(0.78)
         }
         return tint
     }
 
     private var backgroundColor: Color {
-        if !isEnabled {
-            return .clear
-        }
-        if isHovering {
-            return isDestructive
-                ? Branding.dangerSoft.opacity(0.54)
-                : Branding.accentBlueSoft.opacity(0.78)
-        }
-        return .clear
+        guard isEnabled, isHovering else { return .clear }
+        return softTint.opacity(0.72)
     }
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 11.5, weight: .semibold))
+                .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+                .fixedSize()
                 .padding(.horizontal, 8)
-                .frame(height: 24)
+                .frame(height: 22)
                 .foregroundStyle(textColor)
                 .background(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
                         .fill(backgroundColor)
                 )
-                .contentShape(Capsule(style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous))
         }
         .buttonStyle(.quotaInteractive(isEnabled: isEnabled))
         .disabled(!isEnabled)
         .help(title)
         .accessibilityLabel(title)
         .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: isHovering)
     }
 }
 
@@ -862,19 +820,8 @@ struct ToolLogoIcon: View {
         }
     }
 
-    private var resourceName: String {
-        switch tool {
-        case .codex:
-            return "codex"
-        case .cursor:
-            return "cursor"
-        case .claudeCode:
-            return "claude"
-        }
-    }
-
     private var preparedImage: NSImage? {
-        ToolIconImageCache.image(named: resourceName, size: size)
+        ToolIconImageCache.image(named: tool.logoResourceName, size: size)
     }
 
     var body: some View {
@@ -903,7 +850,7 @@ private enum ToolIconImageCache {
         if let cached = cache[key] {
             return cached
         }
-        guard let url = bundledResourceURL(name: name, extension: "png"),
+        guard let url = AppResourceLocator.url(forResource: name, withExtension: "png", subdirectory: "Logos"),
               let loaded = NSImage(contentsOf: url) else {
             return nil
         }
@@ -911,27 +858,6 @@ private enum ToolIconImageCache {
         icon.size = NSSize(width: size, height: size)
         cache[key] = icon
         return icon
-    }
-
-    private static func bundledResourceURL(name: String, extension resourceExtension: String) -> URL? {
-        let bundleName = "QuotaBar_QuotaBarApp.bundle"
-        let fileName = "\(name).\(resourceExtension)"
-        let fileManager = FileManager.default
-        let candidates = [
-            Bundle.main.url(forResource: name, withExtension: resourceExtension),
-            Bundle.main.resourceURL?
-                .appendingPathComponent(bundleName, isDirectory: true)
-                .appendingPathComponent(fileName),
-            Bundle.main.executableURL?
-                .deletingLastPathComponent()
-                .appendingPathComponent(bundleName, isDirectory: true)
-                .appendingPathComponent(fileName),
-            Bundle.main.bundleURL
-                .appendingPathComponent(bundleName, isDirectory: true)
-                .appendingPathComponent(fileName)
-        ]
-
-        return candidates.compactMap { $0 }.first { fileManager.fileExists(atPath: $0.path) }
     }
 }
 
@@ -945,198 +871,74 @@ private struct InlineMetadataLabel: View {
             .font(.system(size: 10, weight: weight))
             .lineLimit(1)
             .truncationMode(.tail)
-            .foregroundStyle(tint.opacity(0.82))
+            .foregroundStyle(tint)
     }
 }
 
-private struct CursorMetricRingStrip: View {
-    let primary: QuotaDisplayMetric?
-    let secondary: QuotaDisplayMetric?
-    let tertiary: QuotaDisplayMetric?
-    let fallbackResetAt: Date?
+private extension View {
+    @ViewBuilder
+    func metadataActivePill(_ isActive: Bool) -> some View {
+        if isActive {
+            // Soft-tint chip rather than a solid fill: marks the active account
+            // without out-shouting the name and quota figures above/below it.
+            self
+                .padding(.horizontal, 6)
+                .frame(height: 17)
+                .background(
+                    RoundedRectangle(cornerRadius: Branding.radiusPill, style: .continuous)
+                        .fill(Branding.accentBlueSoft)
+                )
+        } else {
+            self
+        }
+    }
+}
+
+private struct LoadingQuotaPlaceholder: View {
     let language: AppLanguage
 
-    private var tiles: [(title: String, metric: QuotaDisplayMetric?)] {
-        [
-            ("Total", primary),
-            ("Auto", secondary),
-            ("API", tertiary)
-        ]
-    }
+    private var text: AppText { AppText(language: language) }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        CompactQuotaMetricStrip(
+            tiles: [
+                ("5h", nil),
+                ("Weekly", nil)
+            ],
+            fallbackResetAt: nil,
+            language: language,
+            fallbackDetail: text.string(.refreshing)
+        )
+    }
+}
+
+private struct CompactQuotaMetricStrip: View {
+    let tiles: [(title: String, metric: QuotaDisplayMetric?)]
+    let fallbackResetAt: Date?
+    let language: AppLanguage
+    var fallbackDetail: String?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
             ForEach(Array(tiles.enumerated()), id: \.offset) { _, tile in
-                CursorMetricRingTile(
+                CompactQuotaMetricTile(
                     title: tile.title,
                     metric: tile.metric,
                     fallbackResetAt: fallbackResetAt,
-                    language: language
+                    language: language,
+                    fallbackDetail: fallbackDetail
                 )
             }
         }
     }
 }
 
-private struct CursorMetricRingTile: View {
+private struct CompactQuotaMetricTile: View {
     let title: String
     let metric: QuotaDisplayMetric?
     let fallbackResetAt: Date?
     let language: AppLanguage
-
-    private var text: AppText { AppText(language: language) }
-
-    private var ratio: Double {
-        min(max(metric?.ratio ?? 0, 0), 1)
-    }
-
-    private var isKnown: Bool {
-        metric?.ratio != nil
-    }
-
-    private var tint: Color {
-        guard isKnown else { return Branding.inkSubtle }
-        if ratio <= 0.001 { return Branding.danger }
-        if ratio <= 0.20 { return Branding.warning }
-        return Branding.success
-    }
-
-    private var percentTextColor: Color {
-        guard isKnown else { return Branding.inkSubtle }
-        if ratio <= 0.20 {
-            return tint
-        }
-        return Branding.inkStrong
-    }
-
-    var body: some View {
-        VStack(alignment: .center, spacing: 3) {
-            Text(text.quotaLabel(title))
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(Branding.inkMuted)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .center)
-
-            ZStack {
-                MetricRing(value: ratio, tint: tint)
-                    .frame(width: 38, height: 38)
-
-                Text("\(Int((ratio * 100).rounded()))%")
-                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(percentTextColor)
-                    .monospacedDigit()
-                    .opacity(isKnown ? 1 : 0)
-
-                if !isKnown {
-                    Text("--")
-                        .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Branding.inkSubtle)
-                        .monospacedDigit()
-                }
-            }
-
-            if let resetAt = metric?.resetAt ?? fallbackResetAt {
-                Text(text.resetAt(resetAt))
-                    .font(.system(size: 9.8, weight: .regular))
-                    .foregroundStyle(Branding.inkSubtle)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .center)
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 68, alignment: .top)
-    }
-}
-
-private struct LoadingQuotaPlaceholder: View {
-    let useRingLayout: Bool
-    let language: AppLanguage
-
-    private var text: AppText { AppText(language: language) }
-
-    var body: some View {
-        if useRingLayout {
-            HStack(alignment: .top, spacing: 10) {
-                ForEach(["Total", "Auto", "API"], id: \.self) { title in
-                    VStack(alignment: .center, spacing: 3) {
-                        Text(text.quotaLabel(title))
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(Branding.inkMuted)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .center)
-
-                        ZStack {
-                            MetricRing(value: 0, tint: Branding.inkSubtle)
-                                .frame(width: 38, height: 38)
-
-                            Text("--")
-                                .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                                .foregroundStyle(Branding.inkSubtle)
-                                .monospacedDigit()
-                        }
-
-                        Text(text.string(.refreshing))
-                            .font(.system(size: 9.6, weight: .regular))
-                            .foregroundStyle(Branding.inkSubtle)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 68, alignment: .top)
-                }
-            }
-        } else {
-            HStack(spacing: 10) {
-                ForEach(["5h", "Weekly"], id: \.self) { title in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(text.quotaLabel(title))
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(Branding.inkMuted)
-                                Text(language == .english ? "Remaining" : (language == .traditionalChinese ? "剩餘" : "剩余"))
-                                    .font(.system(size: 10.5, weight: .regular))
-                                    .foregroundStyle(Branding.inkSubtle)
-                            }
-                            Spacer(minLength: 8)
-                            Text("--")
-                                .font(.system(size: 20, weight: .semibold, design: .rounded))
-                                .foregroundStyle(Branding.inkSubtle)
-                                .monospacedDigit()
-                        }
-
-                        RatioBar(value: 0, tint: Branding.inkSubtle)
-
-                        Text(text.string(.refreshing))
-                            .font(.system(size: 10.5, weight: .regular))
-                            .foregroundStyle(Branding.inkSubtle)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading)
-                }
-            }
-        }
-    }
-}
-
-private struct MetricRing: View {
-    let value: Double
-    let tint: Color
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .stroke(Branding.track, lineWidth: 3.6)
-            Circle()
-                .trim(from: 0, to: min(max(value, 0), 1))
-                .stroke(tint, style: StrokeStyle(lineWidth: 3.6, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-        }
-    }
-}
-
-private struct QuotaPanel: View {
-    let title: String
-    let metric: QuotaDisplayMetric?
-    let language: AppLanguage
-    let compact: Bool
+    let fallbackDetail: String?
 
     private var text: AppText { AppText(language: language) }
 
@@ -1166,41 +968,40 @@ private struct QuotaPanel: View {
     var body: some View {
         let resolved = state
 
-        VStack(alignment: .leading, spacing: compact ? 6 : 8) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(text.quotaLabel(title))
-                        .font(.system(size: compact ? 11 : 12, weight: .semibold))
-                        .foregroundStyle(Branding.inkMuted)
-                        .lineLimit(1)
-                    Text(language == .english ? "Remaining" : (language == .traditionalChinese ? "剩餘" : "剩余"))
-                        .font(.system(size: compact ? 10 : 10.5, weight: .regular))
-                        .foregroundStyle(Branding.inkSubtle)
-                }
+                Text(text.quotaLabel(title))
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(Branding.inkMuted)
+                    .lineLimit(1)
 
                 Spacer(minLength: 8)
 
                 Text(resolved.isKnown ? "\(Int((resolved.ratio * 100).rounded()))%" : "--")
-                    .font(.system(size: compact ? 14.5 : 20, weight: .semibold, design: .rounded))
+                    .font(.system(size: 16.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(percentTextColor)
                     .monospacedDigit()
             }
 
             RatioBar(value: resolved.isKnown ? resolved.ratio : 0, tint: tint)
 
-            if resolved.isKnown, let resetAt = resolved.resetAt {
-                Text(text.resetAt(resetAt))
-                    .font(.system(size: compact ? 10 : 10.5, weight: .regular))
-                    .foregroundStyle(Branding.inkSubtle)
-                    .lineLimit(1)
-            } else if !resolved.isKnown {
-                Text(text.string(.waitingData))
-                    .font(.system(size: compact ? 10 : 10.5, weight: .regular))
-                    .foregroundStyle(Branding.inkSubtle)
-                    .lineLimit(1)
-            }
+            Text(detailText(resolved: resolved))
+                .font(.system(size: 9.8, weight: .regular))
+                .foregroundStyle(Branding.inkSubtle)
+                .lineLimit(1)
+                .frame(minHeight: 12, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, minHeight: compact ? 64 : 70, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 50, alignment: .topLeading)
+    }
+
+    private func detailText(resolved: (ratio: Double, resetAt: Date?, isKnown: Bool)) -> String {
+        if resolved.isKnown, let resetAt = resolved.resetAt ?? fallbackResetAt {
+            return text.resetAt(resetAt)
+        }
+        if let fallbackDetail {
+            return fallbackDetail
+        }
+        return text.string(.waitingData)
     }
 }
 

@@ -22,6 +22,7 @@ USAGE
 }
 
 ALLOW_LOCAL_FALLBACK=false
+VERSION=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,17 +40,22 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            break
+            if [[ -n "$VERSION" ]]; then
+                echo "Unexpected argument: $1" >&2
+                usage >&2
+                exit 1
+            fi
+            VERSION="$1"
+            shift
             ;;
     esac
 done
 
-if [[ $# -ne 1 ]]; then
+if [[ -z "$VERSION" ]]; then
     usage
     exit 1
 fi
 
-VERSION="$1"
 DMG_FILE="$ROOT_DIR/dist/releases/QuotaBar-$VERSION-universal.dmg"
 RELEASE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/v${VERSION}/QuotaBar-${VERSION}-universal.dmg"
 TMP_REMOTE_FILE="${TMPDIR:-/tmp}/quotabar-release-${VERSION}-$$.dmg"

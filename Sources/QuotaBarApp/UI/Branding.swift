@@ -2,58 +2,66 @@ import AppKit
 import SwiftUI
 
 enum Branding {
-    static let windowBackground = adaptive(light: rgb(0.952, 0.956, 0.964), dark: rgb(0.092, 0.098, 0.112))
-    static let surfacePrimary = adaptive(light: rgb(0.980, 0.984, 0.990), dark: rgb(0.160, 0.171, 0.195))
-    static let surfaceSecondary = adaptive(light: rgb(0.988, 0.991, 0.996), dark: rgb(0.185, 0.198, 0.224))
-    static let surfaceSelected = adaptive(light: rgb(0.940, 0.967, 1.0), dark: rgb(0.142, 0.178, 0.228))
-    static let surfaceRecessed = adaptive(light: rgb(0.988, 0.990, 0.994), dark: rgb(0.124, 0.133, 0.154))
+    // Surfaces — neutral backgrounds, layered light → recessed.
+    static let pageBackground = adaptive(light: rgb(0.952, 0.956, 0.964), dark: rgb(0.092, 0.098, 0.112))
+    static let cardSurface = adaptive(light: rgb(0.980, 0.984, 0.990), dark: rgb(0.160, 0.171, 0.195))
+    static let hoverCardSurface = adaptive(light: rgb(0.988, 0.991, 0.996), dark: rgb(0.185, 0.198, 0.224))
+    static let activeCardSurface = adaptive(light: rgb(0.986, 0.991, 1.0), dark: rgb(0.152, 0.178, 0.218))
+    static let activeHoverCardSurface = adaptive(light: rgb(0.992, 0.996, 1.0), dark: rgb(0.164, 0.196, 0.244))
+    static let controlSurface = adaptive(light: NSColor.white.withAlphaComponent(0.86), dark: rgb(0.188, 0.202, 0.232, 0.94))
+    static let chipSurface = adaptive(light: rgb(0.930, 0.934, 0.940), dark: rgb(0.202, 0.216, 0.246))
     static let menuSurface = adaptive(light: NSColor.white, dark: rgb(0.150, 0.160, 0.184, 0.98))
     static let menuItemSelectedSurface = adaptive(light: rgb(0.890, 0.935, 1.0), dark: rgb(0.150, 0.200, 0.268, 0.92))
-    static let borderSubtle = adaptive(light: NSColor.white.withAlphaComponent(0.76), dark: rgb(1.0, 1.0, 1.0, 0.075))
-    static let borderControl = adaptive(light: rgb(0.0, 0.0, 0.0, 0.055), dark: rgb(1.0, 1.0, 1.0, 0.095))
-    static let borderSelected = adaptive(light: rgb(0.10, 0.43, 0.98, 0.20), dark: rgb(0.55, 0.72, 0.95, 0.18))
-    static let textPrimary = adaptive(light: rgb(0.08, 0.09, 0.11), dark: rgb(0.925, 0.940, 0.965))
-    static let textSecondary = adaptive(light: rgb(0.44, 0.46, 0.49), dark: rgb(0.720, 0.755, 0.805))
-    static let textTertiary = adaptive(light: rgb(0.58, 0.60, 0.64), dark: rgb(0.600, 0.645, 0.705))
-    static let accentBlue = adaptive(light: rgb(0.10, 0.43, 0.98), dark: rgb(0.365, 0.580, 0.900))
-    static let accentBluePressed = adaptive(light: rgb(0.06, 0.30, 0.92), dark: rgb(0.590, 0.735, 0.965))
-    static let accentBlueSoft = adaptive(light: rgb(0.90, 0.95, 1.0), dark: rgb(0.130, 0.188, 0.278))
-    static let successGreen = adaptive(light: rgb(0.10, 0.72, 0.27), dark: rgb(0.360, 0.700, 0.455))
-    static let successGreenSoft = adaptive(light: rgb(0.88, 0.97, 0.89), dark: rgb(0.130, 0.235, 0.165))
-    static let dangerRed = adaptive(light: rgb(1.0, 0.20, 0.18), dark: rgb(0.900, 0.405, 0.385))
-    static let dangerRedSoft = adaptive(light: rgb(1.0, 0.91, 0.91), dark: rgb(0.270, 0.125, 0.135))
-    static let warningAmber = adaptive(light: rgb(0.86, 0.50, 0.06), dark: rgb(0.870, 0.625, 0.320))
-    static let warningAmberSoft = adaptive(light: rgb(1.0, 0.94, 0.83), dark: rgb(0.285, 0.215, 0.120))
-    static let progressTrack = adaptive(light: rgb(0.0, 0.0, 0.0, 0.075), dark: rgb(1.0, 1.0, 1.0, 0.105))
-    static let shadowPopover = adaptive(light: rgb(0.0, 0.0, 0.0, 0.055), dark: rgb(0.0, 0.0, 0.0, 0.34))
 
-    static let accentBlueDark = accentBluePressed
-    static let ink = adaptive(light: rgb(0.12, 0.13, 0.15), dark: rgb(0.845, 0.870, 0.910))
-    static let inkStrong = textPrimary
-    static let inkMuted = textSecondary
-    static let inkSubtle = textTertiary
-    static let pageBackground = windowBackground
-    static let cardSurface = surfacePrimary
-    static let hoverCardSurface = surfaceSecondary
-    static let activeCardSurface = surfaceSelected
-    static let metricSurface = surfaceRecessed
-    static let chipSurface = adaptive(light: rgb(0.930, 0.934, 0.940), dark: rgb(0.202, 0.216, 0.246))
-    static let activeChipSurface = accentBlueSoft
-    static let controlSurface = adaptive(light: NSColor.white.withAlphaComponent(0.86), dark: rgb(0.188, 0.202, 0.232, 0.94))
-    static let controlStroke = borderControl
+    // Text — one contrast scale, dark enough to read at small sizes.
+    static let inkStrong = adaptive(light: rgb(0.08, 0.09, 0.11), dark: rgb(0.930, 0.945, 0.970))
+    static let ink = adaptive(light: rgb(0.12, 0.13, 0.15), dark: rgb(0.860, 0.885, 0.925))
+    static let inkMuted = adaptive(light: rgb(0.37, 0.39, 0.43), dark: rgb(0.740, 0.775, 0.825))
+    static let inkSubtle = adaptive(light: rgb(0.44, 0.46, 0.50), dark: rgb(0.665, 0.705, 0.765))
+
+    // Borders & strokes.
+    static let borderSubtle = adaptive(light: NSColor.white.withAlphaComponent(0.76), dark: rgb(1.0, 1.0, 1.0, 0.075))
+    static let controlStroke = adaptive(light: rgb(0.0, 0.0, 0.0, 0.055), dark: rgb(1.0, 1.0, 1.0, 0.095))
+    static let borderSelected = adaptive(light: rgb(0.10, 0.43, 0.98, 0.20), dark: rgb(0.55, 0.72, 0.95, 0.18))
     static let separatorDot = adaptive(light: rgb(0.0, 0.0, 0.0, 0.12), dark: rgb(1.0, 1.0, 1.0, 0.18))
-    static let cardStroke = borderSubtle
-    static let cardShadow = adaptive(light: rgb(0.0, 0.0, 0.0, 0.025), dark: rgb(0.0, 0.0, 0.0, 0.24))
-    static let hoverCardShadow = shadowPopover
-    static let track = progressTrack
-    static let success = successGreen
-    static let successSoft = successGreenSoft
-    static let danger = dangerRed
-    static let dangerSoft = dangerRedSoft
-    static let warning = warningAmber
-    static let warningSoft = warningAmberSoft
-    static let primaryActionText = adaptive(light: NSColor.white, dark: rgb(0.945, 0.970, 1.0))
+
+    // Semantic colors — the only hues in the UI: blue = interactive/active,
+    // green = healthy, amber = warning, red = exhausted/error. Each has a soft tint.
+    static let accentBlue = adaptive(light: rgb(0.10, 0.43, 0.98), dark: rgb(0.365, 0.580, 0.900))
+    static let accentBlueDark = adaptive(light: rgb(0.06, 0.30, 0.92), dark: rgb(0.590, 0.735, 0.965))
+    static let accentBlueSoft = adaptive(light: rgb(0.90, 0.95, 1.0), dark: rgb(0.130, 0.188, 0.278))
+    static let success = adaptive(light: rgb(0.10, 0.72, 0.27), dark: rgb(0.360, 0.700, 0.455))
+    static let successSoft = adaptive(light: rgb(0.88, 0.97, 0.89), dark: rgb(0.130, 0.235, 0.165))
+    static let warning = adaptive(light: rgb(0.86, 0.50, 0.06), dark: rgb(0.870, 0.625, 0.320))
+    static let warningSoft = adaptive(light: rgb(1.0, 0.94, 0.83), dark: rgb(0.285, 0.215, 0.120))
+    static let danger = adaptive(light: rgb(1.0, 0.20, 0.18), dark: rgb(0.900, 0.405, 0.385))
+    static let dangerSoft = adaptive(light: rgb(1.0, 0.91, 0.91), dark: rgb(0.270, 0.125, 0.135))
+    static let actionActivate = accentBlueDark
+    static let actionActivateSoft = accentBlueSoft
+    static let actionRefresh = accentBlue
+    static let actionRefreshSoft = accentBlueSoft
+    static let actionDestructive = danger
+    static let actionDestructiveSoft = dangerSoft
+
+    // Effects.
+    static let track = adaptive(light: rgb(0.0, 0.0, 0.0, 0.075), dark: rgb(1.0, 1.0, 1.0, 0.105))
     static let iconHighlight = adaptive(light: rgb(0.0, 0.0, 0.0, 0.08), dark: rgb(1.0, 1.0, 1.0, 0.055))
+    static let cardShadow = adaptive(light: rgb(0.0, 0.0, 0.0, 0.025), dark: rgb(0.0, 0.0, 0.0, 0.24))
+    static let shadowPopover = adaptive(light: rgb(0.0, 0.0, 0.0, 0.055), dark: rgb(0.0, 0.0, 0.0, 0.34))
+    static let primaryActionText = adaptive(light: NSColor.white, dark: rgb(0.945, 0.970, 1.0))
+
+    // Shape and elevation tokens.
+    static let radiusCard: CGFloat = 12
+    static let radiusMenu: CGFloat = 12
+    static let radiusSidebarItem: CGFloat = 12
+    static let radiusControl: CGFloat = 10
+    static let radiusSegment: CGFloat = 9
+    static let radiusSmallControl: CGFloat = 7
+    static let radiusPill: CGFloat = 5
+    static let cardShadowRadius: CGFloat = 6
+    static let activeCardShadowRadius: CGFloat = 8
+    static let cardShadowY: CGFloat = 2
+    static let activeCardShadowY: CGFloat = 2.5
 
     private static func rgb(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat, _ alpha: CGFloat = 1) -> NSColor {
         NSColor(calibratedRed: red, green: green, blue: blue, alpha: alpha)
@@ -186,16 +194,5 @@ enum Branding {
         if clearsDestination {
             NSGraphicsContext.current?.compositingOperation = oldOperation ?? .sourceOver
         }
-    }
-}
-
-struct BrandMarkView: View {
-    let size: CGFloat
-    let monochrome: Bool
-
-    var body: some View {
-        Image(nsImage: Branding.makeBrandMarkIcon(size: size, monochrome: monochrome))
-            .resizable()
-            .frame(width: size, height: size)
     }
 }

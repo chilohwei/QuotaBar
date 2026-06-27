@@ -17,4 +17,15 @@ enum ToolKind: String, Codable, CaseIterable, Identifiable, Sendable {
             return "Claude Code"
         }
     }
+
+    var logoResourceName: String {
+        switch self {
+        case .codex:
+            return "codex"
+        case .cursor:
+            return "cursor"
+        case .claudeCode:
+            return "claude"
+        }
+    }
 }

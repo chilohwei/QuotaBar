@@ -1,6 +1,13 @@
 import AppKit
 import SwiftUI
 
+extension Animation {
+    /// Smooth, lightly-damped spring for view transitions (settings, selection).
+    static let quotaFluid = Animation.spring(response: 0.34, dampingFraction: 0.86)
+    /// Snappier spring for direct manipulation feedback (button press).
+    static let quotaSnappy = Animation.spring(response: 0.26, dampingFraction: 0.66)
+}
+
 struct QuotaInteractiveButtonStyle: ButtonStyle {
     var isEnabled = true
 
@@ -20,17 +27,16 @@ private struct QuotaInteractiveButtonBody: View {
     var body: some View {
         configuration.label
             .opacity(resolvedOpacity)
-            .scaleEffect(configuration.isPressed ? 0.975 : 1)
-            .animation(.easeOut(duration: 0.10), value: configuration.isPressed)
-            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .scaleEffect(configuration.isPressed ? 0.96 : isHovering ? 1.01 : 1)
+            .animation(.quotaSnappy, value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.14), value: isHovering)
             .onHover { isHovering = $0 }
             .pointingHandCursor(isEnabled)
     }
 
     private var resolvedOpacity: Double {
         guard isEnabled else { return 0.58 }
-        if configuration.isPressed { return 0.72 }
-        if isHovering { return 0.88 }
+        if configuration.isPressed { return 0.78 }
         return 1
     }
 }

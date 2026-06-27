@@ -353,7 +353,12 @@ APPLESCRIPT
 
 build_binary() {
     local arch="$1"
-    swift build -c release --arch "$arch"
+    local extra_flags=()
+    if [[ -n "${SWIFT_BUILD_FLAGS:-}" ]]; then
+        # shellcheck disable=SC2206
+        extra_flags=($SWIFT_BUILD_FLAGS)
+    fi
+    swift build "${extra_flags[@]}" -c release --arch "$arch"
 }
 
 binary_path_for_arch() {
