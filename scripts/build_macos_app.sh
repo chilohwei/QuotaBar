@@ -358,7 +358,7 @@ build_binary() {
         # shellcheck disable=SC2206
         extra_flags=($SWIFT_BUILD_FLAGS)
     fi
-    swift build "${extra_flags[@]}" -c release --arch "$arch"
+    swift build ${extra_flags[@]+"${extra_flags[@]}"} -c release --arch "$arch"
 }
 
 binary_path_for_arch() {
