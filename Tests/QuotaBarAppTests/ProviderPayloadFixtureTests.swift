@@ -140,7 +140,7 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.tertiary == nil)
     }
 
-    @Test("Claude statusLine payload maps 5h 7d context and subscription metadata")
+    @Test("Claude statusLine payload maps 5h 7d without context or subscription panel")
     func claudeStatusLinePayload() throws {
         let status = try jsonDictionary("""
         {
@@ -164,11 +164,6 @@ struct ProviderPayloadFixtureTests {
               "cache_creation_input_tokens": 10000,
               "cache_read_input_tokens": 10000
             }
-          },
-          "subscription": {
-            "current_period_end": "2026-07-01T00:00:00Z",
-            "status": "active",
-            "cancel_at_period_end": false
           }
         }
         """)
@@ -177,24 +172,66 @@ struct ProviderPayloadFixtureTests {
             status,
             authMethod: "oauth",
             apiProvider: "firstParty",
-            userID: "user-12345678"
+            userID: "user-12345678",
+            authStatusJSON: #"{"email":"claude-user@example.com"}"#
         )
 
         #expect(snapshot.source == "Claude Code StatusLine")
-        #expect(snapshot.accountIdentifier == "Claude 12345678")
+        #expect(snapshot.accountIdentifier == "claude-user@example.com")
         #expect(snapshot.planName == "Claude.ai")
         #expect(snapshot.primary?.label == "5h")
         #expect(snapshot.primary?.used == 64)
         #expect(snapshot.secondary?.label == "7d")
         #expect(snapshot.secondary?.used == 91)
-        #expect(snapshot.tertiary?.label == "Context")
-        #expect(snapshot.tertiary?.used == 50)
-        #expect(snapshot.subscriptionStatus == "active")
-        #expect(snapshot.subscriptionWillRenew == true)
+        #expect(snapshot.tertiary == nil)
+        #expect(snapshot.accountValidUntil == nil)
+        #expect(snapshot.subscriptionStatus == nil)
+        #expect(snapshot.subscriptionWillRenew == nil)
         #expect(snapshot.isQuotaBlocked == false)
     }
 
-    @Test("Claude third party payload keeps provider identity and context only")
+    @Test("Claude OAuth token expiry is not shown as account expiration")
+    func claudeOAuthTokenExpiryIsNotAccountExpiration() throws {
+        let status = try jsonDictionary("""
+        {
+          "rate_limits": {
+            "five_hour": {
+              "used_percentage": 1,
+              "resets_at": 1782540000
+            }
+          }
+        }
+        """)
+
+        let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
+            status,
+            keychainCredentials: #"{"claudeAiOauth":{"expiresAt":1782553821650}}"#
+        )
+
+        #expect(snapshot.accountValidUntil == nil)
+    }
+
+    @Test("Claude statusLine payload with quota windows is usable without install metadata")
+    func claudeStatusLinePayloadIsUsableWithoutInstallMetadata() throws {
+        let status = try jsonDictionary("""
+        {
+          "rate_limits": {
+            "five_hour": {
+              "used_percentage": 1,
+              "resets_at": 1782540000
+            },
+            "seven_day": {
+              "used_percentage": 18,
+              "resets_at": 1782637200
+            }
+          }
+        }
+        """)
+
+        #expect(ClaudeCodeProvider().shouldUseStatusLineSnapshotForTesting(status) == true)
+    }
+
+    @Test("Claude third party payload keeps provider identity without context panel")
     func claudeThirdPartyPayload() throws {
         let status = try jsonDictionary("""
         {
@@ -216,7 +253,7 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.planName == "Xiaomi Mimo")
         #expect(snapshot.primary == nil)
         #expect(snapshot.secondary == nil)
-        #expect(snapshot.tertiary?.used == 73)
+        #expect(snapshot.tertiary == nil)
         #expect(snapshot.note?.contains("API Key") == true)
     }
 

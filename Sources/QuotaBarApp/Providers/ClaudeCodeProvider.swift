@@ -84,19 +84,20 @@ struct ClaudeCodeProvider: Provider {
 
     func fetchQuota(account: Account, secret: String) async throws -> QuotaSnapshot {
         let storedCredentials = try parseCredentials(secret)
+        let liveStatus = try? loadStatusLineSnapshot()
         let credentials: ClaudeCodeCredentials
-        let canUseLiveStatus: Bool
+        let status: [String: Any]?
         if let latest = try? await readClaudeCodeCredentials(),
-           latest.loggedIn,
            claudeCredentialsRepresentSameAccount(latest, storedCredentials) {
             credentials = mergeCredentials(preferred: latest, fallback: storedCredentials)
-            canUseLiveStatus = quotaBarStatusLineIsInstalled(settingsJSON: latest.claudeSettingsJSON)
+            status = shouldUseStatusLineSnapshot(liveStatus, settingsJSON: latest.claudeSettingsJSON)
+                ? liveStatus
+                : nil
         } else {
             credentials = storedCredentials
-            canUseLiveStatus = false
+            status = nil
         }
 
-        let status = canUseLiveStatus ? (try? loadStatusLineSnapshot()) : nil
         return makeQuotaSnapshot(status: status, credentials: credentials)
     }
 
@@ -154,6 +155,9 @@ struct ClaudeCodeProvider: Provider {
 
     func suggestAccountName(from secret: String) -> String? {
         guard let credentials = try? parseCredentials(secret) else { return "Claude Code" }
+        if let email = readableEmail(from: credentials) {
+            return email
+        }
         if let userID = credentials.userID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !userID.isEmpty {
             return "Claude \(String(userID.suffix(8)))"
@@ -405,11 +409,41 @@ struct ClaudeCodeProvider: Provider {
     }
 
     private func readableIdentity(from credentials: ClaudeCodeCredentials) -> String? {
+        if let email = readableEmail(from: credentials) {
+            return email
+        }
         guard let userID = credentials.userID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !userID.isEmpty else {
             return nil
         }
         return "Claude \(String(userID.suffix(8)))"
+    }
+
+    private func readableEmail(from credentials: ClaudeCodeCredentials) -> String? {
+        [
+            credentials.authStatusJSON,
+            credentials.claudeJSON,
+            credentials.claudeCredentialsJSON,
+            credentials.claudeAuthJSON,
+            credentials.keychainCredentials
+        ]
+            .compactMap { $0 }
+            .lazy
+            .compactMap(firstEmail(in:))
+            .first
+    }
+
+    private func firstEmail(in text: String) -> String? {
+        let pattern = #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              let matchRange = Range(match.range, in: text) else {
+            return nil
+        }
+        return String(text[matchRange]).lowercased()
     }
 
     private func loadStatusLineSnapshot() throws -> [String: Any]? {
@@ -437,17 +471,17 @@ struct ClaudeCodeProvider: Provider {
         )
     }
 
-    private func makeContextWindow(status: [String: Any]?) -> QuotaWindow? {
-        guard let context = status?["context_window"] as? [String: Any],
-              let usedPercentage = contextUsedPercentage(from: context) else {
-            return nil
+    private func shouldUseStatusLineSnapshot(_ status: [String: Any]?, settingsJSON: String?) -> Bool {
+        guard status != nil else { return false }
+        if hasRateLimitWindow(status) {
+            return true
         }
-        return QuotaWindow(
-            label: "Context",
-            used: min(max(usedPercentage, 0), 100),
-            limit: 100,
-            resetAt: nil
-        )
+        return quotaBarStatusLineIsInstalled(settingsJSON: settingsJSON)
+    }
+
+    private func hasRateLimitWindow(_ status: [String: Any]?) -> Bool {
+        makeWindow(status: status, key: "five_hour", label: "5h") != nil
+            || makeWindow(status: status, key: "seven_day", label: "7d") != nil
     }
 
 #if DEBUG
@@ -475,14 +509,16 @@ struct ClaudeCodeProvider: Provider {
         )
         return makeQuotaSnapshot(status: status, credentials: credentials)
     }
+
+    func shouldUseStatusLineSnapshotForTesting(_ status: [String: Any], settingsJSON: String? = nil) -> Bool {
+        shouldUseStatusLineSnapshot(status, settingsJSON: settingsJSON)
+    }
 #endif
 
     private func makeQuotaSnapshot(status: [String: Any]?, credentials: ClaudeCodeCredentials) -> QuotaSnapshot {
         let primary = makeWindow(status: status, key: "five_hour", label: "5h")
         let secondary = makeWindow(status: status, key: "seven_day", label: "7d")
-        let tertiary = makeContextWindow(status: status)
         let note = statusNote(status: status, credentials: credentials)
-        let subscription = subscriptionInfo(status: status, credentials: credentials)
 
         return QuotaSnapshot(
             source: status == nil ? "Claude Code" : "Claude Code StatusLine",
@@ -490,13 +526,13 @@ struct ClaudeCodeProvider: Provider {
             planName: planName(credentials: credentials, status: status),
             primary: primary,
             secondary: secondary,
-            tertiary: tertiary,
+            tertiary: nil,
             creditsRemaining: nil,
             creditsTotal: nil,
             updatedAt: .init(),
-            accountValidUntil: subscription.accountValidUntil,
-            subscriptionWillRenew: subscription.willRenew,
-            subscriptionStatus: subscription.status,
+            accountValidUntil: nil,
+            subscriptionWillRenew: nil,
+            subscriptionStatus: nil,
             isQuotaBlocked: isQuotaBlocked(primary: primary, secondary: secondary),
             note: note
         )
@@ -527,13 +563,9 @@ struct ClaudeCodeProvider: Provider {
         let isThirdParty = thirdPartyProviderName(credentials: credentials, status: status) != nil
             || (rawProvider?.isEmpty == false && !isFirstPartyClaudeProvider(rawProvider))
         if credentials.authMethod == "api_key" || isThirdParty {
-            return "API Key / 第三方提供方模式通常没有 Pro/Max 5h/7d 用量条，仅显示上下文状态。"
+            return "API Key / 第三方提供方模式通常没有 Pro/Max 5h/7d 用量条。"
         }
-        if let context = status?["context_window"] as? [String: Any],
-           contextUsedPercentage(from: context) != nil {
-            return "当前 Claude Code 仅提供上下文状态；Claude.ai Pro/Max 的 5h/7d 用量会在支持的订阅会话响应后自动出现。"
-        }
-        return "Claude Code statusLine 已同步，但本次快照尚未包含上下文或 5h/7d 用量；下一次响应后会自动更新。"
+        return "Claude Code statusLine 已同步，但本次快照尚未包含 5h/7d 用量；下一次响应后会自动更新。"
     }
 
     private func isQuotaBlocked(primary: QuotaWindow?, secondary: QuotaWindow?) -> Bool? {
@@ -563,25 +595,6 @@ struct ClaudeCodeProvider: Provider {
         if let int = value as? Int { return Double(int) }
         if let text = value as? String { return Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
         return nil
-    }
-
-    private func contextUsedPercentage(from context: [String: Any]) -> Double? {
-        if let used = number(context["used_percentage"]) {
-            return min(max(used, 0), 100)
-        }
-        if let remaining = number(context["remaining_percentage"]) {
-            return min(max(100 - remaining, 0), 100)
-        }
-        guard let windowSize = number(context["context_window_size"]),
-              windowSize > 0,
-              let usage = context["current_usage"] as? [String: Any] else {
-            return nil
-        }
-        let inputTokens = number(usage["input_tokens"]) ?? 0
-        let cacheCreationTokens = number(usage["cache_creation_input_tokens"]) ?? 0
-        let cacheReadTokens = number(usage["cache_read_input_tokens"]) ?? 0
-        let usedInputTokens = max(inputTokens + cacheCreationTokens + cacheReadTokens, 0)
-        return min(max((usedInputTokens / windowSize) * 100, 0), 100)
     }
 
     private func thirdPartyProviderName(credentials: ClaudeCodeCredentials, status: [String: Any]?) -> String? {
@@ -685,98 +698,6 @@ struct ClaudeCodeProvider: Provider {
         }
     }
 
-    private struct SubscriptionInfo {
-        let accountValidUntil: Date?
-        let willRenew: Bool?
-        let status: String?
-    }
-
-    private func subscriptionInfo(status: [String: Any]?, credentials: ClaudeCodeCredentials) -> SubscriptionInfo {
-        let objects = subscriptionSearchObjects(status: status, credentials: credentials)
-        let dateKeys: Set<String> = [
-            "subscription_active_until",
-            "subscriptionActiveUntil",
-            "current_period_end",
-            "currentPeriodEnd",
-            "next_billing_date",
-            "nextBillingDate",
-            "renewal_date",
-            "renewalDate",
-            "expires_at",
-            "expiresAt",
-            "expiration",
-            "expires",
-            "active_until",
-            "activeUntil",
-            "valid_until",
-            "validUntil"
-        ]
-        let statusKeys: Set<String> = [
-            "subscription_status",
-            "subscriptionStatus",
-            "status"
-        ]
-
-        let accountValidUntil = objects.lazy.compactMap { findDate(in: $0, keys: dateKeys) }.first
-        let subscriptionStatus = objects.lazy.compactMap { findString(in: $0, keys: statusKeys) }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .first { !$0.isEmpty }
-        let willRenew = objects.lazy.compactMap(inferSubscriptionWillRenew).first
-            ?? inferSubscriptionWillRenew(fromStatus: subscriptionStatus)
-
-        return SubscriptionInfo(
-            accountValidUntil: accountValidUntil,
-            willRenew: willRenew,
-            status: subscriptionStatus
-        )
-    }
-
-    private func subscriptionSearchObjects(status: [String: Any]?, credentials: ClaudeCodeCredentials) -> [Any] {
-        [
-            status,
-            credentials.authStatusJSON.flatMap(parseJSONObject),
-            credentials.claudeSettingsJSON.flatMap(parseJSONObject),
-            credentials.claudeJSON.flatMap(parseJSONObject),
-            credentials.claudeCredentialsJSON.flatMap(parseJSONObject),
-            credentials.claudeAuthJSON.flatMap(parseJSONObject),
-            credentials.keychainCredentials.flatMap(parseJSONObject)
-        ].compactMap { $0 }
-    }
-
-    private func inferSubscriptionWillRenew(in object: Any) -> Bool? {
-        if let cancelAtPeriodEnd = findBool(
-            in: object,
-            keys: ["cancel_at_period_end", "cancelAtPeriodEnd"]
-        ) {
-            return !cancelAtPeriodEnd
-        }
-        if let willRenew = findBool(
-            in: object,
-            keys: ["will_renew", "willRenew", "auto_renew", "autoRenew", "renews", "renewing"]
-        ) {
-            return willRenew
-        }
-        if let status = findString(in: object, keys: ["subscription_status", "subscriptionStatus", "status"]) {
-            return inferSubscriptionWillRenew(fromStatus: status)
-        }
-        return nil
-    }
-
-    private func inferSubscriptionWillRenew(fromStatus status: String?) -> Bool? {
-        guard let normalized = status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !normalized.isEmpty else {
-            return nil
-        }
-        switch normalized {
-        case "active", "trialing", "paid":
-            return true
-        case "canceled", "cancelled", "expired", "incomplete_expired", "unpaid", "past_due":
-            return false
-        default:
-            return nil
-        }
-    }
-
     private func parseJSONObject(_ text: String) -> Any? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -789,26 +710,6 @@ struct ClaudeCodeProvider: Provider {
     private func firstValue(in dict: [String: Any], keys: Set<String>) -> Any? {
         for (key, value) in dict where keys.contains(key) {
             return value
-        }
-        return nil
-    }
-
-    private func findDate(in object: Any, keys: Set<String>) -> Date? {
-        if let dict = object as? [String: Any] {
-            for (key, value) in dict {
-                if keys.contains(key), let date = parseFlexibleDate(value) {
-                    return date
-                }
-                if let date = findDate(in: value, keys: keys) {
-                    return date
-                }
-            }
-        } else if let array = object as? [Any] {
-            for value in array {
-                if let date = findDate(in: value, keys: keys) {
-                    return date
-                }
-            }
         }
         return nil
     }
@@ -831,26 +732,6 @@ struct ClaudeCodeProvider: Provider {
             for value in array {
                 if let text = findString(in: value, keys: keys) {
                     return text
-                }
-            }
-        }
-        return nil
-    }
-
-    private func findBool(in object: Any, keys: Set<String>) -> Bool? {
-        if let dict = object as? [String: Any] {
-            for (key, value) in dict {
-                if keys.contains(key), let bool = bool(value) {
-                    return bool
-                }
-                if let bool = findBool(in: value, keys: keys) {
-                    return bool
-                }
-            }
-        } else if let array = object as? [Any] {
-            for value in array {
-                if let bool = findBool(in: value, keys: keys) {
-                    return bool
                 }
             }
         }
@@ -898,26 +779,6 @@ struct ClaudeCodeProvider: Provider {
         }
         if let number = value as? NSNumber {
             return number.stringValue
-        }
-        return nil
-    }
-
-    private func bool(_ value: Any) -> Bool? {
-        if let bool = value as? Bool {
-            return bool
-        }
-        if let number = value as? NSNumber {
-            return number.boolValue
-        }
-        if let text = value as? String {
-            switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            case "true", "1", "yes":
-                return true
-            case "false", "0", "no":
-                return false
-            default:
-                return nil
-            }
         }
         return nil
     }
@@ -1143,9 +1004,6 @@ private extension ClaudeCodeProvider {
             value = (limits.get(key) or {}).get("used_percentage")
             if isinstance(value, (int, float)):
                 parts.append(f"{label}: {value:.0f}%")
-        context = (data.get("context_window") or {}).get("used_percentage")
-        if isinstance(context, (int, float)):
-            parts.append(f"ctx: {context:.0f}%")
         print(f"[{model}] " + " ".join(parts) if parts else f"[{model}]")
         PY
         """

@@ -57,6 +57,27 @@ struct ProviderIdentityTests {
         #expect(aliases.contains("claude-code:oauth:firstParty"))
     }
 
+    @Test("Claude account name prefers email over generated user suffix")
+    func claudeAccountNamePrefersEmailOverGeneratedUserSuffix() {
+        let secret = #"""
+        {
+          "loggedIn": true,
+          "authMethod": "oauth",
+          "apiProvider": "firstParty",
+          "userID": "user-12345678",
+          "claudeExecutablePath": null,
+          "keychainCredentials": null,
+          "authStatusJSON": "{ \"email\": \"CLAUDE-USER@example.com\" }",
+          "claudeSettingsJSON": null,
+          "claudeJSON": null,
+          "claudeCredentialsJSON": null,
+          "claudeAuthJSON": null
+        }
+        """#
+
+        #expect(ClaudeCodeProvider().suggestAccountName(from: secret) == "claude-user@example.com")
+    }
+
     private func jwt(payload: [String: String]) -> String {
         let header = base64URL(#"{"alg":"none"}"#)
         let payloadData = try! JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
