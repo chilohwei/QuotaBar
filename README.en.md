@@ -95,11 +95,9 @@ QuotaBar stores only the necessary account information and usage state on your M
 
 QuotaBar does not provide its own cloud account service and does not upload your account data to any QuotaBar-owned server. You are still responsible for following the terms of Codex, Cursor, Claude Code, and any related third-party services.
 
-## Support
+## Donation
 
-If you run into issues or have feature requests, please open a [GitHub Issue](https://github.com/chilohwei/QuotaBar/issues).
-
-If QuotaBar is useful to you, you can also support the author at [donate.chiloh.com](https://donate.chiloh.com).
+If this project helps you, please visit [https://donate.chiloh.com](https://donate.chiloh.com) to donate.
 
 ## License
 
