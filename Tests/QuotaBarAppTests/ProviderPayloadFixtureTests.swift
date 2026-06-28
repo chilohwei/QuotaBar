@@ -116,6 +116,49 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.note?.contains("Included") == true)
     }
 
+    @Test("Cursor callback-shaped usage payload maps labeled rows")
+    func cursorCallbackUsageRowsPayload() throws {
+        let payload = try jsonObject("""
+        {
+          "membership_type": "pro",
+          "billingCycleEnd": 1782864000000,
+          "usageRows": [
+            {
+              "name": "included",
+              "usedCents": "3750",
+              "limitCents": "10000"
+            },
+            {
+              "bucket": "api",
+              "percentUsed": "82%"
+            },
+            {
+              "type": "usage_based_premium_requests",
+              "usageCents": 1200,
+              "hardLimitCents": 5000
+            }
+          ]
+        }
+        """)
+
+        let snapshot = try CursorProvider().parseCurrentPeriodUsageForTesting(
+            payload,
+            email: "cursor-callback@example.com"
+        )
+
+        #expect(snapshot.accountIdentifier == "cursor-callback@example.com")
+        #expect(snapshot.planName == "Pro")
+        #expect(snapshot.primary?.label == "Included")
+        #expect(snapshot.primary?.used == 3750)
+        #expect(snapshot.primary?.limit == 10000)
+        #expect(snapshot.secondary?.label == "API")
+        #expect(snapshot.secondary?.used == 82)
+        #expect(snapshot.secondary?.limit == 100)
+        #expect(snapshot.tertiary?.label == "On-demand")
+        #expect(snapshot.tertiary?.used == 1200)
+        #expect(snapshot.tertiary?.limit == 5000)
+    }
+
     @Test("Cursor zero placeholder payload produces no fake 100 percent remaining quota")
     func cursorZeroPlaceholderPayload() throws {
         let payload = try jsonObject("""

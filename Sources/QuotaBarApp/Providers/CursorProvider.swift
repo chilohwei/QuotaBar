@@ -44,6 +44,119 @@ struct CursorProvider: Provider {
     private static let freshQuotaCacheAge: TimeInterval = 60
     private static let fallbackQuotaCacheAge: TimeInterval = 24 * 60 * 60
     private static let maxNetworkAttempts = 3
+    private static let includedUsageKeys: Set<String> = [
+        "planUsage",
+        "plan_usage",
+        "includedUsage",
+        "included_usage",
+        "included",
+        "includedQuota",
+        "included_quota",
+        "quotaUsage",
+        "quota_usage",
+        "plan"
+    ]
+    private static let onDemandUsageKeys: Set<String> = [
+        "onDemand",
+        "on_demand",
+        "spendLimitUsage",
+        "spend_limit_usage",
+        "usageBased",
+        "usage_based",
+        "usageBasedPremiumRequests",
+        "usage_based_premium_requests",
+        "hardLimitUsage",
+        "hard_limit_usage",
+        "hardLimit",
+        "hard_limit"
+    ]
+    private static let usedAmountKeys: Set<String> = [
+        "used",
+        "usage",
+        "usageCents",
+        "usage_cents",
+        "usedCents",
+        "used_cents",
+        "usedAmount",
+        "used_amount",
+        "amountUsed",
+        "amount_used",
+        "totalUsed",
+        "total_used",
+        "totalSpend",
+        "total_spend",
+        "includedSpend",
+        "included_spend",
+        "spent",
+        "consumed",
+        "currentUsage",
+        "current_usage",
+        "valueUsed",
+        "value_used"
+    ]
+    private static let limitAmountKeys: Set<String> = [
+        "limit",
+        "max",
+        "quota",
+        "total",
+        "capacity",
+        "includedAmountCents",
+        "included_amount_cents",
+        "includedLimit",
+        "included_limit",
+        "includedLimitCents",
+        "included_limit_cents",
+        "limitCents",
+        "limit_cents",
+        "totalCents",
+        "total_cents",
+        "amountLimit",
+        "amount_limit",
+        "maxAmount",
+        "max_amount",
+        "spendLimit",
+        "spend_limit",
+        "hardLimit",
+        "hard_limit",
+        "hardLimitCents",
+        "hard_limit_cents",
+        "valueLimit",
+        "value_limit"
+    ]
+    private static let remainingAmountKeys: Set<String> = [
+        "remaining",
+        "left",
+        "available",
+        "totalRemaining",
+        "total_remaining",
+        "remainingAmount",
+        "remaining_amount",
+        "remainingCents",
+        "remaining_cents",
+        "availableAmount",
+        "available_amount",
+        "valueRemaining",
+        "value_remaining"
+    ]
+    private static let percentUsedKeys: Set<String> = [
+        "usedPercent",
+        "used_percent",
+        "percentUsed",
+        "percent_used",
+        "usagePercent",
+        "usage_percent"
+    ]
+    private static let windowLabelKeys: Set<String> = [
+        "label",
+        "name",
+        "type",
+        "kind",
+        "bucket",
+        "category",
+        "feature",
+        "metric",
+        "window"
+    ]
 
     private struct CursorCredentials: Codable {
         let accessToken: String
@@ -979,9 +1092,9 @@ struct CursorProvider: Provider {
     private func parseCurrentPeriodUsage(_ payload: Any, credentials: CursorCredentials) throws -> QuotaSnapshot {
         let plan = firstDictionary(
             in: payload,
-            keys: ["planUsage", "plan", "includedUsage", "included_usage"]
+            keys: Self.includedUsageKeys
         )
-        let onDemand = firstDictionary(in: payload, keys: ["onDemand", "on_demand", "spendLimitUsage", "spend_limit_usage"])
+        let onDemand = firstDictionary(in: payload, keys: Self.onDemandUsageKeys)
         let planName = normalizedPlanName(
             firstString(in: payload, keys: ["membershipType", "membership_type", "planName", "plan_name"])
                 ?? credentials.membershipType
@@ -1008,8 +1121,12 @@ struct CursorProvider: Provider {
         let totalPercentUsed = firstDouble(in: payload, keys: ["totalPercentUsed", "total_percent_used"])
         let autoPercentUsed = firstDouble(in: payload, keys: ["autoPercentUsed", "auto_percent_used"])
         let apiPercentUsed = firstDouble(in: payload, keys: ["apiPercentUsed", "api_percent_used"])
+        let fallbackWindows = extractCursorUsageWindows(from: payload, defaultResetAt: periodEnd)
+        let quotaBlocked = isQuotaBlocked(in: payload)
 
-        let hasRealCapacity = planHasPositiveCapacity(plan) || onDemandHasPositiveCapacity(onDemand)
+        let hasRealCapacity = planHasPositiveCapacity(plan)
+            || onDemandHasPositiveCapacity(onDemand)
+            || !fallbackWindows.isEmpty
         let hasPercentUsageSignal = [totalPercentUsed, autoPercentUsed, apiPercentUsed].contains { value in
             guard let value else { return false }
             return value > 0
@@ -1022,21 +1139,55 @@ struct CursorProvider: Provider {
                 usedPercent: totalPercentUsed,
                 resetAt: periodEnd
             ) : nil)
-        let auto = canTrustPercentWindows ? parsePercentWindow(
+            ?? firstCursorWindow(
+                in: fallbackWindows,
+                preferredLabels: ["Total", "Included", "Requests", "Usage"]
+            )
+        let auto = (canTrustPercentWindows ? parsePercentWindow(
             label: "Auto",
             usedPercent: autoPercentUsed,
             resetAt: periodEnd
-        ) : nil
-        let api = canTrustPercentWindows ? parsePercentWindow(
+        ) : nil)
+            ?? firstCursorWindow(
+                in: fallbackWindows,
+                preferredLabels: ["Auto"],
+                excluding: [primary],
+                allowAnyFallback: false
+            )
+        let api = (canTrustPercentWindows ? parsePercentWindow(
             label: "API",
             usedPercent: apiPercentUsed,
             resetAt: periodEnd
-        ) : nil
+        ) : nil)
+            ?? firstCursorWindow(
+                in: fallbackWindows,
+                preferredLabels: ["API"],
+                excluding: [primary, auto],
+                allowAnyFallback: false
+            )
+        let secondary = auto
+            ?? api
+            ?? firstCursorWindow(
+                in: fallbackWindows,
+                preferredLabels: ["Requests", "Usage", "On-demand"],
+                excluding: [primary]
+            )
+        let tertiaryFromAPI: QuotaWindow? = {
+            guard let api else { return nil }
+            let earlierWindows = [primary, secondary].compactMap { $0 }
+            return earlierWindows.contains(where: { sameCursorWindow($0, api) }) ? nil : api
+        }()
+        let tertiary = tertiaryFromAPI
+            ?? firstCursorWindow(
+                in: fallbackWindows,
+                preferredLabels: ["On-demand", "API", "Requests", "Usage"],
+                excluding: [primary, secondary]
+            )
         let note = cursorUsageNote(plan: plan, onDemand: onDemand)
 
         // Some free / zero-quota payloads include *PercentUsed=0 placeholders.
         // Those should not be rendered as "100% remaining".
-        if primary == nil, auto == nil, api == nil,
+        if primary == nil, secondary == nil, tertiary == nil,
            !hasRealCapacity,
            !hasPercentUsageSignal,
            usagePayloadHasOnlyZeroOrNoQuotaSignals(
@@ -1045,7 +1196,7 @@ struct CursorProvider: Provider {
                totalPercentUsed: totalPercentUsed,
                autoPercentUsed: autoPercentUsed,
                apiPercentUsed: apiPercentUsed
-           ) {
+           ) || quotaBlocked == true {
             return QuotaSnapshot(
                 source: "Cursor",
                 accountIdentifier: cursorAccountEmail(from: credentials),
@@ -1060,12 +1211,12 @@ struct CursorProvider: Provider {
                 accountValidUntil: accountValidUntil,
                 subscriptionWillRenew: inferSubscriptionWillRenew(from: subscriptionStatus),
                 subscriptionStatus: normalizedSubscriptionStatus(subscriptionStatus),
-                isQuotaBlocked: isQuotaBlocked(in: payload),
+                isQuotaBlocked: quotaBlocked,
                 note: note
             )
         }
 
-        guard primary != nil || auto != nil || api != nil else {
+        guard primary != nil || secondary != nil || tertiary != nil else {
             throw ProviderError.network("Cursor 返回成功，但未识别到用量字段")
         }
 
@@ -1074,8 +1225,8 @@ struct CursorProvider: Provider {
             accountIdentifier: cursorAccountEmail(from: credentials),
             planName: planName,
             primary: primary,
-            secondary: auto,
-            tertiary: api,
+            secondary: secondary,
+            tertiary: tertiary,
             creditsRemaining: nil,
             creditsTotal: nil,
             updatedAt: .init(),
@@ -1083,24 +1234,183 @@ struct CursorProvider: Provider {
             accountValidUntil: accountValidUntil,
             subscriptionWillRenew: inferSubscriptionWillRenew(from: subscriptionStatus),
             subscriptionStatus: normalizedSubscriptionStatus(subscriptionStatus),
-            isQuotaBlocked: isQuotaBlocked(in: payload),
+            isQuotaBlocked: quotaBlocked,
             note: note
         )
     }
 
+    private func extractCursorUsageWindows(from payload: Any, defaultResetAt: Date?) -> [QuotaWindow] {
+        var windows: [QuotaWindow] = []
+        collectCursorUsageWindows(
+            from: payload,
+            keyHint: nil,
+            defaultResetAt: defaultResetAt,
+            into: &windows
+        )
+
+        var seen = Set<String>()
+        return windows.filter { window in
+            let reset = window.resetAt.map { String(Int64($0.timeIntervalSince1970)) } ?? "none"
+            let key = "\(window.label)-\(window.used)-\(window.limit)-\(reset)"
+            return seen.insert(key).inserted
+        }
+    }
+
+    private func collectCursorUsageWindows(
+        from node: Any,
+        keyHint: String?,
+        defaultResetAt: Date?,
+        into windows: inout [QuotaWindow]
+    ) {
+        if let dict = node as? [String: Any] {
+            if let window = cursorUsageWindow(from: dict, keyHint: keyHint, defaultResetAt: defaultResetAt) {
+                windows.append(window)
+            }
+            for (key, value) in dict {
+                collectCursorUsageWindows(
+                    from: value,
+                    keyHint: key,
+                    defaultResetAt: defaultResetAt,
+                    into: &windows
+                )
+            }
+        } else if let array = node as? [Any] {
+            for value in array {
+                collectCursorUsageWindows(
+                    from: value,
+                    keyHint: keyHint,
+                    defaultResetAt: defaultResetAt,
+                    into: &windows
+                )
+            }
+        }
+    }
+
+    private func cursorUsageWindow(
+        from dict: [String: Any],
+        keyHint: String?,
+        defaultResetAt: Date?
+    ) -> QuotaWindow? {
+        let label = normalizedCursorWindowLabel(
+            directString(in: dict, keys: Self.windowLabelKeys) ?? keyHint
+        )
+        let resetAt = directDate(in: dict, keys: Self.cycleBoundaryDateKeys) ?? defaultResetAt
+        let used = directDouble(in: dict, keys: Self.usedAmountKeys)
+        let limit = directDouble(in: dict, keys: Self.limitAmountKeys)
+        let remaining = directDouble(in: dict, keys: Self.remainingAmountKeys)
+
+        if let used, let limit, limit > 0 {
+            return QuotaWindow(
+                label: label,
+                used: min(max(used, 0), limit),
+                limit: limit,
+                resetAt: resetAt
+            )
+        }
+
+        if let remaining, let limit, limit > 0 {
+            return QuotaWindow(
+                label: label,
+                used: min(max(limit - remaining, 0), limit),
+                limit: limit,
+                resetAt: resetAt
+            )
+        }
+
+        if let used, let remaining, used > 0 || remaining > 0 {
+            return QuotaWindow(
+                label: label,
+                used: max(used, 0),
+                limit: max(used + remaining, 0),
+                resetAt: resetAt
+            )
+        }
+
+        return parsePercentWindow(
+            label: label,
+            usedPercent: directDouble(in: dict, keys: Self.percentUsedKeys),
+            resetAt: resetAt
+        )
+    }
+
+    private func firstCursorWindow(
+        in windows: [QuotaWindow],
+        preferredLabels: Set<String>,
+        excluding excluded: [QuotaWindow?] = [],
+        allowAnyFallback: Bool = true
+    ) -> QuotaWindow? {
+        let excludedWindows = excluded.compactMap { $0 }
+        if let preferred = windows.first(where: { window in
+            preferredLabels.contains(window.label) && !excludedWindows.contains(where: { sameCursorWindow($0, window) })
+        }) {
+            return preferred
+        }
+
+        guard allowAnyFallback else { return nil }
+        return windows.first { window in
+            !excludedWindows.contains(where: { sameCursorWindow($0, window) })
+        }
+    }
+
+    private func sameCursorWindow(_ lhs: QuotaWindow, _ rhs: QuotaWindow) -> Bool {
+        lhs.label == rhs.label
+            && lhs.used == rhs.used
+            && lhs.limit == rhs.limit
+            && lhs.resetAt == rhs.resetAt
+    }
+
+    private func normalizedCursorWindowLabel(_ raw: String?) -> String {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return "Usage"
+        }
+
+        let normalized = raw
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .lowercased()
+        if normalized.contains("api") {
+            return "API"
+        }
+        if normalized.contains("auto") {
+            return "Auto"
+        }
+        if normalized.contains("on demand")
+            || normalized.contains("ondemand")
+            || normalized.contains("usage based")
+            || normalized.contains("hard limit") {
+            return "On-demand"
+        }
+        if normalized.contains("premium")
+            || normalized.contains("request")
+            || normalized == "num requests" {
+            return "Requests"
+        }
+        if normalized.contains("include") || normalized.contains("plan") {
+            return "Included"
+        }
+        if normalized.contains("total") {
+            return "Total"
+        }
+        if normalized.contains("usage") {
+            return "Usage"
+        }
+        return raw
+    }
+
     private func planHasPositiveCapacity(_ plan: [String: Any]?) -> Bool {
         guard let plan else { return false }
-        let limit = firstDouble(in: plan, keys: ["limit", "total", "includedAmountCents", "included_amount_cents"]) ?? 0
-        let remaining = firstDouble(in: plan, keys: ["remaining", "totalRemaining", "total_remaining"]) ?? 0
-        let used = firstDouble(in: plan, keys: ["used", "totalUsed", "total_used", "totalSpend", "total_spend", "includedSpend", "included_spend"]) ?? 0
+        let limit = firstDouble(in: plan, keys: Self.limitAmountKeys) ?? 0
+        let remaining = firstDouble(in: plan, keys: Self.remainingAmountKeys) ?? 0
+        let used = firstDouble(in: plan, keys: Self.usedAmountKeys) ?? 0
         return limit > 0 || remaining > 0 || used > 0
     }
 
     private func planExplicitlyHasNoCapacity(_ plan: [String: Any]?) -> Bool {
         guard let plan else { return false }
-        let limit = firstDouble(in: plan, keys: ["limit", "total", "includedAmountCents", "included_amount_cents"])
-        let remaining = firstDouble(in: plan, keys: ["remaining", "totalRemaining", "total_remaining"])
-        let used = firstDouble(in: plan, keys: ["used", "totalUsed", "total_used", "totalSpend", "total_spend", "includedSpend", "included_spend"])
+        let limit = firstDouble(in: plan, keys: Self.limitAmountKeys)
+        let remaining = firstDouble(in: plan, keys: Self.remainingAmountKeys)
+        let used = firstDouble(in: plan, keys: Self.usedAmountKeys)
         guard limit != nil || remaining != nil || used != nil else { return false }
         return (limit ?? 0) <= 0 && (remaining ?? 0) <= 0 && (used ?? 0) <= 0
     }
@@ -1137,9 +1447,30 @@ struct CursorProvider: Provider {
 
     private func onDemandHasPositiveCapacity(_ onDemand: [String: Any]?) -> Bool {
         guard let onDemand else { return false }
-        let limit = firstDouble(in: onDemand, keys: ["limit", "pooledLimit", "pooled_limit", "individualLimit", "individual_limit", "overallLimit", "overall_limit"]) ?? 0
-        let remaining = firstDouble(in: onDemand, keys: ["remaining", "pooledRemaining", "pooled_remaining", "individualRemaining", "individual_remaining", "overallRemaining", "overall_remaining"]) ?? 0
-        let used = firstDouble(in: onDemand, keys: ["used", "pooledUsed", "pooled_used", "individualUsed", "individual_used", "overallUsed", "overall_used"]) ?? 0
+        let limit = firstDouble(in: onDemand, keys: Self.limitAmountKeys.union([
+            "pooledLimit",
+            "pooled_limit",
+            "individualLimit",
+            "individual_limit",
+            "overallLimit",
+            "overall_limit"
+        ])) ?? 0
+        let remaining = firstDouble(in: onDemand, keys: Self.remainingAmountKeys.union([
+            "pooledRemaining",
+            "pooled_remaining",
+            "individualRemaining",
+            "individual_remaining",
+            "overallRemaining",
+            "overall_remaining"
+        ])) ?? 0
+        let used = firstDouble(in: onDemand, keys: Self.usedAmountKeys.union([
+            "pooledUsed",
+            "pooled_used",
+            "individualUsed",
+            "individual_used",
+            "overallUsed",
+            "overall_used"
+        ])) ?? 0
         return limit > 0 || remaining > 0 || used > 0
     }
 
@@ -1169,9 +1500,9 @@ struct CursorProvider: Provider {
 
     private func parsePlanWindow(_ dict: [String: Any]?, resetAt: Date?) -> QuotaWindow? {
         guard let dict else { return nil }
-        let used = firstDouble(in: dict, keys: ["used", "totalUsed", "total_used", "totalSpend", "total_spend", "includedSpend", "included_spend"])
-        let limit = firstDouble(in: dict, keys: ["limit", "total", "includedAmountCents", "included_amount_cents"])
-        let remaining = firstDouble(in: dict, keys: ["remaining", "totalRemaining", "total_remaining"])
+        let used = firstDouble(in: dict, keys: Self.usedAmountKeys)
+        let limit = firstDouble(in: dict, keys: Self.limitAmountKeys)
+        let remaining = firstDouble(in: dict, keys: Self.remainingAmountKeys)
 
         if let used, let limit, limit > 0 {
             return QuotaWindow(label: "Total", used: used, limit: limit, resetAt: resetAt)
@@ -1211,17 +1542,17 @@ struct CursorProvider: Provider {
     private func cursorUsageNote(plan: [String: Any]?, onDemand: [String: Any]?) -> String? {
         var parts: [String] = []
         if let plan,
-           let used = firstDouble(in: plan, keys: ["used", "totalUsed", "total_used", "totalSpend", "total_spend", "includedSpend", "included_spend"]),
-           let limit = firstDouble(in: plan, keys: ["limit", "total", "includedAmountCents", "included_amount_cents"]),
+           let used = firstDouble(in: plan, keys: Self.usedAmountKeys),
+           let limit = firstDouble(in: plan, keys: Self.limitAmountKeys),
            limit > 0 {
             parts.append("Included \(formatDollars(used))/\(formatDollars(limit))")
         }
 
         if let onDemand,
            firstBool(in: onDemand, keys: ["enabled"]) == true,
-           let used = firstDouble(in: onDemand, keys: ["used", "pooledUsed", "individualUsed"]),
+           let used = firstDouble(in: onDemand, keys: Self.usedAmountKeys.union(["pooledUsed", "individualUsed"])),
            used > 0 {
-            let limit = firstDouble(in: onDemand, keys: ["limit", "pooledLimit", "individualLimit"])
+            let limit = firstDouble(in: onDemand, keys: Self.limitAmountKeys.union(["pooledLimit", "individualLimit"]))
             if let limit, limit > 0 {
                 parts.append("On-demand \(formatDollars(used))/\(formatDollars(limit))")
             } else {
@@ -1430,6 +1761,37 @@ struct CursorProvider: Provider {
         return nil
     }
 
+    private func directString(in dict: [String: Any], keys: Set<String>) -> String? {
+        for (key, value) in dict where keys.contains(key) {
+            if let text = value as? String,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return text
+            }
+            if let number = value as? NSNumber {
+                return number.stringValue
+            }
+        }
+        return nil
+    }
+
+    private func directDouble(in dict: [String: Any], keys: Set<String>) -> Double? {
+        for (key, value) in dict where keys.contains(key) {
+            if let number = asDouble(value) {
+                return number
+            }
+        }
+        return nil
+    }
+
+    private func directDate(in dict: [String: Any], keys: Set<String>) -> Date? {
+        for (key, value) in dict where keys.contains(key) {
+            if let date = parseDateValue(value) {
+                return date
+            }
+        }
+        return nil
+    }
+
     private func firstBool(in object: Any, keys: Set<String>) -> Bool? {
         if let dict = object as? [String: Any] {
             for (key, value) in dict {
@@ -1462,7 +1824,17 @@ struct CursorProvider: Provider {
 
     private func asDouble(_ value: Any) -> Double? {
         if let number = value as? NSNumber { return number.doubleValue }
-        if let text = value as? String { return Double(text) }
+        if let text = value as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let number = Double(trimmed) {
+                return number
+            }
+            let cleaned = trimmed
+                .replacingOccurrences(of: "%", with: "")
+                .replacingOccurrences(of: ",", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Double(cleaned)
+        }
         return nil
     }
 
@@ -1475,6 +1847,17 @@ struct CursorProvider: Provider {
             case "false", "0", "no": return false
             default: return nil
             }
+        }
+        return nil
+    }
+
+    private func parseDateValue(_ raw: Any) -> Date? {
+        if let number = raw as? NSNumber {
+            let epoch = number.doubleValue
+            return epoch > 2_000_000_000 ? Date(timeIntervalSince1970: epoch / 1000) : Date(timeIntervalSince1970: epoch)
+        }
+        if let text = raw as? String {
+            return parseDate(text)
         }
         return nil
     }

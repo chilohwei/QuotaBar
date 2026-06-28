@@ -4,12 +4,12 @@ import SwiftUI
 enum DashboardLayout {
     static let contentWidth: CGFloat = 430
     static let sidebarWidth: CGFloat = 54
-    static let panelWidth: CGFloat = contentWidth + sidebarWidth
+    static let panelWidth: CGFloat = contentWidth
     static let fixedPanelHeight: CGFloat = 620
-    static let accountCardHeight: CGFloat = 132
+    static let accountCardHeight: CGFloat = 144
     static let accountCardSpacing: CGFloat = 10
     static let maxVisibleAccountCards = 3
-    static let headerHeight: CGFloat = 60
+    static let headerHeight: CGFloat = 64
     static let stackSpacing: CGFloat = 10
     static let headerListSpacing: CGFloat = 12
     static let listFooterSpacing: CGFloat = 8
@@ -34,6 +34,7 @@ struct DashboardView: View {
     @State private var accountFilter: AccountFilter = .all
     @State private var refreshCycleID: Int = 0
     @State private var isFilterMenuPresented: Bool = false
+    @State private var isToolMenuPresented: Bool = false
     @State private var isSettingsMenuPresented: Bool = false
     @State private var frozenAccountOrderByTool: [ToolKind: [UUID]] = [:]
     @State private var lastVisibleAccountOrderByTool: [ToolKind: [UUID]] = [:]
@@ -111,11 +112,7 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-
-            rightPane
-        }
+        rightPane
         .frame(width: DashboardLayout.panelWidth, height: preferredPanelHeight, alignment: .top)
         .background(Branding.pageBackground)
         .foregroundStyle(Branding.ink)
@@ -150,31 +147,11 @@ struct DashboardView: View {
             rememberVisibleOrderForSelectedTool(ids)
         }
         .onChange(of: appState.selectedTool) { _ in
+            isToolMenuPresented = false
             rememberVisibleOrderForSelectedTool(visibleAccountIDs)
         }
         .onAppear {
             rememberVisibleOrderForSelectedTool(visibleAccountIDs)
-        }
-    }
-
-    private var sidebar: some View {
-        VStack(spacing: 10) {
-            ForEach(ToolKind.allCases) { tool in
-                sidebarToolButton(tool)
-            }
-
-            Spacer(minLength: 12)
-
-            sidebarSettingsButton
-        }
-        .padding(.top, 14)
-        .padding(.bottom, 13)
-        .frame(width: DashboardLayout.sidebarWidth, height: preferredPanelHeight)
-        .background(Branding.pageBackground)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(Branding.controlStroke.opacity(0.72))
-                .frame(width: 1)
         }
     }
 
@@ -210,69 +187,6 @@ struct DashboardView: View {
             footerBar
         }
         .frame(width: DashboardLayout.contentWidth, height: preferredPanelHeight, alignment: .top)
-    }
-
-    private func sidebarToolButton(_ tool: ToolKind) -> some View {
-        let isSelected = !isSettingsMenuPresented && appState.selectedTool == tool
-
-        return Button {
-            setSettingsMenuPresented(false)
-            appState.selectTool(tool)
-        } label: {
-            ZStack {
-                RoundedRectangle(cornerRadius: Branding.radiusSidebarItem, style: .continuous)
-                    .fill(isSelected ? Branding.accentBlueSoft : Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Branding.radiusSidebarItem, style: .continuous)
-                            .stroke(isSelected ? Branding.accentBlue.opacity(0.22) : Color.clear, lineWidth: 1)
-                    )
-
-                ToolLogoIcon(tool: tool, size: sidebarLogoSize(for: tool))
-                    .opacity(isSelected ? 1 : 0.6)
-                    .frame(width: 22, height: 22)
-            }
-            .frame(width: 34, height: 34)
-            .contentShape(RoundedRectangle(cornerRadius: Branding.radiusSidebarItem, style: .continuous))
-            .animation(reduceMotion ? nil : .quotaFluid, value: isSelected)
-        }
-        .buttonStyle(.quotaInteractive())
-        .help(tool.displayName)
-        .accessibilityLabel(tool.displayName)
-    }
-
-    private func sidebarLogoSize(for tool: ToolKind) -> CGFloat {
-        switch tool {
-        case .codex:
-            return 18
-        case .cursor:
-            return 17
-        case .claudeCode:
-            return 18
-        }
-    }
-
-    private var sidebarSettingsButton: some View {
-        Button {
-            setSettingsMenuPresented(!isSettingsMenuPresented)
-        } label: {
-            Image(systemName: "gearshape")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(isSettingsMenuPresented ? Branding.accentBlueDark : Branding.inkMuted)
-                .frame(width: 34, height: 34)
-                .background(
-                    RoundedRectangle(cornerRadius: Branding.radiusSidebarItem, style: .continuous)
-                        .fill(isSettingsMenuPresented ? Branding.accentBlueSoft : Color.clear)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Branding.radiusSidebarItem, style: .continuous)
-                        .stroke(isSettingsMenuPresented ? Branding.accentBlue.opacity(0.22) : Color.clear, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: Branding.radiusSidebarItem, style: .continuous))
-                .animation(reduceMotion ? nil : .quotaFluid, value: isSettingsMenuPresented)
-        }
-        .buttonStyle(.quotaInteractive())
-        .help(text.string(.settings))
-        .accessibilityLabel(text.string(.settings))
     }
 
     private func freezeCurrentAccountOrder() {
@@ -336,10 +250,13 @@ struct DashboardView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
+                toolPickerButton
+
                 Text(headerTitle)
-                    .font(.system(size: 21.5, weight: .semibold, design: .rounded))
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundStyle(Branding.inkStrong)
                     .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
 
                 Spacer(minLength: 10)
 
@@ -353,24 +270,166 @@ struct DashboardView: View {
     }
 
     private var headerTitle: String {
-        "\(appState.selectedTool.displayName) \(text.usageHeadline)"
+        text.usageHeadline
+    }
+
+    private var toolPickerButton: some View {
+        Button {
+            setSettingsMenuPresented(false)
+            isToolMenuPresented.toggle()
+        } label: {
+            HStack(spacing: 7) {
+                ToolLogoIcon(tool: appState.selectedTool, size: toolPickerLogoSize(for: appState.selectedTool))
+                    .frame(width: 22, height: 22)
+
+                Text(appState.selectedTool.displayName)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Branding.inkStrong)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.88)
+                    .layoutPriority(1)
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(Branding.inkSubtle.opacity(0.72))
+                    .rotationEffect(.degrees(isToolMenuPresented ? 180 : 0))
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 9)
+            .frame(height: 30)
+            .fixedSize(horizontal: true, vertical: false)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Branding.controlSurface)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(
+                        isToolMenuPresented ? Branding.accentBlue.opacity(0.35) : Branding.separatorDot,
+                        lineWidth: isToolMenuPresented ? 1 : 0.75
+                    )
+            )
+            .shadow(color: Branding.shadowPopover.opacity(0.6), radius: 2.5, y: 1)
+            .contentShape(Capsule(style: .continuous))
+            .animation(settingsPopoverAnimation, value: isToolMenuPresented)
+        }
+        .buttonStyle(.quotaInteractive())
+        .help(appState.selectedTool.displayName)
+        .accessibilityLabel(appState.selectedTool.displayName)
+        .popover(isPresented: $isToolMenuPresented, arrowEdge: .bottom) {
+            VStack(spacing: 4) {
+                ForEach(ToolKind.allCases) { tool in
+                    toolPickerOption(tool)
+                }
+            }
+            .padding(8)
+            .frame(width: 184)
+            .background(
+                RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
+                    .fill(Branding.menuSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
+                    .stroke(Branding.borderSubtle, lineWidth: 0.75)
+            )
+            .shadow(color: Branding.shadowPopover, radius: 16, y: 6)
+        }
+    }
+
+    private func toolPickerOption(_ tool: ToolKind) -> some View {
+        let isSelected = appState.selectedTool == tool
+
+        return Button {
+            isToolMenuPresented = false
+            setSettingsMenuPresented(false)
+            appState.selectTool(tool)
+        } label: {
+            HStack(spacing: 8) {
+                ToolLogoIcon(tool: tool, size: toolPickerLogoSize(for: tool))
+                    .frame(width: 20, height: 20)
+                    .opacity(isSelected ? 1 : 0.62)
+
+                Text(tool.displayName)
+                    .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? Branding.accentBlueDark : Branding.ink)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                let toolAccountCount = appState.accounts(for: tool).count
+                if toolAccountCount > 0 {
+                    Text("\(toolAccountCount)")
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(isSelected ? Branding.accentBlueDark.opacity(0.7) : Branding.inkSubtle)
+                        .lineLimit(1)
+                }
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(Branding.accentBlueDark)
+                } else {
+                    Color.clear.frame(width: 9.5, height: 1)
+                }
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 9)
+            .frame(height: 32)
+            .background(
+                RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
+                    .fill(isSelected ? Branding.menuItemSelectedSurface : Color.clear)
+            )
+        }
+        .buttonStyle(.quotaInteractive())
+        .help(tool.displayName)
+        .accessibilityLabel(tool.displayName)
+    }
+
+    private func toolPickerLogoSize(for tool: ToolKind) -> CGFloat {
+        switch tool {
+        case .codex:
+            return 19
+        case .cursor:
+            return 18
+        case .claudeCode:
+            return 20
+        }
     }
 
     @ViewBuilder
     private var headerStatus: some View {
         HStack(spacing: 6) {
             Text(text.string(.current))
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(Branding.inkMuted)
+                .font(.system(size: 11.5, weight: .light))
+                .foregroundStyle(Branding.inkSubtle)
 
             Text(activeAccountName ?? "--")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(Branding.inkStrong)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Branding.inkMuted)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .layoutPriority(1)
+
+            Button {
+                isToolMenuPresented = false
+                setSettingsMenuPresented(!isSettingsMenuPresented)
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(isSettingsMenuPresented ? Branding.accentBlueDark : Branding.inkSubtle.opacity(0.62))
+                    .frame(width: 22, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
+                            .fill(isSettingsMenuPresented ? Branding.accentBlueSoft : Color.clear)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous))
+            }
+            .buttonStyle(.quotaInteractive())
+            .help(text.string(.settings))
+            .accessibilityLabel(text.string(.settings))
         }
-        .frame(height: 20, alignment: .center)
+        .frame(height: 22, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipped()
     }
@@ -392,7 +451,7 @@ struct DashboardView: View {
     }
 
     private var headerActions: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             headerRefreshButton
 
             Button {
@@ -402,35 +461,35 @@ struct DashboardView: View {
                     appState.quickAddAccount(tool: appState.selectedTool)
                 }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     if appState.isAddingAccount {
                         ProgressView()
                             .controlSize(.small)
                             .tint(Branding.warning)
                     } else {
                         Image(systemName: "plus")
-                            .font(.system(size: 11.5, weight: .bold))
+                            .font(.system(size: 11, weight: .semibold))
                     }
 
                     Text(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12.5, weight: .medium))
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
-                .padding(.horizontal, 12)
-                .frame(width: 82, height: 32)
+                .padding(.horizontal, 11)
+                .frame(width: 80, height: 30)
                 .foregroundStyle(appState.isAddingAccount ? Branding.warning : Branding.accentBlueDark)
                 .background(
-                    RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
+                    Capsule(style: .continuous)
                         .fill(appState.isAddingAccount ? Branding.warningSoft : Branding.accentBlueSoft)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
+                    Capsule(style: .continuous)
                         .stroke(
                             appState.isAddingAccount
-                                ? Branding.warning.opacity(0.16)
-                                : Branding.accentBlue.opacity(0.14),
-                            lineWidth: 1
+                                ? Branding.warning.opacity(0.12)
+                                : Branding.accentBlue.opacity(0.10),
+                            lineWidth: 0.75
                         )
                 )
             }
@@ -438,7 +497,7 @@ struct DashboardView: View {
             .help(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
             .accessibilityLabel(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
         }
-        .frame(width: 126, height: 32, alignment: .trailing)
+        .frame(width: 120, height: 30, alignment: .trailing)
     }
 
     private var headerRefreshButton: some View {
@@ -452,22 +511,22 @@ struct DashboardView: View {
             appState.refreshSelectedTool()
         } label: {
             HeaderRefreshGlyph(isRefreshing: isBusy)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(headerRefreshButtonTint(isEnabled: isEnabled, isBusy: isBusy))
                 .opacity(isEnabled || isBusy ? 1 : 0.58)
-                .frame(width: 36, height: 32)
+                .frame(width: 32, height: 30)
                 .background(
-                    RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
+                    Capsule(style: .continuous)
                         .fill(isBusy ? Branding.accentBlueSoft : Branding.controlSurface)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
+                    Capsule(style: .continuous)
                         .stroke(
-                            isBusy ? Branding.accentBlue.opacity(0.18) : Branding.controlStroke,
-                            lineWidth: 1
+                            isBusy ? Branding.accentBlue.opacity(0.12) : Branding.controlStroke,
+                            lineWidth: 0.75
                         )
                 )
-                .contentShape(RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous))
+                .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.quotaInteractive(isEnabled: isEnabled || isBusy))
         .disabled(!isEnabled)
@@ -586,20 +645,48 @@ struct DashboardView: View {
             Button {
                 isFilterMenuPresented.toggle()
             } label: {
-                HStack(spacing: 6) {
-                    Text(currentFilterTitle)
-                        .font(.system(size: 11.8, weight: .medium))
-                        .foregroundStyle(Branding.inkSubtle)
+                HStack(spacing: 5) {
+                    Text(text.string(.show))
+                        .font(.system(size: 11, weight: .light))
+                        .foregroundStyle(Branding.inkSubtle.opacity(0.78))
+                        .lineLimit(1)
+
+                    Circle()
+                        .fill(Branding.separatorDot)
+                        .frame(width: 2.5, height: 2.5)
+
+                    Text(currentFilterLabel)
+                        .font(.system(size: 11.2, weight: .medium))
+                        .foregroundStyle(Branding.inkMuted)
+                        .lineLimit(1)
+
+                    Text("\(currentFilterCount)")
+                        .font(.system(size: 11.2, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(Branding.inkMuted)
                         .lineLimit(1)
 
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundStyle(Branding.inkSubtle)
+                        .font(.system(size: 8, weight: .regular))
+                        .foregroundStyle(Branding.inkSubtle.opacity(0.56))
+                        .rotationEffect(.degrees(isFilterMenuPresented ? 180 : 0))
                 }
-                .padding(.leading, 10)
-                .padding(.trailing, 9)
-                .frame(height: 30)
+                .padding(.leading, 9)
+                .padding(.trailing, 8)
+                .frame(height: 26)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Branding.controlSurface)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(
+                            isFilterMenuPresented ? Branding.accentBlue.opacity(0.10) : Branding.controlStroke.opacity(0.45),
+                            lineWidth: 0.75
+                        )
+                )
                 .contentShape(Capsule(style: .continuous))
+                .animation(settingsPopoverAnimation, value: isFilterMenuPresented)
             }
             .buttonStyle(.quotaInteractive())
             .fixedSize()
@@ -607,33 +694,27 @@ struct DashboardView: View {
             .accessibilityLabel(currentFilterTitle)
             .popover(isPresented: $isFilterMenuPresented, arrowEdge: .bottom) {
                 VStack(spacing: 4) {
-                    footerFilterOption(
-                        title: text.accountFilterAll(count: toolAccounts.count),
-                        isSelected: accountFilter == .all
-                    ) {
+                    footerFilterOption(filter: .all) {
                         accountFilter = .all
                         isFilterMenuPresented = false
                     }
 
-                    footerFilterOption(
-                        title: text.accountFilterAvailable(count: availableAccountCount),
-                        isSelected: accountFilter == .available
-                    ) {
+                    footerFilterOption(filter: .available) {
                         accountFilter = .available
                         isFilterMenuPresented = false
                     }
                 }
-                .padding(8)
-                .frame(width: 160)
+                .padding(7)
+                .frame(width: 168)
                 .background(
                     RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .fill(Branding.menuSurface)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
-                        .stroke(Branding.borderSubtle, lineWidth: 1)
+                        .stroke(Branding.borderSubtle, lineWidth: 0.75)
                 )
-                .shadow(color: Branding.shadowPopover, radius: 18, y: 8)
+                .shadow(color: Branding.shadowPopover, radius: 14, y: 6)
             }
 
             Spacer(minLength: 8)
@@ -641,15 +722,11 @@ struct DashboardView: View {
             Button {
                 NSApp.terminate(nil)
             } label: {
-                HStack(spacing: 6) {
-                    Text(text.string(.quit))
-                        .font(.system(size: 11.8, weight: .medium))
-
-                    Image(systemName: "power")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .foregroundStyle(Branding.inkSubtle)
-                .frame(height: 30)
+                Text(text.string(.quit))
+                    .font(.system(size: 11.2, weight: .light))
+                .foregroundStyle(Branding.inkSubtle.opacity(0.68))
+                .padding(.horizontal, 8)
+                .frame(height: 26)
                 .contentShape(Capsule(style: .continuous))
             }
             .buttonStyle(.quotaInteractive())
@@ -657,14 +734,9 @@ struct DashboardView: View {
             .accessibilityLabel(text.string(.quit))
         }
         .padding(.horizontal, 18)
-        .frame(height: 54)
+        .frame(height: 46)
         .frame(maxWidth: .infinity)
         .background(Branding.pageBackground)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Branding.controlStroke.opacity(0.45))
-                .frame(height: 1)
-        }
     }
 
     private var settingsCover: some View {
@@ -681,16 +753,16 @@ struct DashboardView: View {
                     setSettingsMenuPresented(false)
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 11.5, weight: .bold))
-                        .foregroundStyle(Branding.inkMuted)
-                        .frame(width: 32, height: 32)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(Branding.inkSubtle)
+                        .frame(width: 28, height: 28)
                         .background(
                             RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
                                 .fill(Branding.controlSurface)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
-                                .stroke(Branding.controlStroke, lineWidth: 1)
+                                .stroke(Branding.controlStroke, lineWidth: 0.75)
                         )
                         .contentShape(RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous))
                 }
@@ -698,10 +770,10 @@ struct DashboardView: View {
                 .help(text.string(.cancel))
                 .accessibilityLabel(text.string(.cancel))
             }
-            .frame(height: DashboardLayout.headerHeight, alignment: .top)
+            .frame(height: 36, alignment: .center)
 
             Spacer()
-                .frame(height: DashboardLayout.headerListSpacing)
+                .frame(height: 6)
 
             ScrollView(.vertical, showsIndicators: false) {
                 settingsPanel
@@ -1248,47 +1320,154 @@ struct DashboardView: View {
             : text.accountFilterAvailable(count: availableAccountCount)
     }
 
-    private func footerFilterOption(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private var currentFilterLabel: String {
+        filterTitle(accountFilter)
+    }
+
+    private var currentFilterCount: Int {
+        filterCount(accountFilter)
+    }
+
+    private func filterTitle(_ filter: AccountFilter) -> String {
+        switch filter {
+        case .all:
+            return text.accountFilterAllTitle
+        case .available:
+            return text.accountFilterAvailableTitle
+        }
+    }
+
+    private func filterCount(_ filter: AccountFilter) -> Int {
+        switch filter {
+        case .all:
+            return toolAccounts.count
+        case .available:
+            return availableAccountCount
+        }
+    }
+
+    private func filterAccessibilityTitle(_ filter: AccountFilter) -> String {
+        switch filter {
+        case .all:
+            return text.accountFilterAll(count: toolAccounts.count)
+        case .available:
+            return text.accountFilterAvailable(count: availableAccountCount)
+        }
+    }
+
+    private func footerFilterOption(filter: AccountFilter, action: @escaping () -> Void) -> some View {
+        let title = filterTitle(filter)
+        let count = filterCount(filter)
+        let isSelected = accountFilter == filter
+
+        return Button(action: action) {
             HStack(spacing: 8) {
                 Text(title)
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(Branding.inkStrong)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? Branding.accentBlueDark : Branding.inkStrong)
                     .lineLimit(1)
+
                 Spacer(minLength: 6)
+
+                Text("\(count)")
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(isSelected ? Branding.accentBlueDark : Branding.inkSubtle)
+                    .lineLimit(1)
+
                 if isSelected {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 10.5, weight: .semibold))
+                        .font(.system(size: 9.5, weight: .semibold))
                         .foregroundStyle(Branding.accentBlueDark)
+                        .frame(width: 12)
+                } else {
+                    Color.clear
+                        .frame(width: 12, height: 1)
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(height: 30)
+            .padding(.leading, 10)
+            .padding(.trailing, 9)
+            .frame(height: 32)
             .background(
-                RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
+                RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
                     .fill(isSelected ? Branding.menuItemSelectedSurface : Color.clear)
             )
         }
         .buttonStyle(.quotaInteractive())
-        .help(title)
-        .accessibilityLabel(title)
+        .help(filterAccessibilityTitle(filter))
+        .accessibilityLabel(filterAccessibilityTitle(filter))
     }
 
     private var emptyState: some View {
-        VStack(spacing: 10) {
-            Text(text.string(.emptyAccountsTitle))
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Branding.ink)
+        VStack(spacing: 14) {
+            ToolLogoIcon(tool: appState.selectedTool, size: 30)
+                .frame(width: 44, height: 44)
+                .background(
+                    Circle().fill(Branding.controlSurface)
+                )
+                .overlay(
+                    Circle().stroke(Branding.controlStroke, lineWidth: 0.75)
+                )
+                .opacity(0.9)
 
-            Text(text.string(.emptyAccountsDescription))
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(Branding.inkMuted)
-                .multilineTextAlignment(.center)
-                .lineSpacing(2)
-                .frame(maxWidth: 280)
+            VStack(spacing: 6) {
+                Text(text.string(.emptyAccountsTitle))
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Branding.ink)
+
+                Text(text.string(.emptyAccountsDescription))
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(Branding.inkMuted)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+                    .frame(maxWidth: 280)
+            }
+
+            Button {
+                if appState.isAddingAccount {
+                    appState.cancelAddAccount()
+                } else {
+                    appState.quickAddAccount(tool: appState.selectedTool)
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    if appState.isAddingAccount {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(Branding.warning)
+                    } else {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    Text(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
+                        .font(.system(size: 12.5, weight: .medium))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 32)
+                .foregroundStyle(appState.isAddingAccount ? Branding.warning : Branding.accentBlueDark)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(appState.isAddingAccount ? Branding.warningSoft : Branding.accentBlueSoft)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(
+                            appState.isAddingAccount
+                                ? Branding.warning.opacity(0.12)
+                                : Branding.accentBlue.opacity(0.10),
+                            lineWidth: 0.75
+                        )
+                )
+            }
+            .buttonStyle(.quotaInteractive())
+            .help(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
+            .accessibilityLabel(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
+            .padding(.top, 2)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 58)
+        .padding(.vertical, 48)
     }
 
     private var filteredEmptyState: some View {

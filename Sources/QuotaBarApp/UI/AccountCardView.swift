@@ -332,8 +332,8 @@ struct AccountCardView: View {
 
     private var cardStroke: Color {
         if isActive { return Branding.borderSelected }
-        if isHovering { return Branding.borderSelected.opacity(0.44) }
-        return Branding.controlStroke.opacity(0.64)
+        if isHovering { return Branding.borderSelected.opacity(0.36) }
+        return Branding.controlStroke.opacity(0.52)
     }
 
     private var shouldRevealActions: Bool {
@@ -341,13 +341,14 @@ struct AccountCardView: View {
     }
 
     // Trailing space the header reserves so the account name never collides with
-    // the text action buttons. English labels are wider than the CJK ones.
+    // the text action buttons. The active card drops the "use" verb, so it needs
+    // less room. English labels are wider than the CJK ones.
     private var actionZoneWidth: CGFloat {
         switch language {
         case .english:
-            return isActive ? 120 : 156
+            return isActive ? 128 : 164
         default:
-            return isActive ? 86 : 124
+            return isActive ? 94 : 132
         }
     }
 
@@ -375,9 +376,8 @@ struct AccountCardView: View {
             items.append((refreshBadge.text, refreshBadge.tint, .semibold))
         }
 
-        // Renewal date is the lowest-priority metadata — quietest tone.
         if let subscriptionDateText {
-            items.append((subscriptionDateText, Branding.inkSubtle, .regular))
+            items.append((subscriptionDateText, Branding.inkSubtle, .light))
         }
 
         return items
@@ -396,6 +396,7 @@ struct AccountCardView: View {
         }
         return nil
     }
+
 
     private var hasFooterContent: Bool {
         footerMessage != nil
@@ -419,14 +420,14 @@ struct AccountCardView: View {
         if hasFooterContent {
             return 6
         }
-        return 9
+        return 10
     }
 
     private var verticalPadding: CGFloat {
         if hasFooterContent {
             return 10
         }
-        return 11
+        return 14
     }
 
     var body: some View {
@@ -445,7 +446,7 @@ struct AccountCardView: View {
 
             footer
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, verticalPadding)
         .frame(height: DashboardLayout.accountCardHeight, alignment: .top)
         .background(
@@ -454,7 +455,7 @@ struct AccountCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .stroke(cardStroke, lineWidth: isActive ? 1.15 : 1)
+                .stroke(cardStroke, lineWidth: isActive ? 1 : 0.75)
         )
         .overlay(alignment: .topTrailing) {
             actionZone
@@ -463,10 +464,10 @@ struct AccountCardView: View {
                 .allowsHitTesting(shouldRevealActions)
                 .accessibilityHidden(!shouldRevealActions)
                 .padding(.top, verticalPadding)
-                .padding(.trailing, 12)
+                .padding(.trailing, 14)
         }
         .shadow(
-            color: isActive ? Branding.shadowPopover.opacity(0.58) : Branding.cardShadow.opacity(0.82),
+            color: isActive ? Branding.shadowPopover.opacity(0.28) : Branding.cardShadow.opacity(0.44),
             radius: isActive ? Branding.activeCardShadowRadius : Branding.cardShadowRadius,
             y: isActive ? Branding.activeCardShadowY : Branding.cardShadowY
         )
@@ -535,7 +536,7 @@ struct AccountCardView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .center, spacing: 8) {
                 Text(displayName)
-                    .font(.system(size: 15.5, weight: .semibold, design: .rounded))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .foregroundStyle(Branding.inkStrong)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -555,7 +556,7 @@ struct AccountCardView: View {
                 metadataRow
             }
         }
-        .padding(.trailing, actionZoneWidth + 8)
+        .padding(.trailing, actionZoneWidth + 10)
     }
 
     private var metadataRow: some View {
@@ -564,11 +565,10 @@ struct AccountCardView: View {
                 if index > 0 {
                     Circle()
                         .fill(Branding.separatorDot)
-                        .frame(width: 3, height: 3)
+                        .frame(width: 2.5, height: 2.5)
                 }
 
                 InlineMetadataLabel(text: item.text, tint: item.tint, weight: item.weight)
-                    .metadataActivePill(isActive && item.text == text.string(.currentBadge))
             }
         }
         .lineLimit(1)
@@ -602,6 +602,13 @@ struct AccountCardView: View {
             .help(text.refreshAccount(resolvedAccountName))
             .accessibilityLabel(text.refreshAccount(resolvedAccountName))
 
+            // A hairline divider separates the safe actions from the destructive
+            // one, lowering the odds of an accidental delete.
+            Rectangle()
+                .fill(Branding.separatorDot)
+                .frame(width: 1, height: 12)
+                .padding(.horizontal, 3)
+
             CardTextActionButton(
                 title: text.string(.delete),
                 tint: Branding.actionDestructive,
@@ -621,7 +628,7 @@ struct AccountCardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 if let footerMessage {
                     Text(footerMessage.message)
-                        .font(.system(size: 10.2, weight: .regular))
+                        .font(.system(size: 10.4, weight: .regular))
                         .foregroundStyle(footerMessage.color)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -735,20 +742,20 @@ private struct CardTextActionButton: View {
             return Branding.inkSubtle.opacity(0.5)
         }
         if !isHovering {
-            return tint.opacity(0.78)
+            return tint.opacity(0.68)
         }
         return tint
     }
 
     private var backgroundColor: Color {
         guard isEnabled, isHovering else { return .clear }
-        return softTint.opacity(0.72)
+        return softTint.opacity(0.62)
     }
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11, weight: .regular))
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.horizontal, 8)
@@ -868,29 +875,10 @@ private struct InlineMetadataLabel: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 10, weight: weight))
+            .font(.system(size: 10.5, weight: weight))
             .lineLimit(1)
             .truncationMode(.tail)
             .foregroundStyle(tint)
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func metadataActivePill(_ isActive: Bool) -> some View {
-        if isActive {
-            // Soft-tint chip rather than a solid fill: marks the active account
-            // without out-shouting the name and quota figures above/below it.
-            self
-                .padding(.horizontal, 6)
-                .frame(height: 17)
-                .background(
-                    RoundedRectangle(cornerRadius: Branding.radiusPill, style: .continuous)
-                        .fill(Branding.accentBlueSoft)
-                )
-        } else {
-            self
-        }
     }
 }
 
@@ -919,7 +907,7 @@ private struct CompactQuotaMetricStrip: View {
     var fallbackDetail: String?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 12) {
             ForEach(Array(tiles.enumerated()), id: \.offset) { _, tile in
                 CompactQuotaMetricTile(
                     title: tile.title,
@@ -959,39 +947,44 @@ private struct CompactQuotaMetricTile: View {
 
     private var percentTextColor: Color {
         guard state.isKnown else { return Branding.inkSubtle }
-        if state.ratio <= 0.20 {
-            return tint
-        }
-        return Branding.inkStrong
+        return tint
     }
 
     var body: some View {
         let resolved = state
 
         VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .center) {
-                Text(text.quotaLabel(title))
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(Branding.inkMuted)
-                    .lineLimit(1)
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(text.quotaLabel(title))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Branding.inkMuted)
+                        .lineLimit(1)
+
+                    Text(text.string(.remaining))
+                        .font(.system(size: 10, weight: .light))
+                        .foregroundStyle(Branding.inkSubtle)
+                        .lineLimit(1)
+                }
 
                 Spacer(minLength: 8)
 
                 Text(resolved.isKnown ? "\(Int((resolved.ratio * 100).rounded()))%" : "--")
-                    .font(.system(size: 16.5, weight: .semibold, design: .rounded))
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
                     .foregroundStyle(percentTextColor)
                     .monospacedDigit()
+                    .lineLimit(1)
             }
 
             RatioBar(value: resolved.isKnown ? resolved.ratio : 0, tint: tint)
 
             Text(detailText(resolved: resolved))
-                .font(.system(size: 9.8, weight: .regular))
-                .foregroundStyle(Branding.inkSubtle)
+                .font(.system(size: 10, weight: .light))
+                .foregroundStyle(Branding.inkSubtle.opacity(0.78))
                 .lineLimit(1)
-                .frame(minHeight: 12, alignment: .leading)
+                .frame(minHeight: 13, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, minHeight: 50, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
     }
 
     private func detailText(resolved: (ratio: Double, resetAt: Date?, isKnown: Bool)) -> String {
@@ -1021,8 +1014,17 @@ private struct RatioBar: View {
                 Capsule()
                     .fill(tint)
                     .frame(width: max(proxy.size.width * value, value > 0 ? 7 : 0))
+
+                // Warning threshold marker at 20% — the point where the bar turns
+                // amber — so users can read "how close to the limit" at a glance.
+                Rectangle()
+                    .fill(Branding.pageBackground.opacity(0.85))
+                    .frame(width: 1, height: 6)
+                    .offset(x: proxy.size.width * RatioBar.warningThreshold)
             }
         }
-        .frame(height: 7)
+        .frame(height: 6)
     }
+
+    static let warningThreshold: Double = 0.20
 }

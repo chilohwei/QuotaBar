@@ -212,7 +212,7 @@ final class AppState: ObservableObject {
                 try await persistState()
                 let syncedAccount = await syncInstalledCurrentAccount(for: account.tool)
                 restartRequiredMessage = text.restartRequiredMessage(accountName: account.name)
-                await refreshQuota(for: syncedAccount ?? account)
+                await refreshQuota(for: syncedAccount ?? account, forceRefresh: true)
             } catch {
                 AppLog.account.error("Activate account failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
                 errorByAccount[account.id] = "切换失败: \(resolvedErrorMessage(error))"

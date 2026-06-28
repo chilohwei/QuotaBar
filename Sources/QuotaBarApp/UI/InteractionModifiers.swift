@@ -27,7 +27,7 @@ private struct QuotaInteractiveButtonBody: View {
     var body: some View {
         configuration.label
             .opacity(resolvedOpacity)
-            .scaleEffect(configuration.isPressed ? 0.96 : isHovering ? 1.01 : 1)
+            .scaleEffect(configuration.isPressed ? 0.97 : isHovering ? 1.008 : 1)
             .animation(.quotaSnappy, value: configuration.isPressed)
             .animation(.easeOut(duration: 0.14), value: isHovering)
             .onHover { isHovering = $0 }

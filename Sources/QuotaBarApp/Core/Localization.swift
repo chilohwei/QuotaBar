@@ -89,6 +89,7 @@ enum AppString: String {
     case recommended
     case recommendedReason
     case recommendationStrategy
+    case remaining
     case restartRequiredTitle
     case settings
     case settingsApp
@@ -141,6 +142,17 @@ struct AppText {
         }
     }
 
+    var accountFilterAllTitle: String {
+        switch language {
+        case .english:
+            return "All accounts"
+        case .simplifiedChinese:
+            return "所有账号"
+        case .traditionalChinese:
+            return "所有帳號"
+        }
+    }
+
     func accountFilterAvailable(count: Int) -> String {
         switch language {
         case .english:
@@ -149,6 +161,17 @@ struct AppText {
             return "可用账号 \(count)"
         case .traditionalChinese:
             return "可用帳號 \(count)"
+        }
+    }
+
+    var accountFilterAvailableTitle: String {
+        switch language {
+        case .english:
+            return "Available"
+        case .simplifiedChinese:
+            return "可用账号"
+        case .traditionalChinese:
+            return "可用帳號"
         }
     }
 
@@ -424,6 +447,8 @@ struct AppText {
             return "API"
         case "requests":
             return language == .english ? "Requests" : (language == .traditionalChinese ? "請求" : "请求")
+        case "on-demand", "on demand", "usage based":
+            return language == .english ? "On-demand" : (language == .traditionalChinese ? "按量使用" : "按量使用")
         case "usage":
             return language == .english ? "Usage" : (language == .traditionalChinese ? "用量" : "用量")
         default:
@@ -521,6 +546,7 @@ struct AppText {
             .recommended: "推荐",
             .recommendedReason: "消耗优先",
             .recommendationStrategy: "推荐策略",
+            .remaining: "剩余",
             .restartRequiredTitle: "重启后生效",
             .settings: "设置",
             .settingsApp: "应用",
@@ -578,6 +604,7 @@ struct AppText {
             .recommended: "推薦",
             .recommendedReason: "消耗優先",
             .recommendationStrategy: "推薦策略",
+            .remaining: "剩餘",
             .restartRequiredTitle: "重啟後生效",
             .settings: "設定",
             .settingsApp: "應用",
@@ -635,6 +662,7 @@ struct AppText {
             .recommended: "Recommended",
             .recommendedReason: "Spend first",
             .recommendationStrategy: "Recommendation",
+            .remaining: "Remaining",
             .restartRequiredTitle: "Restart required",
             .settings: "Settings",
             .settingsApp: "App",
