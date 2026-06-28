@@ -114,6 +114,8 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          overwrite_files: true
           files: |
             dist/releases/*.dmg
             dist/releases/*.dmg.sha256

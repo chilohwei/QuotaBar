@@ -351,6 +351,24 @@ APPLESCRIPT
     sync
 }
 
+skip_dmg_layout() {
+    case "${QUOTABAR_SKIP_DMG_LAYOUT:-auto}" in
+        true)
+            return 0
+            ;;
+        false)
+            return 1
+            ;;
+        auto|"")
+            [[ "${CI:-}" == "true" ]]
+            ;;
+        *)
+            echo "Unsupported QUOTABAR_SKIP_DMG_LAYOUT value: ${QUOTABAR_SKIP_DMG_LAYOUT}" >&2
+            exit 1
+            ;;
+    esac
+}
+
 build_binary() {
     local arch="$1"
     local extra_flags=()
@@ -473,6 +491,22 @@ create_dmg() {
     ln -s /Applications "$staging_dir/Applications"
     render_dmg_background "$staging_dir/.background/background.png"
 
+    if skip_dmg_layout; then
+        hdiutil create \
+            -volname "$volume_name" \
+            -srcfolder "$staging_dir" \
+            -ov \
+            -fs HFS+ \
+            -format UDZO \
+            -imagekey zlib-level=9 \
+            "$dmg_path" >/dev/null
+
+        rm -rf "$staging_dir"
+        shasum -a 256 "$dmg_path" | awk '{print $1}' > "$dmg_path.sha256"
+        echo "$dmg_path"
+        return
+    fi
+
     hdiutil create \
         -volname "$volume_name" \
         -srcfolder "$staging_dir" \
@@ -510,7 +544,7 @@ create_dmg() {
 
     local converted=0
     for attempt in 1 2 3; do
-        if hdiutil convert "$temp_dmg" -format UDZO -imagekey zlib-level=9 -o "$dmg_path" >/dev/null 2>&1; then
+        if hdiutil convert "$temp_dmg" -format UDZO -imagekey zlib-level=9 -o "$dmg_path"; then
             converted=1
             break
         fi
