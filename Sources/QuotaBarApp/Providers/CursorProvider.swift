@@ -41,7 +41,6 @@ struct CursorProvider: Provider {
         "next_reset_at_ms"
     ]
 
-    private static let freshQuotaCacheAge: TimeInterval = 60
     private static let fallbackQuotaCacheAge: TimeInterval = 24 * 60 * 60
     private static let maxNetworkAttempts = 3
     private static let includedUsageKeys: Set<String> = [
@@ -294,16 +293,10 @@ struct CursorProvider: Provider {
         try await fetchQuota(account: account, secret: secret, forceRefresh: false)
     }
 
-    func fetchQuota(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
+    func fetchQuota(account: Account, secret: String, forceRefresh _: Bool) async throws -> QuotaSnapshot {
         let credentials = try parseCredentials(secret)
         try validateCursorCredentialsMatchAccount(credentials, account: account)
         let cacheKey = quotaCacheKey(credentials)
-
-        if !forceRefresh,
-           let cached = try? loadCachedQuotaSnapshot(cacheKey: cacheKey),
-           Date().timeIntervalSince(cached.cachedAt) <= Self.freshQuotaCacheAge {
-            return cached.snapshot.replacing(source: "Cursor Cache")
-        }
 
         do {
             let currentUsage = try await fetchCurrentPeriodUsage(accessToken: credentials.accessToken)
@@ -1099,6 +1092,7 @@ struct CursorProvider: Provider {
             firstString(in: payload, keys: ["membershipType", "membership_type", "planName", "plan_name"])
                 ?? credentials.membershipType
         )
+        let isFreePlan = isFreeCursorPlan(planName)
         let periodEnd = firstDate(in: payload, keys: Self.cycleBoundaryDateKeys)
         let accountValidUntil = firstDate(
             in: payload,
@@ -1131,7 +1125,21 @@ struct CursorProvider: Provider {
             guard let value else { return false }
             return value > 0
         }
-        let canTrustPercentWindows = hasRealCapacity || hasPercentUsageSignal
+        // Free / included plans report their allowance only as percentages, so a
+        // fully unused account reads as *PercentUsed == 0. That means "100%
+        // remaining", not "no quota" — trust the percent windows whenever Cursor
+        // is actively metering an included-usage budget on this account.
+        let hasIncludedAllowance = hasIncludedUsageAllowance(
+            payload: payload,
+            plan: plan,
+            quotaBlocked: quotaBlocked
+        )
+        // The Auto / API sub-buckets only carry meaning when backed by real
+        // capacity or a non-zero reading (paid plans). A Free account exposes a
+        // single included allowance, so it should surface one "Total" bar rather
+        // than mirroring the paid three-bucket layout at a flat 100%.
+        let canTrustDetailedPercentWindows = !isFreePlan && (hasRealCapacity || hasPercentUsageSignal)
+        let canTrustPercentWindows = canTrustDetailedPercentWindows || hasIncludedAllowance
 
         let primary = parsePlanWindow(plan, resetAt: periodEnd)
             ?? (canTrustPercentWindows ? parsePercentWindow(
@@ -1143,7 +1151,7 @@ struct CursorProvider: Provider {
                 in: fallbackWindows,
                 preferredLabels: ["Total", "Included", "Requests", "Usage"]
             )
-        let auto = (canTrustPercentWindows ? parsePercentWindow(
+        let auto = isFreePlan ? nil : ((canTrustDetailedPercentWindows ? parsePercentWindow(
             label: "Auto",
             usedPercent: autoPercentUsed,
             resetAt: periodEnd
@@ -1153,8 +1161,8 @@ struct CursorProvider: Provider {
                 preferredLabels: ["Auto"],
                 excluding: [primary],
                 allowAnyFallback: false
-            )
-        let api = (canTrustPercentWindows ? parsePercentWindow(
+            ))
+        let api = isFreePlan ? nil : ((canTrustDetailedPercentWindows ? parsePercentWindow(
             label: "API",
             usedPercent: apiPercentUsed,
             resetAt: periodEnd
@@ -1164,25 +1172,25 @@ struct CursorProvider: Provider {
                 preferredLabels: ["API"],
                 excluding: [primary, auto],
                 allowAnyFallback: false
-            )
-        let secondary = auto
+            ))
+        let secondary = isFreePlan ? nil : (auto
             ?? api
             ?? firstCursorWindow(
                 in: fallbackWindows,
                 preferredLabels: ["Requests", "Usage", "On-demand"],
                 excluding: [primary]
-            )
+            ))
         let tertiaryFromAPI: QuotaWindow? = {
-            guard let api else { return nil }
+            guard !isFreePlan, let api else { return nil }
             let earlierWindows = [primary, secondary].compactMap { $0 }
             return earlierWindows.contains(where: { sameCursorWindow($0, api) }) ? nil : api
         }()
-        let tertiary = tertiaryFromAPI
+        let tertiary = isFreePlan ? nil : (tertiaryFromAPI
             ?? firstCursorWindow(
                 in: fallbackWindows,
                 preferredLabels: ["On-demand", "API", "Requests", "Usage"],
                 excluding: [primary, secondary]
-            )
+            ))
         let note = cursorUsageNote(plan: plan, onDemand: onDemand)
 
         // Some free / zero-quota payloads include *PercentUsed=0 placeholders.
@@ -1190,6 +1198,7 @@ struct CursorProvider: Provider {
         if primary == nil, secondary == nil, tertiary == nil,
            !hasRealCapacity,
            !hasPercentUsageSignal,
+           !hasIncludedAllowance,
            usagePayloadHasOnlyZeroOrNoQuotaSignals(
                plan: plan,
                onDemand: onDemand,
@@ -1445,6 +1454,36 @@ struct CursorProvider: Provider {
         return planExplicitlyHasNoCapacity(plan) || hasZeroOnDemandLimits || hasZeroPercentTriplet
     }
 
+    // Detects an active included-usage budget on plans (notably Free) that express
+    // their allowance purely as percentages. Without this, a brand-new / unused
+    // account — every *PercentUsed == 0 — is indistinguishable from a quota-less
+    // placeholder and gets hidden, even though 0% used means full quota remaining.
+    private func hasIncludedUsageAllowance(payload: Any, plan: [String: Any]?, quotaBlocked: Bool?) -> Bool {
+        guard quotaBlocked != true, let plan else { return false }
+
+        let percentKeys: Set<String> = [
+            "totalPercentUsed", "total_percent_used",
+            "autoPercentUsed", "auto_percent_used",
+            "apiPercentUsed", "api_percent_used"
+        ]
+        // The included object must actually carry percent metering for this to apply.
+        guard directDouble(in: plan, keys: percentKeys) != nil else { return false }
+
+        // Cursor only reports a positive display threshold / an "included usage"
+        // message when the account has an included budget to spend.
+        if (firstDouble(in: payload, keys: ["displayThreshold", "display_threshold"]) ?? 0) > 0 {
+            return true
+        }
+        if let message = firstString(in: payload, keys: [
+            "displayMessage", "display_message",
+            "autoModelSelectedDisplayMessage", "auto_model_selected_display_message",
+            "namedModelSelectedDisplayMessage", "named_model_selected_display_message"
+        ]), message.lowercased().contains("included") {
+            return true
+        }
+        return false
+    }
+
     private func onDemandHasPositiveCapacity(_ onDemand: [String: Any]?) -> Bool {
         guard let onDemand else { return false }
         let limit = firstDouble(in: onDemand, keys: Self.limitAmountKeys.union([
@@ -1585,6 +1624,14 @@ struct CursorProvider: Provider {
         default:
             return raw
         }
+    }
+
+    private func isFreeCursorPlan(_ planName: String?) -> Bool {
+        guard let planName = planName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !planName.isEmpty else {
+            return false
+        }
+        return planName.contains("free") || planName.contains("hobby")
     }
 
     private func isQuotaBlocked(in payload: Any) -> Bool? {

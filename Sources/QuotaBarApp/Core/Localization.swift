@@ -402,6 +402,13 @@ struct AppText {
                 : "Cursor"
         }
         if lower.contains("claude") {
+            if lower.contains("oauth") {
+                switch language {
+                case .english: return "Claude Code Live"
+                case .simplifiedChinese: return "Claude Code 实时"
+                case .traditionalChinese: return "Claude Code 即時"
+                }
+            }
             return lower.contains("cache")
                 ? (language == .traditionalChinese ? "Claude Code 快取" : (language == .english ? "Claude Code Cache" : "Claude Code 缓存"))
                 : "Claude Code"

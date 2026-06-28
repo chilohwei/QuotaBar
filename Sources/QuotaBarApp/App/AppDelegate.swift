@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     private var statusBarController: StatusBarController?
     private var cancellables = Set<AnyCancellable>()
+    private var workspaceNotificationObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
@@ -40,10 +41,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusBarController?.updateStatusTitle()
             }
             .store(in: &cancellables)
+
+        workspaceNotificationObservers.append(
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.appState.handleSystemDidWake()
+                }
+            }
+        )
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        _ = notification
+        appState.handleAppBecameActive()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         _ = notification
+        for observer in workspaceNotificationObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        workspaceNotificationObservers.removeAll()
         statusBarController?.shutdown()
         appState.shutdown()
     }

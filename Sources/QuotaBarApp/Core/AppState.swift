@@ -1,4 +1,7 @@
+import CoreGraphics
+import CryptoKit
 import Foundation
+import IOKit.ps
 
 @MainActor
 final class AppState: ObservableObject {
@@ -29,15 +32,27 @@ final class AppState: ObservableObject {
     private var setLaunchAtLoginEnabledAction: ((Bool) -> Void)?
 
     private var refreshTask: Task<Void, Never>?
+    private var dashboardRefreshTask: Task<Void, Never>?
     private var addAccountTask: Task<Void, Never>?
     private var addAccountOperationID: UUID?
+    private var refreshEventMonitor: RefreshEventMonitor?
+    private var refreshEventTasks: [RefreshEventReason: Task<Void, Never>] = [:]
+    private var credentialSignatureByTool: [ToolKind: String] = [:]
+    private var isDashboardVisible = false
+    private var dashboardVisibleAccountIDs: [UUID] = []
     private var refreshingAccountIDs: Set<UUID> = []
     private var refreshFailureCountByAccount: [UUID: Int] = [:]
     private var refreshBackoffUntilByAccount: [UUID: Date] = [:]
     private let maxConcurrentRefreshes = 4
-    private let autoRefreshInterval: TimeInterval = 5 * 60
+    private let autoRefreshDefaultInterval: TimeInterval = 150
+    private let autoRefreshLowQuotaInterval: TimeInterval = 75
+    private let autoRefreshPowerSavingInterval: TimeInterval = 7.5 * 60
     private let autoRefreshJitter: TimeInterval = 30
-    private let foregroundRefreshFreshnessInterval: TimeInterval = 45
+    private let foregroundRefreshFreshnessInterval: TimeInterval = 30
+    private let dashboardOpenRefreshFreshnessInterval: TimeInterval = 25
+    private let dashboardVisibleRefreshInterval: TimeInterval = 30
+    private let lowQuotaAutoRefreshThreshold = 0.20
+    private let idlePowerSavingThreshold: TimeInterval = 5 * 60
     private var supportedTools: [ToolKind] { providerRegistry.supportedTools }
 
     private var supportedToolsPrioritizingSelectedTool: [ToolKind] {
@@ -81,6 +96,7 @@ final class AppState: ObservableObject {
 
             loadCachedQuotaSnapshots()
             startAutoRefreshLoop()
+            startRefreshEventMonitor()
             await refreshRemainingAccountsInBackground(excluding: Set(selectedAccounts.map(\.id)))
             AppLog.app.info("App state bootstrap finished")
         }
@@ -88,7 +104,12 @@ final class AppState: ObservableObject {
 
     func shutdown() {
         refreshTask?.cancel()
+        dashboardRefreshTask?.cancel()
         addAccountTask?.cancel()
+        refreshEventTasks.values.forEach { $0.cancel() }
+        refreshEventTasks.removeAll()
+        refreshEventMonitor?.stop()
+        refreshEventMonitor = nil
     }
 
     func accounts(for tool: ToolKind) -> [Account] {
@@ -246,10 +267,34 @@ final class AppState: ObservableObject {
 
         let targetAccounts = accounts(for: tool)
         guard !targetAccounts.isEmpty else { return }
-        guard targetAccounts.contains(where: { quotaByAccount[$0.id] == nil }) else { return }
+        guard shouldRefreshAccounts(targetAccounts, freshnessInterval: dashboardOpenRefreshFreshnessInterval) else { return }
 
         primeRefreshState(for: targetAccounts)
         await refreshAccounts(targetAccounts, forceRefresh: true)
+    }
+
+    func handleAppBecameActive() {
+        refreshEventMonitor?.notifyAppForegrounded()
+    }
+
+    func handleSystemDidWake() {
+        refreshEventMonitor?.notifySystemDidWake()
+    }
+
+    func setDashboardVisible(_ visible: Bool) {
+        guard isDashboardVisible != visible else { return }
+        isDashboardVisible = visible
+
+        if visible {
+            startDashboardRefreshLoop()
+        } else {
+            dashboardRefreshTask?.cancel()
+            dashboardRefreshTask = nil
+        }
+    }
+
+    func setDashboardVisibleAccountIDs(_ ids: [UUID]) {
+        dashboardVisibleAccountIDs = ids
     }
 
     func refreshAccount(_ account: Account) {
@@ -471,7 +516,7 @@ final class AppState: ObservableObject {
         refreshTask?.cancel()
         refreshTask = Task {
             while !Task.isCancelled {
-                let delay = autoRefreshInterval + Double.random(in: 0 ... autoRefreshJitter)
+                let delay = automaticRefreshInterval() + Double.random(in: 0 ... autoRefreshJitter)
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await refreshActiveAccounts()
@@ -479,9 +524,241 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func refreshActiveAccounts() async {
+    private func refreshActiveAccounts(forceRefresh: Bool = false) async {
         await syncInstalledCurrentAccounts()
-        await refreshAccounts(supportedToolsPrioritizingSelectedTool.compactMap { activeAccount(for: $0) })
+        await refreshAccounts(
+            supportedToolsPrioritizingSelectedTool.compactMap { activeAccount(for: $0) },
+            forceRefresh: forceRefresh
+        )
+    }
+
+    private func refreshActiveAccountsIfNeeded(freshnessInterval: TimeInterval, forceRefresh: Bool) async {
+        await syncInstalledCurrentAccounts()
+        let targetAccounts = supportedToolsPrioritizingSelectedTool
+            .compactMap { activeAccount(for: $0) }
+            .filter { shouldRefreshAccount($0, freshnessInterval: freshnessInterval) }
+        await refreshAccounts(targetAccounts, forceRefresh: forceRefresh)
+    }
+
+    private func refreshActiveAccount(for tool: ToolKind, syncInstalled: Bool, forceRefresh: Bool) async {
+        if syncInstalled {
+            await syncInstalledCurrentAccount(for: tool)
+        }
+        guard let account = activeAccount(for: tool) else { return }
+        await refreshQuota(for: account, forceRefresh: forceRefresh)
+    }
+
+    private func startDashboardRefreshLoop() {
+        dashboardRefreshTask?.cancel()
+        dashboardRefreshTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(dashboardVisibleRefreshInterval * 1_000_000_000))
+                guard !Task.isCancelled else { break }
+                await refreshDashboardVisibleAccountsIfNeeded()
+            }
+        }
+    }
+
+    private func refreshDashboardVisibleAccountsIfNeeded() async {
+        guard isDashboardVisible else { return }
+        let targetAccounts = dashboardVisibleAccounts()
+            .filter { shouldRefreshAccount($0, freshnessInterval: dashboardVisibleRefreshInterval) }
+        guard !targetAccounts.isEmpty else { return }
+
+        await syncInstalledCurrentAccount(for: selectedTool)
+        primeRefreshState(for: targetAccounts)
+        await refreshAccounts(targetAccounts, forceRefresh: true)
+    }
+
+    private func dashboardVisibleAccounts() -> [Account] {
+        let selectedAccounts = accounts(for: selectedTool)
+        guard !dashboardVisibleAccountIDs.isEmpty else {
+            return selectedAccounts
+        }
+        let visibleIDs = Set(dashboardVisibleAccountIDs)
+        return selectedAccounts.filter { visibleIDs.contains($0.id) }
+    }
+
+    private func automaticRefreshInterval() -> TimeInterval {
+        if shouldUsePowerSavingRefreshInterval {
+            return autoRefreshPowerSavingInterval
+        }
+        if hasLowActiveQuota {
+            return autoRefreshLowQuotaInterval
+        }
+        return autoRefreshDefaultInterval
+    }
+
+    private var hasLowActiveQuota: Bool {
+        supportedTools.compactMap { activeAccount(for: $0) }.contains { account in
+            guard let ratio = quotaByAccount[account.id]?.statusBarMetric?.ratio else { return false }
+            return ratio < lowQuotaAutoRefreshThreshold
+        }
+    }
+
+    private var shouldUsePowerSavingRefreshInterval: Bool {
+        isOnBatteryPower && userIdleDuration >= idlePowerSavingThreshold
+    }
+
+    private var isOnBatteryPower: Bool {
+        guard let powerSourceInfo = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let powerSources = IOPSCopyPowerSourcesList(powerSourceInfo)?.takeRetainedValue() as? [CFTypeRef] else {
+            return false
+        }
+
+        for source in powerSources {
+            guard let description = IOPSGetPowerSourceDescription(powerSourceInfo, source)?
+                .takeUnretainedValue() as? [String: Any],
+                let state = description[kIOPSPowerSourceStateKey as String] as? String else {
+                continue
+            }
+            if state == kIOPSBatteryPowerValue {
+                return true
+            }
+        }
+        return false
+    }
+
+    private var userIdleDuration: TimeInterval {
+        let eventTypes: [CGEventType] = [
+            .keyDown,
+            .leftMouseDown,
+            .rightMouseDown,
+            .mouseMoved,
+            .scrollWheel
+        ]
+        return eventTypes
+            .map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }
+            .min() ?? 0
+    }
+
+    private func startRefreshEventMonitor() {
+        let monitor = RefreshEventMonitor { [weak self] reason in
+            self?.handleRefreshEvent(reason)
+        }
+        refreshEventMonitor?.stop()
+        refreshEventMonitor = monitor
+        monitor.start(watchTargets: refreshWatchTargets())
+    }
+
+    private func refreshWatchTargets() -> [RefreshWatchTarget] {
+        var targets: [RefreshWatchTarget] = [
+            RefreshWatchTarget(url: AppPaths.claudeCodeStatusFile, reason: .claudeStatusLineChanged),
+            RefreshWatchTarget(url: codexAuthURL(), reason: .credentialsChanged(.codex)),
+            RefreshWatchTarget(url: claudeCodeAuthURL(), reason: .credentialsChanged(.claudeCode))
+        ]
+
+        targets.append(contentsOf: cursorStateDatabaseURLs().map {
+            RefreshWatchTarget(url: $0, reason: .credentialsChanged(.cursor))
+        })
+
+        return Array(Set(targets))
+    }
+
+    private func handleRefreshEvent(_ reason: RefreshEventReason) {
+        refreshEventTasks[reason]?.cancel()
+        refreshEventTasks[reason] = Task { [weak self] in
+            await self?.performRefreshEvent(reason)
+            await MainActor.run {
+                self?.refreshEventTasks[reason] = nil
+            }
+        }
+    }
+
+    private func performRefreshEvent(_ reason: RefreshEventReason) async {
+        guard !Task.isCancelled else { return }
+        switch reason {
+        case .claudeStatusLineChanged:
+            await refreshActiveAccount(for: .claudeCode, syncInstalled: false, forceRefresh: true)
+        case .credentialsChanged(let tool):
+            await refreshAfterCredentialChange(for: tool)
+        case .appForegrounded:
+            await refreshActiveAccountsIfNeeded(freshnessInterval: foregroundRefreshFreshnessInterval, forceRefresh: true)
+        case .systemWoke, .networkRestored:
+            await refreshActiveAccounts(forceRefresh: true)
+        }
+    }
+
+    private func refreshAfterCredentialChange(for tool: ToolKind) async {
+        guard supportedTools.contains(tool) else { return }
+        let provider = provider(for: tool)
+
+        do {
+            var secret = try await provider.importCurrentCredentials()
+            guard !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return
+            }
+
+            if let refreshed = try? await provider.refreshSecretIfNeeded(secret) {
+                if refreshed != secret {
+                    try? await provider.updateCurrentCredentials(refreshed)
+                }
+                secret = refreshed
+            }
+
+            let signature = credentialEventSignature(secret: secret, provider: provider)
+            guard credentialSignatureByTool[tool] != signature else {
+                AppLog.refresh.debug("Ignoring unchanged credential event for \(tool.rawValue, privacy: .public)")
+                return
+            }
+            credentialSignatureByTool[tool] = signature
+
+            let account = try await addAccount(
+                tool: tool,
+                name: "",
+                secret: secret,
+                makeActive: provider.treatsImportedCredentialsAsActiveSelection,
+                useAsDefaultActive: provider.treatsImportedCredentialsAsActiveSelection,
+                applyToTool: false,
+                refreshAfterAdd: false
+            )
+            AppLog.refresh.info("Credential event refreshed active account \(account.id.uuidString, privacy: .public) for \(tool.rawValue, privacy: .public)")
+            await refreshQuota(for: account, forceRefresh: true)
+        } catch {
+            AppLog.refresh.debug("Credential event ignored for \(tool.rawValue, privacy: .public): \(String(describing: error), privacy: .private)")
+        }
+    }
+
+    private func codexAuthURL() -> URL {
+        let raw = ProcessInfo.processInfo.environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = raw?.isEmpty == false ? raw! : "~/.codex"
+        return URL(fileURLWithPath: (base as NSString).expandingTildeInPath)
+            .appendingPathComponent("auth.json")
+    }
+
+    private func claudeCodeAuthURL() -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        if let explicit = environment["CLAUDE_CONFIG_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicit.isEmpty {
+            return URL(fileURLWithPath: (explicit as NSString).expandingTildeInPath)
+                .appendingPathComponent("auth.json")
+        }
+        if let xdgConfig = environment["XDG_CONFIG_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !xdgConfig.isEmpty {
+            return URL(fileURLWithPath: (xdgConfig as NSString).expandingTildeInPath)
+                .appendingPathComponent("claude-code", isDirectory: true)
+                .appendingPathComponent("auth.json")
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config", isDirectory: true)
+            .appendingPathComponent("claude-code", isDirectory: true)
+            .appendingPathComponent("auth.json")
+    }
+
+    private func cursorStateDatabaseURLs() -> [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            "Cursor",
+            "Cursor - Insiders",
+            "Cursor Nightly"
+        ].map { appName in
+            home.appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+                .appendingPathComponent(appName, isDirectory: true)
+                .appendingPathComponent("User", isDirectory: true)
+                .appendingPathComponent("globalStorage", isDirectory: true)
+                .appendingPathComponent("state.vscdb")
+        }
     }
 
     private func refreshRemainingAccountsInBackground(excluding refreshedAccountIDs: Set<UUID>) async {
@@ -563,6 +840,7 @@ final class AppState: ObservableObject {
                 }
                 secret = refreshed
             }
+            credentialSignatureByTool[tool] = credentialEventSignature(secret: secret, provider: provider)
 
             let account = try await addAccount(
                 tool: tool,
@@ -579,6 +857,24 @@ final class AppState: ObservableObject {
             AppLog.account.debug("No current credentials imported for \(tool.rawValue, privacy: .public): \(String(describing: error), privacy: .private)")
             return nil
         }
+    }
+
+    private func credentialEventSignature(secret: String, provider: any Provider) -> String {
+        let aliases = provider.accountIdentityAliases(from: secret)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .sorted()
+        if !aliases.isEmpty {
+            return aliases.joined(separator: "|")
+        }
+
+        if let identity = provider.accountIdentity(from: secret)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !identity.isEmpty {
+            return identity
+        }
+
+        let digest = SHA256.hash(data: Data(secret.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private func refreshAccounts(_ targetAccounts: [Account], forceRefresh: Bool = false) async {
@@ -610,24 +906,56 @@ final class AppState: ObservableObject {
     }
 
     private func shouldRefreshForForegroundDisplay(_ targetAccounts: [Account]) -> Bool {
-        targetAccounts.contains { account in
-            guard supportedTools.contains(account.tool) else { return false }
-            if refreshingAccountIDs.contains(account.id) {
-                return false
-            }
+        shouldRefreshAccounts(targetAccounts, freshnessInterval: foregroundRefreshFreshnessInterval)
+    }
 
-            switch loadStateByAccount[account.id] {
-            case .loadingInitial, .refreshing:
-                return false
-            case .failed, .stale:
-                return true
-            case .idle, .none:
-                return quotaByAccount[account.id] == nil
-            case .loaded:
-                guard let snapshot = quotaByAccount[account.id] else { return true }
-                return Date().timeIntervalSince(snapshot.updatedAt) > foregroundRefreshFreshnessInterval
-            }
+    private func shouldRefreshAccounts(_ targetAccounts: [Account], freshnessInterval: TimeInterval) -> Bool {
+        targetAccounts.contains { shouldRefreshAccount($0, freshnessInterval: freshnessInterval) }
+    }
+
+    private func shouldRefreshAccount(_ account: Account, freshnessInterval: TimeInterval) -> Bool {
+        guard supportedTools.contains(account.tool) else { return false }
+        if refreshingAccountIDs.contains(account.id) {
+            return false
         }
+
+        let effectiveFreshnessInterval = effectiveFreshnessInterval(for: account, default: freshnessInterval)
+
+        switch loadStateByAccount[account.id] {
+        case .loadingInitial, .refreshing:
+            return false
+        case .failed:
+            return true
+        case .stale:
+            guard let snapshot = quotaByAccount[account.id] else { return true }
+            return QuotaFreshness.isStale(snapshot)
+                || Date().timeIntervalSince(snapshot.updatedAt) > effectiveFreshnessInterval
+        case .idle, .none:
+            return quotaByAccount[account.id] == nil
+        case .loaded:
+            guard let snapshot = quotaByAccount[account.id] else { return true }
+            return Date().timeIntervalSince(snapshot.updatedAt) > effectiveFreshnessInterval
+        }
+    }
+
+    private func effectiveFreshnessInterval(for account: Account, default freshnessInterval: TimeInterval) -> TimeInterval {
+        guard account.tool == .claudeCode,
+              let snapshot = quotaByAccount[account.id],
+              QuotaFreshness.isStale(snapshot) else {
+            return freshnessInterval
+        }
+        return min(freshnessInterval, 30)
+    }
+
+    private func loadStateAfterFailedRefresh(for account: Account) -> AccountLoadState {
+        guard let snapshot = quotaByAccount[account.id] else {
+            return .failed
+        }
+        return QuotaFreshness.isStale(snapshot) ? .stale : .loaded
+    }
+
+    private func loadStateForCachedSnapshot(_ snapshot: QuotaSnapshot) -> AccountLoadState {
+        QuotaFreshness.isStale(snapshot) ? .stale : .loaded
     }
 
     private func refreshQuota(for account: Account, forceRefresh: Bool = false) async {
@@ -695,7 +1023,7 @@ final class AppState: ObservableObject {
             let renamed = updateAccountIdentityIfNeeded(accountID: account.id, identity: snapshot.accountIdentifier)
             if shouldPreserveExistingClaudeQuota(snapshot, for: account) {
                 errorByAccount[account.id] = nil
-                loadStateByAccount[account.id] = .stale
+                loadStateByAccount[account.id] = loadStateAfterFailedRefresh(for: account)
                 refreshFailureCountByAccount[account.id] = nil
                 refreshBackoffUntilByAccount[account.id] = nil
                 if renamed || settingsChanged || readableNameUpdated {
@@ -727,7 +1055,7 @@ final class AppState: ObservableObject {
             }
             AppLog.refresh.error("Refresh failed for account \(account.id.uuidString, privacy: .public), failures=\(failureCount, privacy: .public): \(String(describing: error), privacy: .private)")
             errorByAccount[account.id] = "刷新失败: \(resolvedErrorMessage(error))"
-            loadStateByAccount[account.id] = quotaByAccount[account.id] == nil ? .failed : .stale
+            loadStateByAccount[account.id] = loadStateAfterFailedRefresh(for: account)
         }
     }
 
@@ -789,7 +1117,7 @@ final class AppState: ObservableObject {
                 ? snapshot.source
                 : "\(snapshot.source) Cache"
             quotaByAccount[account.id] = snapshot.replacing(source: cachedSource)
-            loadStateByAccount[account.id] = .stale
+            loadStateByAccount[account.id] = loadStateForCachedSnapshot(snapshot)
         }
     }
 

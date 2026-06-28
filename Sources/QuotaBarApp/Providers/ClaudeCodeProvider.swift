@@ -4,6 +4,15 @@ import Foundation
 struct ClaudeCodeProvider: Provider {
     let tool: ToolKind = .claudeCode
 
+    private static let oauthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    private static let oauthUsageUserAgent = "claude-code/2.1.181"
+    private static let liveSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
     private let fileService = FileService()
 
     private struct ClaudeCodeCredentials: Codable {
@@ -88,22 +97,33 @@ struct ClaudeCodeProvider: Provider {
     }
 
     func fetchQuota(account: Account, secret: String) async throws -> QuotaSnapshot {
+        try await fetchQuota(account: account, secret: secret, forceRefresh: false)
+    }
+
+    func fetchQuota(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
         let storedCredentials = try parseCredentials(secret)
-        let liveStatus = try? loadStatusLineSnapshot()
         let credentials: ClaudeCodeCredentials
-        let status: [String: Any]?
         if let latest = try? await readClaudeCodeCredentials(),
            claudeCredentialsRepresentSameAccount(latest, storedCredentials) {
             credentials = mergeCredentials(preferred: latest, fallback: storedCredentials)
-            status = shouldUseStatusLineSnapshot(liveStatus, settingsJSON: latest.claudeSettingsJSON)
-                ? liveStatus
-                : nil
         } else {
             credentials = storedCredentials
-            status = nil
         }
 
-        return makeQuotaSnapshot(status: status, credentials: credentials)
+        if let liveSnapshot = await fetchOAuthUsageSnapshot(credentials: credentials) {
+            return liveSnapshot
+        }
+
+        let statusLineLoad = try? loadStatusLineSnapshot()
+        let status = shouldUseStatusLineSnapshot(statusLineLoad?.status, settingsJSON: credentials.claudeSettingsJSON)
+            ? statusLineLoad?.status
+            : nil
+
+        return makeQuotaSnapshot(
+            status: status,
+            credentials: credentials,
+            capturedAt: statusLineLoad?.capturedAt
+        )
     }
 
     func recoverSecret(for account: Account) async throws -> String? {
@@ -451,14 +471,31 @@ struct ClaudeCodeProvider: Provider {
         return String(text[matchRange]).lowercased()
     }
 
-    private func loadStatusLineSnapshot() throws -> [String: Any]? {
-        let path = AppPaths.claudeCodeStatusFile.path
-        guard fileService.fileExists(at: path) else { return nil }
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    private struct StatusLineSnapshotLoad {
+        let status: [String: Any]
+        let capturedAt: Date
     }
 
-    private func makeWindow(status: [String: Any]?, key: String, label: String) -> QuotaWindow? {
+    private func loadStatusLineSnapshot() throws -> StatusLineSnapshotLoad? {
+        let url = AppPaths.claudeCodeStatusFile
+        let path = url.path
+        guard fileService.fileExists(at: path) else { return nil }
+        let data = try Data(contentsOf: url)
+        guard let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let capturedAt = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)
+            ?? Date()
+        return StatusLineSnapshotLoad(status: status, capturedAt: capturedAt)
+    }
+
+    private func makeWindow(
+        status: [String: Any]?,
+        key: String,
+        label: String,
+        now: Date = Date(),
+        rejectExpiredWindows: Bool = true
+    ) -> QuotaWindow? {
         guard let rateLimits = status?["rate_limits"] as? [String: Any],
               let window = rateLimits[key] as? [String: Any],
               let usedPercentage = number(window["used_percentage"]) else {
@@ -468,11 +505,136 @@ struct ClaudeCodeProvider: Provider {
             in: window,
             keys: ["resets_at", "reset_at", "resetAt", "next_reset_at", "nextResetAt"]
         ))
+        if rejectExpiredWindows, let resetAt, resetAt.addingTimeInterval(60) < now {
+            return nil
+        }
         return QuotaWindow(
             label: label,
             used: min(max(usedPercentage, 0), 100),
             limit: 100,
             resetAt: resetAt
+        )
+    }
+
+    private func parseOAuthUsageWindow(_ dict: [String: Any]?, label: String) -> QuotaWindow? {
+        guard let dict else { return nil }
+        guard let used = number(dict["utilization"]) ?? number(dict["used_percentage"]) else {
+            return nil
+        }
+        let resetAt = parseFlexibleDate(dict["resets_at"] ?? dict["reset_at"] ?? dict["resetAt"])
+        return QuotaWindow(
+            label: label,
+            used: min(max(used, 0), 100),
+            limit: 100,
+            resetAt: resetAt
+        )
+    }
+
+    private func shouldFetchOAuthUsage(_ credentials: ClaudeCodeCredentials) -> Bool {
+        if credentials.authMethod == "api_key" {
+            return false
+        }
+        if thirdPartyProviderName(credentials: credentials, status: nil) != nil {
+            return false
+        }
+        let rawProvider = credentials.apiProvider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if rawProvider == "api_key" {
+            return false
+        }
+        if isFirstPartyClaudeProvider(credentials.apiProvider) {
+            return true
+        }
+        let authMethod = credentials.authMethod?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return authMethod == "oauth" || authMethod == "claude.ai" || authMethod == "claudeai"
+    }
+
+    private func oauthAccessToken(from credentials: ClaudeCodeCredentials) -> String? {
+        for source in [credentials.keychainCredentials, credentials.claudeCredentialsJSON] {
+            guard let text = source?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty,
+                  let data = text.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let oauth = object["claudeAiOauth"] as? [String: Any] else {
+                continue
+            }
+            let token = (oauth["accessToken"] as? String) ?? (oauth["access_token"] as? String)
+            let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
+    private func fetchOAuthUsageSnapshot(credentials: ClaudeCodeCredentials) async -> QuotaSnapshot? {
+        guard shouldFetchOAuthUsage(credentials),
+              let accessToken = oauthAccessToken(from: credentials) else {
+            return nil
+        }
+
+        do {
+            let payload = try await requestOAuthUsage(accessToken: accessToken)
+            return makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
+        } catch OAuthUsageFetchError.rateLimited {
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    private func requestOAuthUsage(accessToken: String) async throws -> [String: Any] {
+        var request = URLRequest(url: Self.oauthUsageURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue(Self.oauthUsageUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("no-cache, no-store, max-age=0", forHTTPHeaderField: "Cache-Control")
+
+        let (data, response) = try await Self.liveSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw OAuthUsageFetchError.invalidResponse
+        }
+        switch http.statusCode {
+        case 200:
+            guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw OAuthUsageFetchError.invalidResponse
+            }
+            return payload
+        case 401, 403:
+            throw OAuthUsageFetchError.unauthorized
+        case 429:
+            throw OAuthUsageFetchError.rateLimited
+        default:
+            throw OAuthUsageFetchError.httpStatus(http.statusCode)
+        }
+    }
+
+    private func makeOAuthUsageSnapshot(
+        payload: [String: Any],
+        credentials: ClaudeCodeCredentials
+    ) -> QuotaSnapshot {
+        let primary = parseOAuthUsageWindow(payload["five_hour"] as? [String: Any], label: "5h")
+        let secondary = parseOAuthUsageWindow(payload["seven_day"] as? [String: Any], label: "7d")
+
+        return QuotaSnapshot(
+            source: "Claude Code OAuth",
+            accountIdentifier: readableIdentity(from: credentials),
+            planName: planName(credentials: credentials, status: nil),
+            primary: primary,
+            secondary: secondary,
+            tertiary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(),
+            accountValidUntil: nil,
+            subscriptionWillRenew: nil,
+            subscriptionStatus: nil,
+            isQuotaBlocked: isQuotaBlocked(primary: primary, secondary: secondary),
+            note: nil
         )
     }
 
@@ -497,7 +659,9 @@ struct ClaudeCodeProvider: Provider {
         userID: String? = "fixture-user",
         authStatusJSON: String? = nil,
         claudeSettingsJSON: String? = nil,
-        keychainCredentials: String? = nil
+        keychainCredentials: String? = nil,
+        capturedAt: Date = Date(),
+        now: Date = Date()
     ) -> QuotaSnapshot {
         let credentials = ClaudeCodeCredentials(
             loggedIn: true,
@@ -512,7 +676,30 @@ struct ClaudeCodeProvider: Provider {
             claudeCredentialsJSON: nil,
             claudeAuthJSON: nil
         )
-        return makeQuotaSnapshot(status: status, credentials: credentials)
+        return makeQuotaSnapshot(status: status, credentials: credentials, capturedAt: capturedAt, now: now)
+    }
+
+    func parseOAuthUsagePayloadForTesting(
+        _ payload: [String: Any],
+        authMethod: String? = "oauth",
+        apiProvider: String? = "firstParty",
+        userID: String? = "fixture-user",
+        authStatusJSON: String? = nil
+    ) -> QuotaSnapshot {
+        let credentials = ClaudeCodeCredentials(
+            loggedIn: true,
+            authMethod: authMethod,
+            apiProvider: apiProvider,
+            userID: userID,
+            claudeExecutablePath: nil,
+            keychainCredentials: nil,
+            authStatusJSON: authStatusJSON,
+            claudeSettingsJSON: nil,
+            claudeJSON: nil,
+            claudeCredentialsJSON: nil,
+            claudeAuthJSON: nil
+        )
+        return makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
     }
 
     func shouldUseStatusLineSnapshotForTesting(_ status: [String: Any], settingsJSON: String? = nil) -> Bool {
@@ -520,10 +707,19 @@ struct ClaudeCodeProvider: Provider {
     }
 #endif
 
-    private func makeQuotaSnapshot(status: [String: Any]?, credentials: ClaudeCodeCredentials) -> QuotaSnapshot {
-        let primary = makeWindow(status: status, key: "five_hour", label: "5h")
-        let secondary = makeWindow(status: status, key: "seven_day", label: "7d")
-        let note = statusNote(status: status, credentials: credentials)
+    private func makeQuotaSnapshot(
+        status: [String: Any]?,
+        credentials: ClaudeCodeCredentials,
+        capturedAt: Date? = nil,
+        now: Date = Date()
+    ) -> QuotaSnapshot {
+        let primary = makeWindow(status: status, key: "five_hour", label: "5h", now: now)
+        let secondary = makeWindow(status: status, key: "seven_day", label: "7d", now: now)
+        let note = statusNote(
+            status: status,
+            credentials: credentials,
+            hadExpiredWindows: hadExpiredStatusLineWindows(status: status, now: now)
+        )
 
         return QuotaSnapshot(
             source: status == nil ? "Claude Code" : "Claude Code StatusLine",
@@ -534,13 +730,27 @@ struct ClaudeCodeProvider: Provider {
             tertiary: nil,
             creditsRemaining: nil,
             creditsTotal: nil,
-            updatedAt: .init(),
+            updatedAt: capturedAt ?? now,
             accountValidUntil: nil,
             subscriptionWillRenew: nil,
             subscriptionStatus: nil,
             isQuotaBlocked: isQuotaBlocked(primary: primary, secondary: secondary),
             note: note
         )
+    }
+
+    private func hadExpiredStatusLineWindows(status: [String: Any]?, now: Date) -> Bool {
+        guard let status else { return false }
+        let snapshot = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            primary: makeWindow(status: status, key: "five_hour", label: "5h", now: now, rejectExpiredWindows: false),
+            secondary: makeWindow(status: status, key: "seven_day", label: "7d", now: now, rejectExpiredWindows: false),
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: now,
+            note: nil
+        )
+        return QuotaFreshness.hasExpiredQuotaWindows(snapshot, now: now)
     }
 
     private func planName(credentials: ClaudeCodeCredentials, status: [String: Any]?) -> String? {
@@ -557,9 +767,16 @@ struct ClaudeCodeProvider: Provider {
         return nil
     }
 
-    private func statusNote(status: [String: Any]?, credentials: ClaudeCodeCredentials) -> String? {
+    private func statusNote(
+        status: [String: Any]?,
+        credentials: ClaudeCodeCredentials,
+        hadExpiredWindows: Bool = false
+    ) -> String? {
         guard status != nil else {
             return "等待 Claude Code 会话同步；打开 Claude Code 并产生一次响应后会显示 5h/7d 用量。"
+        }
+        if hadExpiredWindows {
+            return "Claude Code 用量快照已过期；QuotaBar 正在尝试拉取实时数据，或在 Claude Code 成功响应后自动同步。"
         }
         if ((status?["rate_limits"] as? [String: Any])?.isEmpty == false) {
             return nil
@@ -1046,4 +1263,11 @@ private extension ClaudeCodeProvider {
     func shellQuoted(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
+}
+
+private enum OAuthUsageFetchError: Error, Equatable {
+    case unauthorized
+    case rateLimited
+    case invalidResponse
+    case httpStatus(Int)
 }

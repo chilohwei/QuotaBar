@@ -28,4 +28,29 @@ struct PackageStructureTests {
         #expect(snapshot.statusBarMetric?.title == "Weekly")
         #expect(snapshot.statusBarMetric?.ratio == 0.2)
     }
+
+    @Test("quota freshness treats expired reset windows as stale")
+    func quotaFreshnessTreatsExpiredResetWindowsAsStale() {
+        let snapshot = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            primary: QuotaWindow(
+                label: "5h",
+                used: 8,
+                limit: 100,
+                resetAt: Date(timeIntervalSince1970: 1_780_000_000)
+            ),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_780_000_000),
+            note: nil
+        )
+
+        #expect(
+            QuotaFreshness.isStale(
+                snapshot,
+                now: Date(timeIntervalSince1970: 1_780_000_200)
+            )
+        )
+    }
 }

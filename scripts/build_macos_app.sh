@@ -436,6 +436,7 @@ create_app() {
     rm -rf "$app_dir"
     mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
     cp "$binary" "$app_dir/Contents/MacOS/$APP_NAME"
+    /usr/bin/strip -x "$app_dir/Contents/MacOS/$APP_NAME" 2>/dev/null || true
     chmod +x "$app_dir/Contents/MacOS/$APP_NAME"
     ditto "$resource_bundle" "$app_dir/Contents/Resources/QuotaBar_QuotaBarApp.bundle"
     write_icns "$app_dir/Contents/Resources/$ICON_FILE_NAME"

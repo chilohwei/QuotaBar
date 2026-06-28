@@ -143,15 +143,21 @@ struct DashboardView: View {
             }
         }
         .onChange(of: visibleAccountIDs) { ids in
+            appState.setDashboardVisibleAccountIDs(ids)
             guard !isRefreshingSelectedTool else { return }
             rememberVisibleOrderForSelectedTool(ids)
         }
         .onChange(of: appState.selectedTool) { _ in
             isToolMenuPresented = false
+            appState.setDashboardVisibleAccountIDs(visibleAccountIDs)
             rememberVisibleOrderForSelectedTool(visibleAccountIDs)
         }
         .onAppear {
+            appState.setDashboardVisibleAccountIDs(visibleAccountIDs)
             rememberVisibleOrderForSelectedTool(visibleAccountIDs)
+        }
+        .onDisappear {
+            appState.setDashboardVisibleAccountIDs([])
         }
     }
 

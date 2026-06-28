@@ -67,7 +67,6 @@ struct CodexProvider: Provider {
     private let refreshClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
     private let tokenRefreshInterval: TimeInterval = 8 * 24 * 60 * 60
     private let tokenRefreshLeeway: TimeInterval = 10 * 60
-    private let subscriptionRefreshInterval: TimeInterval = 12 * 60 * 60
     private let chatGPTUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 
     private static let liveSession: URLSession = {
@@ -78,7 +77,6 @@ struct CodexProvider: Provider {
         return URLSession(configuration: configuration)
     }()
 
-    private static let freshQuotaCacheAge: TimeInterval = 30
     private static let fallbackQuotaCacheAge: TimeInterval = 24 * 60 * 60
     private static let maxNetworkAttempts = 3
 
@@ -709,8 +707,7 @@ struct CodexProvider: Provider {
                 accountID: resolvedAccountID,
                 accountKey: resolvedAccountKey,
                 email: resolvedFallbackIdentifier,
-                existing: subscriptionMeta,
-                forceRefresh: forceRefresh
+                existing: subscriptionMeta
             ) {
                 subscriptionMeta = refreshedSubscription
             }
@@ -730,8 +727,7 @@ struct CodexProvider: Provider {
                     fallbackPlanName: fallbackPlanName,
                     fallbackAccountValidUntil: identity.accountValidUntil ?? subscriptionMeta?.accountValidUntil,
                     fallbackSubscriptionWillRenew: identity.subscriptionWillRenew ?? subscriptionMeta?.subscriptionWillRenew,
-                    fallbackSubscriptionStatus: identity.subscriptionStatus ?? subscriptionMeta?.subscriptionStatus,
-                    forceRefresh: forceRefresh
+                    fallbackSubscriptionStatus: identity.subscriptionStatus ?? subscriptionMeta?.subscriptionStatus
                 )
             } catch {
                 if let apiKey = credentials.apiKey, !apiKey.isEmpty {
@@ -799,20 +795,13 @@ struct CodexProvider: Provider {
         fallbackPlanName: String?,
         fallbackAccountValidUntil: Date?,
         fallbackSubscriptionWillRenew: Bool?,
-        fallbackSubscriptionStatus: String?,
-        forceRefresh: Bool
+        fallbackSubscriptionStatus: String?
     ) async throws -> QuotaSnapshot {
         let cacheKey = quotaCacheKey(
             accountKey: accountKey,
             accountID: accountID,
             fallbackAccountIdentifier: fallbackAccountIdentifier
         )
-        if !forceRefresh,
-           let cacheKey,
-           let cached = try? loadCachedQuotaSnapshot(cacheKey: cacheKey),
-           Date().timeIntervalSince(cached.cachedAt) <= Self.freshQuotaCacheAge {
-            return cached.snapshot.replacing(source: "Codex OAuth Cache")
-        }
 
         let url = resolveUsageURL(codexHomePath: codexHomePath)
         let request = makeOAuthUsageRequest(url: url, accessToken: accessToken, accountID: accountID)
@@ -934,16 +923,8 @@ struct CodexProvider: Provider {
         accountID: String?,
         accountKey: String?,
         email: String?,
-        existing: SubscriptionCacheMetadata?,
-        forceRefresh: Bool
+        existing: SubscriptionCacheMetadata?
     ) async -> SubscriptionCacheMetadata? {
-        if !forceRefresh,
-           let existing,
-           let fetchedAt = existing.fetchedAt,
-           Date().timeIntervalSince(fetchedAt) < subscriptionRefreshInterval {
-            return existing
-        }
-
         guard let accountID = accountID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !accountID.isEmpty else {
             return existing

@@ -76,6 +76,57 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.isQuotaBlocked == true)
     }
 
+    @Test("Codex paid plan payload maps team and pro names without dropping quota")
+    func codexPaidPlanPayloads() throws {
+        let teamPayload = try jsonObject("""
+        {
+          "rate_limit": {
+            "allowed": true,
+            "primary_window": {
+              "used_percent": 12,
+              "limit_window_seconds": 18000
+            },
+            "secondary_window": {
+              "used_percent": 45,
+              "limit_window_seconds": 604800
+            }
+          },
+          "chatgpt_plan_type": "team",
+          "billing_cycle": "annual"
+        }
+        """)
+        let teamSnapshot = try #require(CodexProvider().parseRateLimitPayloadForTesting(
+            teamPayload,
+            accountValidUntil: Date(timeIntervalSince1970: 1_800_000_000),
+            subscriptionWillRenew: true,
+            subscriptionStatus: "active"
+        ))
+
+        #expect(teamSnapshot.planName == "Team Annual")
+        #expect(teamSnapshot.primary?.remainingPercent == 88)
+        #expect(approximately(teamSnapshot.secondary?.remainingPercent, 55))
+        #expect(teamSnapshot.accountValidUntil != nil)
+        #expect(teamSnapshot.subscriptionWillRenew == true)
+
+        let proPayload = try jsonObject("""
+        {
+          "rateLimit": {
+            "allowed": true,
+            "primaryWindow": {
+              "usedPercent": 0.35,
+              "windowMinutes": 300
+            }
+          },
+          "planName": "chatgpt pro"
+        }
+        """)
+        let proSnapshot = try #require(CodexProvider().parseRateLimitPayloadForTesting(proPayload))
+
+        #expect(proSnapshot.planName == "Pro")
+        #expect(proSnapshot.primary?.remainingPercent == 65)
+        #expect(proSnapshot.isQuotaBlocked == false)
+    }
+
     @Test("Cursor current usage payload maps plan capacity and percent windows")
     func cursorCurrentUsagePayload() throws {
         let payload = try jsonObject("""
@@ -114,6 +165,43 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.subscriptionWillRenew == true)
         #expect(snapshot.subscriptionStatus == "active")
         #expect(snapshot.note?.contains("Included") == true)
+    }
+
+    @Test("Cursor team payload maps business plan and quota buckets")
+    func cursorTeamUsagePayload() throws {
+        let payload = try jsonObject("""
+        {
+          "membership_type": "business",
+          "subscription_status": "active",
+          "current_period_end": "2026-07-31T00:00:00Z",
+          "included_usage": {
+            "used": 4200,
+            "limit": 12000
+          },
+          "auto_percent_used": 44,
+          "api_percent_used": 8,
+          "spend_limit_usage": {
+            "enabled": true,
+            "used_cents": 500,
+            "hard_limit_cents": 5000
+          }
+        }
+        """)
+
+        let snapshot = try CursorProvider().parseCurrentPeriodUsageForTesting(
+            payload,
+            email: "cursor-team@example.com"
+        )
+
+        #expect(snapshot.accountIdentifier == "cursor-team@example.com")
+        #expect(snapshot.planName == "Team")
+        #expect(snapshot.primary?.label == "Total")
+        #expect(approximately(snapshot.primary?.remainingPercent, 65))
+        #expect(snapshot.secondary?.label == "Auto")
+        #expect(approximately(snapshot.secondary?.remainingPercent, 56))
+        #expect(snapshot.tertiary?.label == "API")
+        #expect(snapshot.tertiary?.remainingPercent == 92)
+        #expect(snapshot.subscriptionWillRenew == true)
     }
 
     @Test("Cursor callback-shaped usage payload maps labeled rows")
@@ -183,6 +271,95 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.tertiary == nil)
     }
 
+    @Test("Cursor free included-usage payload renders full remaining instead of hiding quota")
+    func cursorFreeIncludedUsagePayload() throws {
+        // Real shape returned by GetCurrentPeriodUsage for an unused Free account:
+        // the included allowance is reported only as percentages (all 0 == 100%
+        // remaining), accompanied by a positive display threshold and an
+        // "included usage" message. This must not collapse to "no quota".
+        let payload = try jsonObject("""
+        {
+          "billingCycleStart": "1780998365124",
+          "billingCycleEnd": "1783590365124",
+          "planUsage": {
+            "remainingBonus": false,
+            "autoPercentUsed": 0,
+            "apiPercentUsed": 0,
+            "totalPercentUsed": 0
+          },
+          "spendLimitUsage": {
+            "pooledLimit": 0,
+            "pooledRemaining": 0,
+            "individualLimit": 0,
+            "overallLimit": 0,
+            "overallRemaining": 0
+          },
+          "displayThreshold": 200,
+          "displayMessage": "You've used 0% of your included usage",
+          "autoBucketModels": ["composer-2.5", "composer-2"]
+        }
+        """)
+
+        let snapshot = try CursorProvider().parseCurrentPeriodUsageForTesting(
+            payload,
+            email: "cursor-free@example.com",
+            membershipType: "free"
+        )
+
+        #expect(snapshot.planName == "Free")
+        #expect(snapshot.primary?.label == "Total")
+        #expect(snapshot.primary?.used == 0)
+        #expect(snapshot.primary?.limit == 100)
+        #expect(snapshot.primary?.remainingPercent == 100)
+        #expect(snapshot.isQuotaBlocked != true)
+        // A Free account has a single included allowance — it should not mirror the
+        // paid Auto / API three-bucket layout.
+        #expect(snapshot.secondary == nil)
+        #expect(snapshot.tertiary == nil)
+    }
+
+    @Test("Cursor free partially-used included usage does not expose paid Auto API buckets")
+    func cursorFreePartiallyUsedIncludedUsagePayload() throws {
+        let payload = try jsonObject("""
+        {
+          "billingCycleStart": "1780998365124",
+          "billingCycleEnd": "1783590365124",
+          "planUsage": {
+            "remainingBonus": false,
+            "autoPercentUsed": 100,
+            "apiPercentUsed": 0,
+            "totalPercentUsed": 98
+          },
+          "spendLimitUsage": {
+            "pooledLimit": 0,
+            "pooledRemaining": 0,
+            "individualLimit": 0,
+            "overallLimit": 0,
+            "overallRemaining": 0
+          },
+          "displayThreshold": 200,
+          "displayMessage": "You've used 98% of your included usage",
+          "autoBucketModels": ["composer-2.5", "composer-2"]
+        }
+        """)
+
+        let snapshot = try CursorProvider().parseCurrentPeriodUsageForTesting(
+            payload,
+            email: "cursor-free@example.com",
+            membershipType: "free"
+        )
+
+        #expect(snapshot.planName == "Free")
+        #expect(snapshot.primary?.label == "Total")
+        #expect(snapshot.primary?.used == 98)
+        #expect(snapshot.primary?.limit == 100)
+        #expect(approximately(snapshot.primary?.remainingPercent, 2))
+        #expect(snapshot.secondary == nil)
+        #expect(snapshot.tertiary == nil)
+        #expect(snapshot.statusBarMetric?.title == "Total")
+        #expect(approximately(snapshot.statusBarMetric?.ratio, 0.02))
+    }
+
     @Test("Claude statusLine payload maps 5h 7d without context or subscription panel")
     func claudeStatusLinePayload() throws {
         let status = try jsonDictionary("""
@@ -216,7 +393,9 @@ struct ProviderPayloadFixtureTests {
             authMethod: "oauth",
             apiProvider: "firstParty",
             userID: "user-12345678",
-            authStatusJSON: #"{"email":"claude-user@example.com"}"#
+            authStatusJSON: #"{"email":"claude-user@example.com"}"#,
+            capturedAt: Date(timeIntervalSince1970: 1_770_000_000),
+            now: Date(timeIntervalSince1970: 1_770_000_000)
         )
 
         #expect(snapshot.source == "Claude Code StatusLine")
@@ -274,6 +453,61 @@ struct ProviderPayloadFixtureTests {
         #expect(ClaudeCodeProvider().shouldUseStatusLineSnapshotForTesting(status) == true)
     }
 
+    @Test("Claude OAuth usage payload maps utilization windows and blocked state")
+    func claudeOAuthUsagePayload() throws {
+        let payload = try jsonDictionary("""
+        {
+          "five_hour": {
+            "utilization": 100,
+            "resets_at": "2026-06-28T07:00:00Z"
+          },
+          "seven_day": {
+            "utilization": 31,
+            "resets_at": "2026-06-28T09:00:00Z"
+          }
+        }
+        """)
+
+        let snapshot = ClaudeCodeProvider().parseOAuthUsagePayloadForTesting(
+            payload,
+            authStatusJSON: #"{"email":"claude-user@example.com"}"#
+        )
+
+        #expect(snapshot.source == "Claude Code OAuth")
+        #expect(snapshot.accountIdentifier == "claude-user@example.com")
+        #expect(snapshot.primary?.used == 100)
+        #expect(snapshot.secondary?.used == 31)
+        #expect(snapshot.isQuotaBlocked == true)
+    }
+
+    @Test("Claude statusLine payload drops expired windows instead of showing stale remaining")
+    func claudeStatusLinePayloadDropsExpiredWindows() throws {
+        let status = try jsonDictionary("""
+        {
+          "rate_limits": {
+            "five_hour": {
+              "used_percentage": 8,
+              "resets_at": 1782610800
+            },
+            "seven_day": {
+              "used_percentage": 31,
+              "resets_at": 1782637200
+            }
+          }
+        }
+        """)
+
+        let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
+            status,
+            capturedAt: Date(timeIntervalSince1970: 1_780_000_000),
+            now: Date(timeIntervalSince1970: 1_782_612_000)
+        )
+
+        #expect(snapshot.primary == nil)
+        #expect(snapshot.note?.contains("过期") == true)
+        #expect(QuotaFreshness.isStale(snapshot, now: Date(timeIntervalSince1970: 1_782_612_000)))
+    }
+
     @Test("Claude third party payload keeps provider identity without context panel")
     func claudeThirdPartyPayload() throws {
         let status = try jsonDictionary("""
@@ -307,5 +541,10 @@ struct ProviderPayloadFixtureTests {
 
     private func jsonDictionary(_ text: String) throws -> [String: Any] {
         try #require(jsonObject(text) as? [String: Any])
+    }
+
+    private func approximately(_ value: Double?, _ expected: Double, tolerance: Double = 0.0001) -> Bool {
+        guard let value else { return false }
+        return abs(value - expected) <= tolerance
     }
 }

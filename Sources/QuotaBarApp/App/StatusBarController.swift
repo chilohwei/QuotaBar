@@ -21,7 +21,7 @@ private final class DashboardPanel: NSPanel {
 }
 
 @MainActor
-final class StatusBarController: NSObject {
+final class StatusBarController: NSObject, NSWindowDelegate {
     private let statusItem: NSStatusItem
     private let dashboardPanel: DashboardPanel
     private var eventMonitor: Any?
@@ -165,6 +165,7 @@ final class StatusBarController: NSObject {
         host.view.layer?.masksToBounds = true
 
         dashboardPanel.contentViewController = host
+        dashboardPanel.delegate = self
         dashboardPanel.setContentSize(DashboardLayout.panelSize)
         dashboardPanel.minSize = DashboardLayout.panelSize
         dashboardPanel.maxSize = DashboardLayout.panelSize
@@ -237,12 +238,18 @@ final class StatusBarController: NSObject {
         updateDashboardPanelSize()
         dashboardPanel.setFrame(dashboardPanelFrame(relativeTo: button), display: false)
         dashboardPanel.makeKeyAndOrderFront(nil)
+        appState.setDashboardVisible(true)
         updateDashboardPanelSize()
         DispatchQueue.main.async { [weak self] in
             self?.updateDashboardPanelSize()
         }
         NSApp.activate(ignoringOtherApps: true)
         pendingPanelPresentationTask = nil
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard notification.object as? NSWindow === dashboardPanel else { return }
+        appState.setDashboardVisible(false)
     }
 
     private func dashboardPanelFrame(relativeTo button: NSStatusBarButton) -> NSRect {

@@ -269,11 +269,10 @@ struct AccountCardView: View {
     }
 
     private var status: AccountVisualStatus {
-        if errorMessage != nil, quota != nil { return .stale }
-        if errorMessage != nil { return .error }
+        if errorMessage != nil, quota == nil { return .error }
         if isRefreshing || loadState == .refreshing || loadState == .loadingInitial { return .refreshing }
         guard let quota else { return .pending }
-        if isStaleOrCachedQuota(quota) { return .stale }
+        if isStaleQuota(quota) { return .stale }
         if quota.isQuotaBlocked == true { return .exhausted }
         if metrics.isEmpty {
             if account.tool == .claudeCode {
@@ -295,11 +294,8 @@ struct AccountCardView: View {
         return .healthy
     }
 
-    private func isStaleOrCachedQuota(_ quota: QuotaSnapshot) -> Bool {
-        if loadState == .stale {
-            return true
-        }
-        return quota.source.range(of: "cache", options: .caseInsensitive) != nil
+    private func isStaleQuota(_ quota: QuotaSnapshot) -> Bool {
+        QuotaFreshness.isStale(quota)
     }
 
     private var shouldShowStatusBadge: Bool {
@@ -389,8 +385,11 @@ struct AccountCardView: View {
 
     private var footerMessage: (message: String, color: Color)? {
         if let errorMessage {
-            if quota != nil {
+            if let quota, QuotaFreshness.isStale(quota) {
                 return (text.staleQuotaMessage(errorMessage), Branding.warning)
+            }
+            if let quota {
+                return (text.updatedAt(quota.updatedAt), Branding.inkSubtle)
             }
             return (errorMessage, Branding.danger)
         }
