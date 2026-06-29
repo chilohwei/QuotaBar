@@ -19,6 +19,7 @@ QuotaBar is a macOS menu bar app for checking Codex, Cursor, and Claude Code acc
 - Launch at login: optionally start QuotaBar when you sign in to macOS.
 - Multilingual UI: Simplified Chinese, Traditional Chinese, and English.
 - Update check: check for new versions from inside the app.
+- Local write control: disable writes to Codex, Cursor, and Claude Code local configuration when you want read-only quota management.
 
 ## Installation
 
@@ -35,7 +36,12 @@ Install from the DMG:
 1. Download and open the DMG file.
 2. Drag `QuotaBar.app` into `Applications`.
 3. Launch QuotaBar from the Applications folder.
-4. If macOS blocks the first launch, right-click `QuotaBar.app` in Finder and choose `Open`.
+4. QuotaBar is currently distributed through Homebrew/GitHub Releases without a Developer ID signature. If macOS blocks the first launch, right-click `QuotaBar.app` in Finder and choose `Open`.
+5. If you have verified the download source and SHA256 but macOS still blocks launch, remove the quarantine attribute manually:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/QuotaBar.app
+```
 
 You can also install with Homebrew:
 
@@ -50,6 +56,8 @@ Upgrade with Homebrew:
 brew update
 brew upgrade --cask quotabar
 ```
+
+If the Homebrew-installed app is blocked by Gatekeeper, you can run the same `xattr` command for `/Applications/QuotaBar.app` after verifying the source.
 
 System requirement: macOS Ventura 13 or later.
 
@@ -81,6 +89,8 @@ Build a formal universal package:
 scripts/build_macos_app.sh --arch universal
 ```
 
+This project currently has no Developer ID certificate. The build script uses ad-hoc signing by default. In-app updates accept only DMG and SHA256 assets from the official `chilohwei/QuotaBar` GitHub Release, verify the downloaded DMG SHA256, and check the bundle identifier, version, executable, and code-signing state. They do not remove the macOS quarantine attribute automatically.
+
 Build a local test package with a non-release version:
 
 ```bash
@@ -91,9 +101,13 @@ When a new GitHub Release is created, GitHub Actions can sync the standalone Hom
 
 ## Privacy
 
-QuotaBar stores only the necessary account information and usage state on your Mac.
+QuotaBar stores only the necessary account information and usage state on your Mac. Account tokens are stored in macOS Keychain. Legacy `secrets.json` entries from older versions are migrated to Keychain when read, then removed on a best-effort basis.
 
-QuotaBar does not provide its own cloud account service and does not upload your account data to any QuotaBar-owned server. You are still responsible for following the terms of Codex, Cursor, Claude Code, and any related third-party services.
+QuotaBar reads and modifies local Codex, Cursor, and Claude Code login/configuration files to import accounts, switch accounts, and display quota. Local account metadata, quota cache, and managed profiles are stored under `~/Library/Application Support/QuotaBar/`.
+
+If you want QuotaBar to display quota without modifying third-party tool configuration, disable `Allow Tool Config Writes` in Settings. Account switching, writing refreshed tokens back to the tool, and Claude Code statusLine installation will be blocked; local account import and quota refresh can still run.
+
+QuotaBar does not provide its own cloud account service and does not upload your account data to any QuotaBar-owned server. Update checks access GitHub Releases; quota refreshes call the official Codex, Cursor, and Claude Code endpoints. You are still responsible for following the terms of Codex, Cursor, Claude Code, and any related third-party services.
 
 ## Donation
 

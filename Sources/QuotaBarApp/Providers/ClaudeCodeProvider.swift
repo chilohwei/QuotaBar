@@ -5,7 +5,28 @@ struct ClaudeCodeProvider: Provider {
     let tool: ToolKind = .claudeCode
 
     private static let oauthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    private static let oauthTokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
+    private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private static let oauthUsageUserAgent = "claude-code/2.1.181"
+    // Refresh the access token this long before its stored expiry, so `/usage` calls never go out
+    // with an already-dead token.
+    private static let oauthTokenExpiryMargin: TimeInterval = 2 * 60
+    // Floor between real `/usage` network calls per account. Bursty triggers (panel open, foreground,
+    // statusLine change) within this window reuse the last live snapshot instead of re-hitting the
+    // endpoint, which keeps QuotaBar from tripping the endpoint's own per-account rate limit.
+    private static let liveUsageMinFetchInterval: TimeInterval = 60
+    // When `/usage` is temporarily unavailable, the last live snapshot may be shown — clearly
+    // labeled with its age — up to this old, instead of falling back to stale statusLine data.
+    private static let liveUsageStaleMax: TimeInterval = 30 * 60
+    // After a token refresh fails, wait this long before trying again, so a throttled auth endpoint
+    // is given room to recover instead of being hammered on every poll cycle.
+    private static let tokenRefreshCooldown: TimeInterval = 5 * 60
+    private static let rateLimitTranscriptLookback: TimeInterval = 24 * 60 * 60
+    private static let recentTranscriptFileLimit = 16
+    private static let transcriptTailByteLimit: UInt64 = 512 * 1024
+    private static let rateLimitWithoutResetFreshness: TimeInterval = 10 * 60
+    private static let rateLimitReachedNote =
+        "Claude Code 已提示 Usage limit reached；QuotaBar 在重置前按 0% 剩余额度显示。"
     private static let liveSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
@@ -34,7 +55,6 @@ struct ClaudeCodeProvider: Provider {
         guard credentials.loggedIn else {
             throw ProviderError.unsupported(claudeLoginRequiredMessage)
         }
-        try installQuotaBarStatusLine()
         return try encodeCredentials(credentials)
     }
 
@@ -49,7 +69,6 @@ struct ClaudeCodeProvider: Provider {
             if shouldClearStatusLineSnapshot(previous: previous, next: credentials) {
                 try? fileService.removeItemIfExists(at: AppPaths.claudeCodeStatusFile.path)
             }
-            try installQuotaBarStatusLine()
             return try encodeCredentials(credentials)
         } catch {
             openClaudeCodePage()
@@ -63,7 +82,6 @@ struct ClaudeCodeProvider: Provider {
     func prepareAccount(_ account: Account, secret: String) async throws -> Account {
         var updated = account
         updated.settings.identityKey = accountIdentity(from: secret) ?? account.settings.identityKey
-        try installQuotaBarStatusLine()
         return updated
     }
 
@@ -110,11 +128,19 @@ struct ClaudeCodeProvider: Provider {
             credentials = storedCredentials
         }
 
-        if let liveSnapshot = await fetchOAuthUsageSnapshot(credentials: credentials) {
-            return liveSnapshot
+        let now = Date()
+        let statusLineLoad = try? loadStatusLineSnapshot()
+        let rateLimitEvent = loadActiveRateLimitEvent(status: statusLineLoad?.status, now: now)
+
+        // The live OAuth `utilization` numbers track the 5h/7d rolling windows, which are
+        // distinct from the session limit Claude Code reports via a 429 "Usage limit reached".
+        // When a session limit is active those windows can still read well under 100%, so the
+        // active rate-limit event must be overlaid onto the live snapshot too — otherwise the
+        // panel keeps showing stale "remaining" while Claude Code is blocked.
+        if let liveSnapshot = await fetchOAuthUsageSnapshot(credentials: credentials, forceRefresh: forceRefresh) {
+            return applyActiveRateLimit(to: liveSnapshot, rateLimitEvent: rateLimitEvent, now: now)
         }
 
-        let statusLineLoad = try? loadStatusLineSnapshot()
         let status = shouldUseStatusLineSnapshot(statusLineLoad?.status, settingsJSON: credentials.claudeSettingsJSON)
             ? statusLineLoad?.status
             : nil
@@ -122,7 +148,9 @@ struct ClaudeCodeProvider: Provider {
         return makeQuotaSnapshot(
             status: status,
             credentials: credentials,
-            capturedAt: statusLineLoad?.capturedAt
+            capturedAt: statusLineLoad?.capturedAt,
+            now: now,
+            rateLimitEvent: rateLimitEvent
         )
     }
 
@@ -476,6 +504,16 @@ struct ClaudeCodeProvider: Provider {
         let capturedAt: Date
     }
 
+    private struct ClaudeRateLimitEvent {
+        let resetAt: Date?
+        let capturedAt: Date
+        let message: String?
+    }
+
+    private struct ActiveRateLimit {
+        let resetAt: Date?
+    }
+
     private func loadStatusLineSnapshot() throws -> StatusLineSnapshotLoad? {
         let url = AppPaths.claudeCodeStatusFile
         let path = url.path
@@ -505,6 +543,11 @@ struct ClaudeCodeProvider: Provider {
             in: window,
             keys: ["resets_at", "reset_at", "resetAt", "next_reset_at", "nextResetAt"]
         ))
+        // The statusLine snapshot is only a fallback for when live `/usage` is unavailable, and
+        // Claude Code freezes its `rate_limits` between API calls. Once a window's reset time has
+        // passed, its stored `used_percentage` belongs to a previous cycle and we have no truthful
+        // current value — drop it rather than show a stale or invented number. The live `/usage`
+        // path is the source of truth for an accurate, current figure.
         if rejectExpiredWindows, let resetAt, resetAt.addingTimeInterval(60) < now {
             return nil
         }
@@ -514,6 +557,173 @@ struct ClaudeCodeProvider: Provider {
             limit: 100,
             resetAt: resetAt
         )
+    }
+
+    private func loadActiveRateLimitEvent(status: [String: Any]?, now: Date) -> ClaudeRateLimitEvent? {
+        transcriptURLs(status: status, now: now)
+            .compactMap { latestRateLimitEvent(in: $0, now: now) }
+            .filter { activeRateLimit(from: $0, fallbackResetAt: nil, now: now) != nil }
+            .sorted { $0.capturedAt > $1.capturedAt }
+            .first
+    }
+
+    private func latestRateLimitEvent(in url: URL, now: Date) -> ClaudeRateLimitEvent? {
+        guard let text = readTailText(from: url, byteLimit: Self.transcriptTailByteLimit) else {
+            return nil
+        }
+
+        let fileModifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+        var latest: ClaudeRateLimitEvent?
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            guard let event = parseRateLimitEvent(
+                jsonLine: String(rawLine),
+                fileModifiedAt: fileModifiedAt,
+                now: now
+            ),
+                  activeRateLimit(from: event, fallbackResetAt: nil, now: now) != nil else {
+                continue
+            }
+            if latest == nil || event.capturedAt > latest!.capturedAt {
+                latest = event
+            }
+        }
+        return latest
+    }
+
+    private func transcriptURLs(status: [String: Any]?, now: Date) -> [URL] {
+        var urls: [URL] = []
+        if let transcriptPath = firstString(
+            in: status as Any,
+            keys: ["transcript_path", "transcriptPath", "transcript"]
+        ) {
+            urls.append(URL(fileURLWithPath: fileService.expand(path: transcriptPath)))
+        }
+
+        urls.append(contentsOf: recentClaudeProjectTranscriptURLs(now: now))
+
+        var seen = Set<String>()
+        return urls.filter { url in
+            let path = url.standardizedFileURL.path
+            return seen.insert(path).inserted
+        }
+    }
+
+    private func recentClaudeProjectTranscriptURLs(now: Date) -> [URL] {
+        let projectsURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent("projects", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: projectsURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var entries: [(url: URL, modifiedAt: Date)] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "jsonl" else { continue }
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey])
+            guard values?.isRegularFile == true else { continue }
+            let modifiedAt = values?.contentModificationDate ?? .distantPast
+            guard now.timeIntervalSince(modifiedAt) <= Self.rateLimitTranscriptLookback else { continue }
+            entries.append((url, modifiedAt))
+        }
+
+        return Array(
+            entries
+                .sorted { $0.modifiedAt > $1.modifiedAt }
+                .prefix(Self.recentTranscriptFileLimit)
+                .map(\.url)
+        )
+    }
+
+    private func readTailText(from url: URL, byteLimit: UInt64) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        do {
+            let fileSize = try handle.seekToEnd()
+            try handle.seek(toOffset: fileSize > byteLimit ? fileSize - byteLimit : 0)
+            guard let data = try handle.readToEnd(), !data.isEmpty else {
+                return nil
+            }
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+
+    private func parseRateLimitEvent(
+        jsonLine: String,
+        fileModifiedAt: Date?,
+        now: Date
+    ) -> ClaudeRateLimitEvent? {
+        let trimmed = jsonLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains("429")
+            || trimmed.localizedCaseInsensitiveContains("rate_limit")
+            || trimmed.localizedCaseInsensitiveContains("usage limit")
+            || trimmed.localizedCaseInsensitiveContains("session limit") else {
+            return nil
+        }
+        guard let data = trimmed.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return nil
+        }
+        return parseRateLimitEvent(object: object, fileModifiedAt: fileModifiedAt, now: now)
+    }
+
+    private func parseRateLimitEvent(
+        object: Any,
+        fileModifiedAt: Date?,
+        now: Date
+    ) -> ClaudeRateLimitEvent? {
+        guard let dict = object as? [String: Any] else { return nil }
+
+        // A genuine Claude Code rate-limit record carries these markers at the TOP LEVEL of the
+        // transcript entry. The earlier heuristic also matched on free text ("usage limit" /
+        // "session limit" + "reset") found anywhere in the line, which misfired on any transcript
+        // that merely *mentions* a limit — tool output, assistant discussion, even this debugging
+        // session — forcing a false "blocked". Read the structural fields directly (not a
+        // recursive search, which could pick up such strings nested inside content).
+        let isApiErrorMessage = (dict["isApiErrorMessage"] as? Bool) == true
+        let statusCode = number(dict["apiErrorStatus"])
+        let errorCode = (dict["error"] as? String)?.lowercased()
+        let isRateLimit = isApiErrorMessage
+            && (Int(statusCode ?? -1) == 429 || errorCode == "rate_limit")
+        guard isRateLimit else { return nil }
+
+        var strings: [String] = []
+        collectStrings(in: dict, into: &strings)
+        let joinedText = strings.joined(separator: " ")
+
+        let capturedAt = parseFlexibleDate(findValue(in: dict, keys: ["timestamp", "createdAt", "created_at"]))
+            ?? fileModifiedAt
+            ?? now
+        let resetAt = parseFlexibleDate(findValue(
+            in: dict,
+            keys: ["resets_at", "reset_at", "resetAt", "retryAt", "retry_at"]
+        )) ?? parseRateLimitResetDate(in: joinedText, referenceDate: capturedAt)
+        let message = strings.first { value in
+            let lower = value.lowercased()
+            return lower.contains("limit") && lower.contains("reset")
+        }
+
+        return ClaudeRateLimitEvent(resetAt: resetAt, capturedAt: capturedAt, message: message)
+    }
+
+    private func activeRateLimit(
+        from event: ClaudeRateLimitEvent?,
+        fallbackResetAt: Date?,
+        now: Date
+    ) -> ActiveRateLimit? {
+        guard let event else { return nil }
+        if let resetAt = event.resetAt ?? fallbackResetAt {
+            return resetAt.addingTimeInterval(60) > now ? ActiveRateLimit(resetAt: resetAt) : nil
+        }
+        return now.timeIntervalSince(event.capturedAt) <= Self.rateLimitWithoutResetFreshness
+            ? ActiveRateLimit(resetAt: nil)
+            : nil
     }
 
     private func parseOAuthUsageWindow(_ dict: [String: Any]?, label: String) -> QuotaWindow? {
@@ -548,7 +758,25 @@ struct ClaudeCodeProvider: Provider {
         return authMethod == "oauth" || authMethod == "claude.ai" || authMethod == "claudeai"
     }
 
-    private func oauthAccessToken(from credentials: ClaudeCodeCredentials) -> String? {
+    private struct ClaudeOAuthToken {
+        let accessToken: String
+        let refreshToken: String?
+        let expiresAt: Date?
+    }
+
+    private struct RefreshedOAuthToken {
+        let accessToken: String
+        let refreshToken: String
+        let expiresAt: Date?
+    }
+
+    private struct CachedClaudeUsage: Codable {
+        let schemaVersion: Int
+        let cachedAt: Date
+        let snapshot: QuotaSnapshot
+    }
+
+    private func parseOAuthToken(from credentials: ClaudeCodeCredentials) -> ClaudeOAuthToken? {
         for source in [credentials.keychainCredentials, credentials.claudeCredentialsJSON] {
             guard let text = source?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty,
@@ -557,29 +785,236 @@ struct ClaudeCodeProvider: Provider {
                   let oauth = object["claudeAiOauth"] as? [String: Any] else {
                 continue
             }
-            let token = (oauth["accessToken"] as? String) ?? (oauth["access_token"] as? String)
-            let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmed.isEmpty {
-                return trimmed
-            }
+            let access = ((oauth["accessToken"] as? String) ?? (oauth["access_token"] as? String))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !access.isEmpty else { continue }
+            let refresh = ((oauth["refreshToken"] as? String) ?? (oauth["refresh_token"] as? String))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return ClaudeOAuthToken(
+                accessToken: access,
+                refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
+                expiresAt: parseFlexibleDate(oauth["expiresAt"] ?? oauth["expires_at"])
+            )
         }
         return nil
     }
 
-    private func fetchOAuthUsageSnapshot(credentials: ClaudeCodeCredentials) async -> QuotaSnapshot? {
+    private func fetchOAuthUsageSnapshot(
+        credentials: ClaudeCodeCredentials,
+        forceRefresh: Bool
+    ) async -> QuotaSnapshot? {
         guard shouldFetchOAuthUsage(credentials),
-              let accessToken = oauthAccessToken(from: credentials) else {
+              let token = parseOAuthToken(from: credentials) else {
             return nil
+        }
+
+        let cacheKey = usageCacheKey(credentials)
+        let cached = cacheKey.flatMap { try? loadCachedUsage(cacheKey: $0) }
+
+        // Collapse bursty triggers: a very recent live snapshot is reused as-is, so QuotaBar does
+        // not re-hit the endpoint (and trip its per-account rate limit) several times a minute.
+        if !forceRefresh,
+           let cached,
+           Date().timeIntervalSince(cached.cachedAt) < Self.liveUsageMinFetchInterval {
+            return cached.snapshot
+        }
+
+        let isExpired = token.expiresAt.map { $0.timeIntervalSinceNow <= Self.oauthTokenExpiryMargin } ?? false
+        var accessToken = token.accessToken
+        var didRefresh = false
+        if isExpired {
+            // The token is dead; refreshing it is the only way to get live data. If the refresh is
+            // in cooldown (a recent attempt failed), don't call either endpoint — a dead token only
+            // yields 401s and hammering keeps the auth endpoint throttled. Show honest stale data.
+            guard let refreshed = await refreshAccessTokenIfAllowed(refreshToken: token.refreshToken, cacheKey: cacheKey) else {
+                return staleLiveFallback(cached)
+            }
+            accessToken = refreshed
+            didRefresh = true
         }
 
         do {
             let payload = try await requestOAuthUsage(accessToken: accessToken)
-            return makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
-        } catch OAuthUsageFetchError.rateLimited {
-            return nil
+            let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
+            if let cacheKey { try? storeCachedUsage(snapshot, cacheKey: cacheKey) }
+            return snapshot
+        } catch OAuthUsageFetchError.unauthorized where !didRefresh {
+            // Token looked locally valid but was rejected — refresh once (if allowed) and retry.
+            if let refreshed = await refreshAccessTokenIfAllowed(refreshToken: token.refreshToken, cacheKey: cacheKey),
+               let payload = try? await requestOAuthUsage(accessToken: refreshed) {
+                let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
+                if let cacheKey { try? storeCachedUsage(snapshot, cacheKey: cacheKey) }
+                return snapshot
+            }
         } catch {
+            // fall through to the stale-but-honest fallback below
+        }
+
+        return staleLiveFallback(cached)
+    }
+
+    /// The last real `/usage` value, labeled with its age, while recent enough to be meaningful.
+    /// Never fabricated and never the frozen statusLine — just the last truth, honestly aged.
+    private func staleLiveFallback(_ cached: CachedClaudeUsage?) -> QuotaSnapshot? {
+        guard let cached,
+              Date().timeIntervalSince(cached.cachedAt) <= Self.liveUsageStaleMax else {
             return nil
         }
+        let minutes = max(1, Int(Date().timeIntervalSince(cached.cachedAt) / 60))
+        return cached.snapshot.replacing(
+            source: "Claude Code OAuth Cache",
+            updatedAt: cached.cachedAt,
+            note: "实时接口暂不可用，显示约 \(minutes) 分钟前的真实额度。"
+        )
+    }
+
+    /// Refreshes the access token unless a recent refresh failed and we're still in its cooldown.
+    /// On failure it sets a cooldown so the app stops hammering the auth endpoint every poll cycle
+    /// (which would otherwise sustain the very rate limit that's blocking recovery).
+    private func refreshAccessTokenIfAllowed(refreshToken: String?, cacheKey: String?) async -> String? {
+        if let until = tokenRefreshBlockedUntil(cacheKey), until > Date() {
+            return nil
+        }
+        do {
+            let access = try await refreshAndPersistToken(refreshToken: refreshToken)
+            clearTokenRefreshBackoff(cacheKey)
+            return access
+        } catch {
+            setTokenRefreshBackoff(cacheKey)
+            return nil
+        }
+    }
+
+    private func requestTokenRefresh(refreshToken: String) async throws -> RefreshedOAuthToken {
+        var request = URLRequest(url: Self.oauthTokenURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(Self.oauthUsageUserAgent, forHTTPHeaderField: "User-Agent")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": Self.oauthClientID
+        ])
+
+        let (data, response) = try await Self.liveSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw OAuthUsageFetchError.invalidResponse
+        }
+        switch http.statusCode {
+        case 200:
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let access = (object["access_token"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !access.isEmpty else {
+                throw OAuthUsageFetchError.invalidResponse
+            }
+            let newRefresh = (object["refresh_token"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let expiresAt = number(object["expires_in"]).map { Date().addingTimeInterval($0) }
+            return RefreshedOAuthToken(
+                accessToken: access,
+                refreshToken: (newRefresh?.isEmpty == false) ? newRefresh! : refreshToken,
+                expiresAt: expiresAt
+            )
+        case 401, 403:
+            throw OAuthUsageFetchError.unauthorized
+        case 429:
+            throw OAuthUsageFetchError.rateLimited
+        default:
+            throw OAuthUsageFetchError.httpStatus(http.statusCode)
+        }
+    }
+
+    @discardableResult
+    private func refreshAndPersistToken(refreshToken: String?) async throws -> String {
+        guard let refreshToken, !refreshToken.isEmpty else {
+            throw OAuthUsageFetchError.unauthorized
+        }
+        let refreshed = try await requestTokenRefresh(refreshToken: refreshToken)
+        try? writeRefreshedOAuthToken(refreshed)
+        return refreshed.accessToken
+    }
+
+    /// Merges rotated tokens back into the keychain credentials, preserving every other field.
+    private func writeRefreshedOAuthToken(_ token: RefreshedOAuthToken) throws {
+        guard let text = try readClaudeCodeKeychainCredentials()?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty,
+              let data = text.data(using: .utf8),
+              var full = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var oauth = full["claudeAiOauth"] as? [String: Any] else {
+            return
+        }
+        oauth["accessToken"] = token.accessToken
+        oauth["refreshToken"] = token.refreshToken
+        if let expiresAt = token.expiresAt {
+            oauth["expiresAt"] = Int(expiresAt.timeIntervalSince1970 * 1000)
+        }
+        full["claudeAiOauth"] = oauth
+        let newData = try JSONSerialization.data(withJSONObject: full)
+        guard let newText = String(data: newData, encoding: .utf8) else { return }
+        try writeClaudeCodeKeychainCredentials(newText)
+    }
+
+    private func usageCacheKey(_ credentials: ClaudeCodeCredentials) -> String? {
+        if let userID = credentials.userID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !userID.isEmpty {
+            return "claude-usage-" + stableCredentialFingerprint("user:\(userID)")
+        }
+        if let keychainCredentials = credentials.keychainCredentials?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !keychainCredentials.isEmpty {
+            return "claude-usage-" + stableCredentialFingerprint(keychainCredentials)
+        }
+        return nil
+    }
+
+    private func usageCachePath(cacheKey: String) -> String {
+        AppPaths.quotaCacheDirectory.appendingPathComponent("\(cacheKey).json").path
+    }
+
+    private func loadCachedUsage(cacheKey: String) throws -> CachedClaudeUsage {
+        let text = try fileService.readText(at: usageCachePath(cacheKey: cacheKey))
+        guard let data = text.data(using: .utf8) else {
+            throw ProviderError.invalidCredentials
+        }
+        return try JSONDecoder().decode(CachedClaudeUsage.self, from: data)
+    }
+
+    private func storeCachedUsage(_ snapshot: QuotaSnapshot, cacheKey: String) throws {
+        try fileService.createDirectoryIfNeeded(at: AppPaths.quotaCacheDirectory.path)
+        let cached = CachedClaudeUsage(schemaVersion: 1, cachedAt: Date(), snapshot: snapshot)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(cached)
+        try fileService.writeText(String(data: data, encoding: .utf8) ?? "{}", to: usageCachePath(cacheKey: cacheKey))
+    }
+
+    private func tokenRefreshBackoffPath(_ cacheKey: String) -> String {
+        AppPaths.quotaCacheDirectory.appendingPathComponent("\(cacheKey)-refresh-backoff").path
+    }
+
+    private func tokenRefreshBlockedUntil(_ cacheKey: String?) -> Date? {
+        guard let cacheKey,
+              let text = try? fileService.readText(at: tokenRefreshBackoffPath(cacheKey)),
+              let epoch = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: epoch)
+    }
+
+    private func setTokenRefreshBackoff(_ cacheKey: String?) {
+        guard let cacheKey else { return }
+        try? fileService.createDirectoryIfNeeded(at: AppPaths.quotaCacheDirectory.path)
+        let until = Date().addingTimeInterval(Self.tokenRefreshCooldown).timeIntervalSince1970
+        try? fileService.writeText(String(until), to: tokenRefreshBackoffPath(cacheKey))
+    }
+
+    private func clearTokenRefreshBackoff(_ cacheKey: String?) {
+        guard let cacheKey else { return }
+        try? fileService.removeItemIfExists(at: tokenRefreshBackoffPath(cacheKey))
     }
 
     private func requestOAuthUsage(accessToken: String) async throws -> [String: Any] {
@@ -647,8 +1082,8 @@ struct ClaudeCodeProvider: Provider {
     }
 
     private func hasRateLimitWindow(_ status: [String: Any]?) -> Bool {
-        makeWindow(status: status, key: "five_hour", label: "5h") != nil
-            || makeWindow(status: status, key: "seven_day", label: "7d") != nil
+        makeWindow(status: status, key: "five_hour", label: "5h", rejectExpiredWindows: false) != nil
+            || makeWindow(status: status, key: "seven_day", label: "7d", rejectExpiredWindows: false) != nil
     }
 
 #if DEBUG
@@ -661,7 +1096,8 @@ struct ClaudeCodeProvider: Provider {
         claudeSettingsJSON: String? = nil,
         keychainCredentials: String? = nil,
         capturedAt: Date = Date(),
-        now: Date = Date()
+        now: Date = Date(),
+        rateLimitTranscriptLine: String? = nil
     ) -> QuotaSnapshot {
         let credentials = ClaudeCodeCredentials(
             loggedIn: true,
@@ -676,7 +1112,16 @@ struct ClaudeCodeProvider: Provider {
             claudeCredentialsJSON: nil,
             claudeAuthJSON: nil
         )
-        return makeQuotaSnapshot(status: status, credentials: credentials, capturedAt: capturedAt, now: now)
+        let rateLimitEvent = rateLimitTranscriptLine.flatMap {
+            parseRateLimitEvent(jsonLine: $0, fileModifiedAt: nil, now: now)
+        }
+        return makeQuotaSnapshot(
+            status: status,
+            credentials: credentials,
+            capturedAt: capturedAt,
+            now: now,
+            rateLimitEvent: rateLimitEvent
+        )
     }
 
     func parseOAuthUsagePayloadForTesting(
@@ -684,7 +1129,9 @@ struct ClaudeCodeProvider: Provider {
         authMethod: String? = "oauth",
         apiProvider: String? = "firstParty",
         userID: String? = "fixture-user",
-        authStatusJSON: String? = nil
+        authStatusJSON: String? = nil,
+        now: Date = Date(),
+        rateLimitTranscriptLine: String? = nil
     ) -> QuotaSnapshot {
         let credentials = ClaudeCodeCredentials(
             loggedIn: true,
@@ -699,7 +1146,11 @@ struct ClaudeCodeProvider: Provider {
             claudeCredentialsJSON: nil,
             claudeAuthJSON: nil
         )
-        return makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
+        let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
+        let rateLimitEvent = rateLimitTranscriptLine.flatMap {
+            parseRateLimitEvent(jsonLine: $0, fileModifiedAt: nil, now: now)
+        }
+        return applyActiveRateLimit(to: snapshot, rateLimitEvent: rateLimitEvent, now: now)
     }
 
     func shouldUseStatusLineSnapshotForTesting(_ status: [String: Any], settingsJSON: String? = nil) -> Bool {
@@ -711,17 +1162,12 @@ struct ClaudeCodeProvider: Provider {
         status: [String: Any]?,
         credentials: ClaudeCodeCredentials,
         capturedAt: Date? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        rateLimitEvent: ClaudeRateLimitEvent? = nil
     ) -> QuotaSnapshot {
         let primary = makeWindow(status: status, key: "five_hour", label: "5h", now: now)
         let secondary = makeWindow(status: status, key: "seven_day", label: "7d", now: now)
-        let note = statusNote(
-            status: status,
-            credentials: credentials,
-            hadExpiredWindows: hadExpiredStatusLineWindows(status: status, now: now)
-        )
-
-        return QuotaSnapshot(
+        let base = QuotaSnapshot(
             source: status == nil ? "Claude Code" : "Claude Code StatusLine",
             accountIdentifier: readableIdentity(from: credentials),
             planName: planName(credentials: credentials, status: status),
@@ -735,7 +1181,56 @@ struct ClaudeCodeProvider: Provider {
             subscriptionWillRenew: nil,
             subscriptionStatus: nil,
             isQuotaBlocked: isQuotaBlocked(primary: primary, secondary: secondary),
-            note: note
+            note: statusNote(
+                status: status,
+                credentials: credentials,
+                hadExpiredWindows: hadExpiredStatusLineWindows(status: status, now: now)
+            )
+        )
+        return applyActiveRateLimit(to: base, rateLimitEvent: rateLimitEvent, now: now)
+    }
+
+    /// Overlays an active session/rate limit onto an existing snapshot (e.g. the live OAuth
+    /// snapshot, whose rolling-window utilization does not reflect a session limit). When a
+    /// limit is active the primary window is forced to 0% remaining and the snapshot is marked
+    /// blocked, mirroring what Claude Code shows as "Usage limit reached".
+    private func applyActiveRateLimit(
+        to snapshot: QuotaSnapshot,
+        rateLimitEvent: ClaudeRateLimitEvent?,
+        now: Date
+    ) -> QuotaSnapshot {
+        guard let activeRateLimit = activeRateLimit(
+            from: rateLimitEvent,
+            fallbackResetAt: snapshot.primary?.resetAt,
+            now: now
+        ) else {
+            return snapshot
+        }
+
+        // `activeRateLimit.resetAt` already falls back to the primary window's reset time.
+        let primary = QuotaWindow(
+            label: snapshot.primary?.label ?? "5h",
+            used: 100,
+            limit: 100,
+            resetAt: activeRateLimit.resetAt
+        )
+
+        return QuotaSnapshot(
+            source: snapshot.source,
+            accountIdentifier: snapshot.accountIdentifier,
+            planName: snapshot.planName,
+            primary: primary,
+            secondary: snapshot.secondary,
+            tertiary: snapshot.tertiary,
+            creditsRemaining: snapshot.creditsRemaining,
+            creditsTotal: snapshot.creditsTotal,
+            updatedAt: snapshot.updatedAt,
+            periodEnd: snapshot.periodEnd,
+            accountValidUntil: snapshot.accountValidUntil,
+            subscriptionWillRenew: snapshot.subscriptionWillRenew,
+            subscriptionStatus: snapshot.subscriptionStatus,
+            isQuotaBlocked: true,
+            note: Self.rateLimitReachedNote
         )
     }
 
@@ -767,6 +1262,8 @@ struct ClaudeCodeProvider: Provider {
         return nil
     }
 
+    // Note for the non-rate-limited case; an active session limit replaces this with
+    // `rateLimitReachedNote` in `applyActiveRateLimit`.
     private func statusNote(
         status: [String: Any]?,
         credentials: ClaudeCodeCredentials,
@@ -776,7 +1273,7 @@ struct ClaudeCodeProvider: Provider {
             return "等待 Claude Code 会话同步；打开 Claude Code 并产生一次响应后会显示 5h/7d 用量。"
         }
         if hadExpiredWindows {
-            return "Claude Code 用量快照已过期；QuotaBar 正在尝试拉取实时数据，或在 Claude Code 成功响应后自动同步。"
+            return "Claude Code statusLine 用量窗口已过期；正在拉取实时数据，或在 Claude Code 成功响应后自动同步。"
         }
         if ((status?["rate_limits"] as? [String: Any])?.isEmpty == false) {
             return nil
@@ -957,6 +1454,115 @@ struct ClaudeCodeProvider: Provider {
                 }
             }
         }
+        return nil
+    }
+
+    private func findValue(in object: Any, keys: Set<String>) -> Any? {
+        if let dict = object as? [String: Any] {
+            for (key, value) in dict {
+                if keys.contains(key) {
+                    return value
+                }
+                if let found = findValue(in: value, keys: keys) {
+                    return found
+                }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                if let found = findValue(in: value, keys: keys) {
+                    return found
+                }
+            }
+        }
+        return nil
+    }
+
+    private func collectStrings(in object: Any, into strings: inout [String]) {
+        guard strings.count < 200 else { return }
+        if let text = object as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                strings.append(String(trimmed.prefix(2_000)))
+            }
+        } else if let dict = object as? [String: Any] {
+            for value in dict.values {
+                collectStrings(in: value, into: &strings)
+                if strings.count >= 200 { break }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                collectStrings(in: value, into: &strings)
+                if strings.count >= 200 { break }
+            }
+        }
+    }
+
+    private func parseRateLimitResetDate(in text: String, referenceDate: Date) -> Date? {
+        let pattern = #"(?i)\breset(?:s)?(?:\s+at)?\s+([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?)(?:\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let timeRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+
+        let timeZone: TimeZone
+        if match.numberOfRanges > 2,
+           let zoneRange = Range(match.range(at: 2), in: text),
+           let parsed = TimeZone(identifier: String(text[zoneRange])) {
+            timeZone = parsed
+        } else {
+            timeZone = .current
+        }
+
+        return parseResetTimeOfDay(
+            String(text[timeRange]),
+            timeZone: timeZone,
+            referenceDate: referenceDate
+        )
+    }
+
+    private func parseResetTimeOfDay(
+        _ raw: String,
+        timeZone: TimeZone,
+        referenceDate: Date
+    ) -> Date? {
+        if let directDate = parseFlexibleDate(raw) {
+            return directDate
+        }
+
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .replacingOccurrences(of: " ", with: "")
+        guard !normalized.isEmpty else { return nil }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.isLenient = false
+        let formats = ["H:mm", "HH:mm", "H", "h:mma", "ha"]
+
+        for format in formats {
+            formatter.dateFormat = format
+            guard let parsedTime = formatter.date(from: normalized) else { continue }
+
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timeZone
+            let timeComponents = calendar.dateComponents([.hour, .minute], from: parsedTime)
+            var resetComponents = calendar.dateComponents([.year, .month, .day], from: referenceDate)
+            resetComponents.hour = timeComponents.hour
+            resetComponents.minute = timeComponents.minute ?? 0
+            resetComponents.second = 0
+
+            guard var resetAt = calendar.date(from: resetComponents) else { continue }
+            if resetAt.addingTimeInterval(60) < referenceDate,
+               let nextDay = calendar.date(byAdding: .day, value: 1, to: resetAt) {
+                resetAt = nextDay
+            }
+            return resetAt
+        }
+
         return nil
     }
 

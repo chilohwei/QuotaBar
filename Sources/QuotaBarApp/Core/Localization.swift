@@ -77,6 +77,7 @@ enum AppString: String {
     case language
     case launchAtLogin
     case launchAtLoginFailedTitle
+    case localToolModification
     case nearLimit
     case noQuota
     case normal
@@ -231,11 +232,11 @@ struct AppText {
     func updateAvailableMessage(version: String, currentVersion: String) -> String {
         switch language {
         case .english:
-            return "QuotaBar \(version) is available. Current version: \(currentVersion). Download, install, and restart now?"
+            return "QuotaBar \(version) is available. Current version: \(currentVersion). This unsigned build is distributed through GitHub Releases/Homebrew; macOS may require right-click Open or manual quarantine removal after installation. Download, install, and restart now?"
         case .simplifiedChinese:
-            return "发现 QuotaBar \(version)。当前版本：\(currentVersion)。是否立即下载、安装并重启？"
+            return "发现 QuotaBar \(version)。当前版本：\(currentVersion)。当前版本通过 GitHub Releases/Homebrew 分发且未做 Developer ID 签名，安装后 macOS 可能需要右键打开或手动移除 quarantine。是否立即下载、安装并重启？"
         case .traditionalChinese:
-            return "發現 QuotaBar \(version)。目前版本：\(currentVersion)。是否立即下載、安裝並重啟？"
+            return "發現 QuotaBar \(version)。目前版本：\(currentVersion)。目前版本透過 GitHub Releases/Homebrew 分發且未做 Developer ID 簽名，安裝後 macOS 可能需要右鍵打開或手動移除 quarantine。是否立即下載、安裝並重啟？"
         }
     }
 
@@ -261,6 +262,39 @@ struct AppText {
         }
     }
 
+    func currentVersionLabel(_ version: String) -> String {
+        switch language {
+        case .english:
+            return "Current \(version)"
+        case .simplifiedChinese:
+            return "当前版本 \(version)"
+        case .traditionalChinese:
+            return "目前版本 \(version)"
+        }
+    }
+
+    func updateAvailableLabel(_ version: String) -> String {
+        switch language {
+        case .english:
+            return "New \(version)"
+        case .simplifiedChinese:
+            return "新版本 \(version)"
+        case .traditionalChinese:
+            return "新版本 \(version)"
+        }
+    }
+
+    var localToolModificationDescription: String {
+        switch language {
+        case .english:
+            return "Allows account switching and token writes to local tool configs."
+        case .simplifiedChinese:
+            return "用于切换账号、写回 token 和安装 Claude Code 状态栏。"
+        case .traditionalChinese:
+            return "用於切換帳號、寫回 token 和安裝 Claude Code 狀態列。"
+        }
+    }
+
     func launchAtLoginFailedMessage(_ error: String) -> String {
         switch language {
         case .english:
@@ -269,6 +303,17 @@ struct AppText {
             return "无法更新开机自启设置：\(error)"
         case .traditionalChinese:
             return "無法更新開機自啟設定：\(error)"
+        }
+    }
+
+    func localToolModificationDisabledMessage(tool: ToolKind) -> String {
+        switch language {
+        case .english:
+            return "Local tool configuration changes are disabled. Enable this in Settings before switching the \(tool.displayName) account."
+        case .simplifiedChinese:
+            return "本地工具配置写入已关闭。请先在设置中开启后再切换 \(tool.displayName) 账号。"
+        case .traditionalChinese:
+            return "本機工具設定寫入已關閉。請先在設定中開啟後再切換 \(tool.displayName) 帳號。"
         }
     }
 
@@ -539,6 +584,7 @@ struct AppText {
             .language: "语言",
             .launchAtLogin: "开机自启",
             .launchAtLoginFailedTitle: "开机自启设置失败",
+            .localToolModification: "允许修改工具配置",
             .nearLimit: "偏低",
             .noQuota: "无额度",
             .normal: "正常",
@@ -597,6 +643,7 @@ struct AppText {
             .language: "語言",
             .launchAtLogin: "開機自啟",
             .launchAtLoginFailedTitle: "開機自啟設定失敗",
+            .localToolModification: "允許修改工具設定",
             .nearLimit: "偏低",
             .noQuota: "無額度",
             .normal: "正常",
@@ -655,6 +702,7 @@ struct AppText {
             .language: "Language",
             .launchAtLogin: "Launch at Login",
             .launchAtLoginFailedTitle: "Launch at Login Failed",
+            .localToolModification: "Allow Tool Config Writes",
             .nearLimit: "Low",
             .noQuota: "No quota",
             .normal: "OK",

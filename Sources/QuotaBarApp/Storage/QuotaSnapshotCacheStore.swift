@@ -20,6 +20,7 @@ struct QuotaSnapshotCacheStore: Sendable {
             String(data: data, encoding: .utf8) ?? "{}",
             to: cachePath(accountID: accountID)
         )
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cachePath(accountID: accountID))
     }
 
     func delete(accountID: UUID) throws {

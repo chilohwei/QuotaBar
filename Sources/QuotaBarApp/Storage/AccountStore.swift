@@ -95,5 +95,6 @@ actor AccountStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(state)
         try data.write(to: AppPaths.accountsFile, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: AppPaths.accountsFile.path)
     }
 }

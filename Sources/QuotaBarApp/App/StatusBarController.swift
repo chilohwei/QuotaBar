@@ -68,6 +68,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
         configureStatusItem()
         configureDashboardPanel()
+        performUpdateCheck(showFeedback: false)
     }
 
     func shutdown() {
@@ -154,7 +155,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private func configureDashboardPanel() {
         let host = NSHostingController(
             rootView: DashboardView(appState: appState)
-                .frame(width: DashboardLayout.panelWidth, height: DashboardLayout.fixedPanelHeight)
+                .frame(width: DashboardLayout.panelWidth, height: DashboardLayout.preferredPanelHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         )
         host.view.frame = NSRect(origin: .zero, size: DashboardLayout.panelSize)

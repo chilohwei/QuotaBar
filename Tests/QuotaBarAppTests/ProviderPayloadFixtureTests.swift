@@ -453,6 +453,99 @@ struct ProviderPayloadFixtureTests {
         #expect(ClaudeCodeProvider().shouldUseStatusLineSnapshotForTesting(status) == true)
     }
 
+    @Test("Claude local rate-limit transcript overrides stale statusLine percentage")
+    func claudeRateLimitTranscriptOverridesStatusLine() throws {
+        let status = try jsonDictionary("""
+        {
+          "rate_limits": {
+            "five_hour": {
+              "used_percentage": 71,
+              "resets_at": 1782733800
+            },
+            "seven_day": {
+              "used_percentage": 12,
+              "resets_at": 1783242000
+            }
+          }
+        }
+        """)
+        let rateLimitLine = """
+        {"type":"assistant","timestamp":"2026-06-29T10:40:27.000Z","message":{"content":[{"type":"text","text":"Usage limit reached · resets at 7:50 PM (Asia/Shanghai)"}]},"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}
+        """
+
+        let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
+            status,
+            capturedAt: Date(timeIntervalSince1970: 1_782_730_800),
+            now: Date(timeIntervalSince1970: 1_782_730_800),
+            rateLimitTranscriptLine: rateLimitLine
+        )
+
+        #expect(snapshot.primary?.used == 100)
+        #expect(snapshot.primary?.resetAt == Date(timeIntervalSince1970: 1_782_733_800))
+        #expect(snapshot.secondary?.used == 12)
+        #expect(snapshot.isQuotaBlocked == true)
+        #expect(snapshot.statusBarMetric?.ratio == 0)
+        #expect(snapshot.note?.contains("Usage limit reached") == true)
+    }
+
+    @Test("Claude expired local rate-limit transcript does not override current statusLine")
+    func claudeExpiredRateLimitTranscriptDoesNotOverrideStatusLine() throws {
+        let status = try jsonDictionary("""
+        {
+          "rate_limits": {
+            "five_hour": {
+              "used_percentage": 71,
+              "resets_at": 1782733800
+            }
+          }
+        }
+        """)
+        let rateLimitLine = """
+        {"type":"assistant","timestamp":"2026-06-29T04:00:00.000Z","message":{"content":[{"type":"text","text":"You've hit your session limit · resets 3pm (Asia/Shanghai)"}]},"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}
+        """
+
+        let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
+            status,
+            capturedAt: Date(timeIntervalSince1970: 1_782_730_800),
+            now: Date(timeIntervalSince1970: 1_782_730_800),
+            rateLimitTranscriptLine: rateLimitLine
+        )
+
+        #expect(snapshot.primary?.used == 71)
+        #expect(snapshot.isQuotaBlocked == false)
+    }
+
+    @Test("Claude transcript that only mentions a limit in text does not force a block")
+    func claudeRateLimitTextWithoutApiErrorMarkersIsIgnored() throws {
+        let status = try jsonDictionary("""
+        {
+          "rate_limits": {
+            "five_hour": {
+              "used_percentage": 40,
+              "resets_at": 1782744600
+            }
+          }
+        }
+        """)
+        // A non-error transcript line (tool output / assistant discussion / this very session)
+        // that contains the words but lacks the top-level apiErrorStatus / error / isApiErrorMessage
+        // markers of a real 429. It must NOT be treated as an active rate limit.
+        let discussionLine = """
+        {"type":"assistant","timestamp":"2026-06-29T13:39:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"You've hit your session limit · resets 7:50pm (Asia/Shanghai) — investigating why the panel shows this."}]}}
+        """
+
+        let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
+            status,
+            capturedAt: Date(timeIntervalSince1970: 1_782_740_000),
+            now: Date(timeIntervalSince1970: 1_782_740_000),
+            rateLimitTranscriptLine: discussionLine
+        )
+
+        #expect(snapshot.primary?.used == 40)
+        #expect(snapshot.isQuotaBlocked == false)
+        #expect(snapshot.note?.contains("Usage limit reached") != true)
+    }
+
     @Test("Claude OAuth usage payload maps utilization windows and blocked state")
     func claudeOAuthUsagePayload() throws {
         let payload = try jsonDictionary("""
@@ -480,7 +573,62 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.isQuotaBlocked == true)
     }
 
-    @Test("Claude statusLine payload drops expired windows instead of showing stale remaining")
+    @Test("Claude OAuth live snapshot honors active session limit even when utilization is low")
+    func claudeOAuthUsagePayloadHonorsActiveRateLimit() throws {
+        // Mirrors the real bug: the rolling-window utilization reads 71%/12% while Claude Code
+        // has logged a 429 "Usage limit reached". The live OAuth snapshot must still flip to
+        // 0% remaining / blocked instead of showing the stale 29% remaining.
+        let payload = try jsonDictionary("""
+        {
+          "five_hour": {
+            "utilization": 71,
+            "resets_at": "2026-06-29T11:50:00Z"
+          },
+          "seven_day": {
+            "utilization": 12,
+            "resets_at": "2026-07-04T09:00:00Z"
+          }
+        }
+        """)
+        let rateLimitLine = """
+        {"type":"assistant","timestamp":"2026-06-29T10:40:27.000Z","message":{"content":[{"type":"text","text":"You've hit your session limit · resets 7:50pm (Asia/Shanghai)"}]},"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}
+        """
+
+        let snapshot = ClaudeCodeProvider().parseOAuthUsagePayloadForTesting(
+            payload,
+            now: Date(timeIntervalSince1970: 1_782_730_800),
+            rateLimitTranscriptLine: rateLimitLine
+        )
+
+        #expect(snapshot.primary?.used == 100)
+        #expect(snapshot.isQuotaBlocked == true)
+        #expect(snapshot.statusBarMetric?.ratio == 0)
+        #expect(snapshot.note?.contains("Usage limit reached") == true)
+        // The weekly window is a separate limit and should keep its real utilization.
+        #expect(snapshot.secondary?.used == 12)
+    }
+
+    @Test("Claude OAuth live snapshot keeps utilization when no active rate limit")
+    func claudeOAuthUsagePayloadWithoutRateLimitKeepsUtilization() throws {
+        let payload = try jsonDictionary("""
+        {
+          "five_hour": {
+            "utilization": 71,
+            "resets_at": "2026-06-29T11:50:00Z"
+          }
+        }
+        """)
+
+        let snapshot = ClaudeCodeProvider().parseOAuthUsagePayloadForTesting(
+            payload,
+            now: Date(timeIntervalSince1970: 1_782_730_800)
+        )
+
+        #expect(snapshot.primary?.used == 71)
+        #expect(snapshot.isQuotaBlocked == false)
+    }
+
+    @Test("Claude statusLine payload drops an expired window instead of showing stale or invented data")
     func claudeStatusLinePayloadDropsExpiredWindows() throws {
         let status = try jsonDictionary("""
         {
@@ -497,15 +645,19 @@ struct ProviderPayloadFixtureTests {
         }
         """)
 
+        let now = Date(timeIntervalSince1970: 1_782_612_000)
         let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
             status,
             capturedAt: Date(timeIntervalSince1970: 1_780_000_000),
-            now: Date(timeIntervalSince1970: 1_782_612_000)
+            now: now
         )
 
+        // The expired 5h window has no truthful current value from the frozen statusLine, so it is
+        // dropped — never shown as the stale 8% nor invented as full. The fresh 7d window remains.
         #expect(snapshot.primary == nil)
+        #expect(snapshot.secondary?.used == 31)
         #expect(snapshot.note?.contains("过期") == true)
-        #expect(QuotaFreshness.isStale(snapshot, now: Date(timeIntervalSince1970: 1_782_612_000)))
+        #expect(QuotaFreshness.isStale(snapshot, now: now))
     }
 
     @Test("Claude third party payload keeps provider identity without context panel")

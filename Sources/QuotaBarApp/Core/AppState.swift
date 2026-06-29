@@ -20,6 +20,7 @@ final class AppState: ObservableObject {
     @Published var isRefreshOnOpenEnabled: Bool = AppPreferences.refreshOnOpenEnabled
     @Published var recommendationStrategy: AccountRecommendationStrategy = AppPreferences.recommendationStrategy
     @Published var menuBarVisibleTools: Set<ToolKind> = AppPreferences.menuBarVisibleTools
+    @Published var isLocalToolModificationEnabled: Bool = AppPreferences.localToolModificationEnabled
 
     private let accountStore = AccountStore()
     private let secretStore = SecretStoreService()
@@ -218,6 +219,7 @@ final class AppState: ObservableObject {
         Task {
             do {
                 AppLog.account.info("Activating account \(account.id.uuidString, privacy: .public) for \(account.tool.rawValue, privacy: .public)")
+                try requireLocalToolModificationEnabled(for: account.tool)
                 let secret = try await resolveSecret(for: account, provider: provider)
                 let refreshedSecret = try await provider.refreshSecretIfNeeded(secret)
                 if refreshedSecret != secret {
@@ -372,6 +374,12 @@ final class AppState: ObservableObject {
         AppPreferences.setRefreshOnOpenEnabled(enabled)
     }
 
+    func setLocalToolModificationEnabled(_ enabled: Bool) {
+        guard isLocalToolModificationEnabled != enabled else { return }
+        isLocalToolModificationEnabled = enabled
+        AppPreferences.setLocalToolModificationEnabled(enabled)
+    }
+
     func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {
         guard recommendationStrategy != strategy else { return }
         recommendationStrategy = strategy
@@ -439,6 +447,7 @@ final class AppState: ObservableObject {
             let syncedDuplicate = accounts.first(where: { $0.id == duplicate.id }) ?? resolvedDuplicate
             if let active = accounts.first(where: { $0.id == duplicate.id }) {
                 if applyToTool, activeAccountByTool[tool] == active.id {
+                    try requireLocalToolModificationEnabled(for: tool)
                     try await provider.activate(account: active, secret: secret)
                 }
             }
@@ -470,6 +479,7 @@ final class AppState: ObservableObject {
         try await persistState()
 
         if applyToTool, activeAccountByTool[tool] == account.id {
+            try requireLocalToolModificationEnabled(for: tool)
             try await provider.activate(account: account, secret: secret)
         }
 
@@ -691,7 +701,9 @@ final class AppState: ObservableObject {
 
             if let refreshed = try? await provider.refreshSecretIfNeeded(secret) {
                 if refreshed != secret {
-                    try? await provider.updateCurrentCredentials(refreshed)
+                    if isLocalToolModificationEnabled {
+                        try? await provider.updateCurrentCredentials(refreshed)
+                    }
                 }
                 secret = refreshed
             }
@@ -770,12 +782,14 @@ final class AppState: ObservableObject {
     }
 
     private func applyActiveSelectionsToInstalledTools() async {
+        guard isLocalToolModificationEnabled else { return }
         for tool in supportedToolsPrioritizingSelectedTool {
             await applyActiveSelectionToInstalledTool(tool)
         }
     }
 
     private func applyActiveSelectionToInstalledTool(_ tool: ToolKind) async {
+        guard isLocalToolModificationEnabled else { return }
         guard let account = activeAccount(for: tool) else { return }
         let provider = provider(for: tool)
         do {
@@ -836,7 +850,9 @@ final class AppState: ObservableObject {
 
             if let refreshed = try? await provider.refreshSecretIfNeeded(secret) {
                 if refreshed != secret {
-                    try? await provider.updateCurrentCredentials(refreshed)
+                    if isLocalToolModificationEnabled {
+                        try? await provider.updateCurrentCredentials(refreshed)
+                    }
                 }
                 secret = refreshed
             }
@@ -1090,6 +1106,12 @@ final class AppState: ObservableObject {
         supportedTools.contains(tool)
     }
 
+    private func requireLocalToolModificationEnabled(for tool: ToolKind) throws {
+        guard isLocalToolModificationEnabled else {
+            throw ProviderError.unsupported(text.localToolModificationDisabledMessage(tool: tool))
+        }
+    }
+
     private func persistRefreshedSecret(
         _ secret: String,
         previousSecret: String,
@@ -1101,6 +1123,7 @@ final class AppState: ObservableObject {
         if shouldStoreSecretInKeychain(for: account.tool) {
             try secretStore.saveSecret(secret, accountKey: secretStoreKey(for: account.id))
         }
+        guard isLocalToolModificationEnabled else { return }
         try await provider.persistRefreshedSecret(secret, for: account, isActive: isActive)
         if isActive {
             try await provider.updateCurrentCredentials(secret)
@@ -1352,11 +1375,16 @@ final class AppState: ObservableObject {
 
 private enum AppPreferences {
     private static let refreshOnOpenKey = "QuotaBar.RefreshOnOpenEnabled"
+    private static let localToolModificationKey = "QuotaBar.LocalToolModificationEnabled"
     private static let recommendationStrategyKey = "QuotaBar.RecommendationStrategy"
     private static let menuBarVisibleToolsKey = "QuotaBar.MenuBarVisibleTools"
 
     static var refreshOnOpenEnabled: Bool {
         bool(forKey: refreshOnOpenKey, defaultValue: true)
+    }
+
+    static var localToolModificationEnabled: Bool {
+        bool(forKey: localToolModificationKey, defaultValue: true)
     }
 
     static var menuBarVisibleTools: Set<ToolKind> {
@@ -1382,6 +1410,10 @@ private enum AppPreferences {
 
     static func setRefreshOnOpenEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: refreshOnOpenKey)
+    }
+
+    static func setLocalToolModificationEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: localToolModificationKey)
     }
 
     static func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {

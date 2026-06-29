@@ -189,7 +189,16 @@ SWIFT
 
 write_icns() {
     local output="$1"
-    /usr/bin/iconutil -c icns "$ICONSET_DIR" -o "$output"
+    if /usr/bin/iconutil -c icns "$ICONSET_DIR" -o "$output"; then
+        return 0
+    fi
+
+    echo "Warning: iconutil failed; falling back to tiff2icns." >&2
+    tiff2icns "$ICONSET_DIR/icon_512x512@2x.png" "$output"
+    if [[ ! -s "$output" ]]; then
+        echo "Failed to create app icon: $output" >&2
+        return 1
+    fi
 }
 
 render_dmg_background() {
@@ -458,6 +467,10 @@ create_app() {
     chmod +x "$app_dir/Contents/MacOS/$APP_NAME"
     ditto "$resource_bundle" "$app_dir/Contents/Resources/QuotaBar_QuotaBarApp.bundle"
     write_icns "$app_dir/Contents/Resources/$ICON_FILE_NAME"
+    if [[ ! -s "$app_dir/Contents/Resources/$ICON_FILE_NAME" ]]; then
+        echo "Missing app icon: $app_dir/Contents/Resources/$ICON_FILE_NAME" >&2
+        exit 1
+    fi
     write_plist "$app_dir"
 
     local codesign_args=(--force --deep --sign "$SIGNING_IDENTITY")
@@ -485,6 +498,7 @@ create_dmg() {
     rm -rf "$staging_dir"
     rm -f "$temp_dmg"
     rm -f "$dmg_path"
+    rm -f "$dmg_path.sha256"
     mkdir -p "$staging_dir/.background"
 
     ditto "$app_dir" "$staging_dir/$APP_NAME.app"
@@ -492,14 +506,24 @@ create_dmg() {
     render_dmg_background "$staging_dir/.background/background.png"
 
     if skip_dmg_layout; then
-        hdiutil create \
+        if ! hdiutil create \
             -volname "$volume_name" \
             -srcfolder "$staging_dir" \
             -ov \
             -fs HFS+ \
             -format UDZO \
             -imagekey zlib-level=9 \
-            "$dmg_path" >/dev/null
+            "$dmg_path" >/dev/null; then
+            rm -rf "$staging_dir"
+            echo "Failed to create DMG: $dmg_path" >&2
+            return 1
+        fi
+
+        if [[ ! -f "$dmg_path" ]]; then
+            rm -rf "$staging_dir"
+            echo "Failed to create DMG: $dmg_path" >&2
+            return 1
+        fi
 
         rm -rf "$staging_dir"
         shasum -a 256 "$dmg_path" | awk '{print $1}' > "$dmg_path.sha256"

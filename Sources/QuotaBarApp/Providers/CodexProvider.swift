@@ -79,21 +79,12 @@ struct CodexProvider: Provider {
 
     private static let fallbackQuotaCacheAge: TimeInterval = 24 * 60 * 60
     private static let maxNetworkAttempts = 3
+    private static let httpClient = QuotaHTTPClient(session: liveSession, maxAttempts: maxNetworkAttempts)
 
     private struct CachedQuotaSnapshot: Codable {
         let schemaVersion: Int
         let cachedAt: Date
         let snapshot: QuotaSnapshot
-    }
-
-    private struct HTTPRequestFailure: LocalizedError {
-        let operation: String
-        let statusCode: Int
-        let isRetryable: Bool
-
-        var errorDescription: String? {
-            "\(operation) 失败，HTTP \(statusCode)"
-        }
     }
 
     func importCurrentCredentials() async throws -> String {
@@ -118,7 +109,7 @@ struct CodexProvider: Provider {
     }
 
     func isAuthenticationFailure(_ error: Error) -> Bool {
-        if let failure = error as? HTTPRequestFailure {
+        if let failure = error as? QuotaHTTPError {
             return failure.statusCode == 401
         }
         return false
@@ -1037,43 +1028,7 @@ struct CodexProvider: Provider {
     }
 
     private func dataWithRetry(for request: URLRequest, operation: String) async throws -> Data {
-        var lastError: Error?
-
-        for attempt in 0 ..< Self.maxNetworkAttempts {
-            do {
-                let (data, response) = try await Self.liveSession.data(for: request)
-                guard let http = response as? HTTPURLResponse else {
-                    throw ProviderError.network("\(operation)失败：无 HTTP 响应")
-                }
-
-                if 200 ..< 300 ~= http.statusCode {
-                    return data
-                }
-
-                let retryable = isRetryableHTTPStatus(http.statusCode)
-                let failure = HTTPRequestFailure(
-                    operation: operation,
-                    statusCode: http.statusCode,
-                    isRetryable: retryable
-                )
-                guard retryable, attempt < Self.maxNetworkAttempts - 1 else {
-                    throw failure
-                }
-                lastError = failure
-            } catch {
-                if error is CancellationError {
-                    throw error
-                }
-                if !isRetryableNetworkError(error) || attempt >= Self.maxNetworkAttempts - 1 {
-                    throw error
-                }
-                lastError = error
-            }
-
-            try await Task.sleep(nanoseconds: retryDelayNanoseconds(for: attempt))
-        }
-
-        throw lastError ?? ProviderError.network("\(operation)失败")
+        try await Self.httpClient.data(for: request, operation: operation)
     }
 
     private func isRetryableHTTPStatus(_ statusCode: Int) -> Bool {
@@ -1085,34 +1040,7 @@ struct CodexProvider: Provider {
             return false
         }
 
-        if let failure = error as? HTTPRequestFailure {
-            return failure.isRetryable
-        }
-
-        guard let urlError = error as? URLError else {
-            return false
-        }
-
-        switch urlError.code {
-        case .timedOut,
-             .cannotFindHost,
-             .cannotConnectToHost,
-             .networkConnectionLost,
-             .dnsLookupFailed,
-             .notConnectedToInternet,
-             .resourceUnavailable,
-             .secureConnectionFailed,
-             .serverCertificateHasBadDate,
-             .serverCertificateUntrusted,
-             .serverCertificateHasUnknownRoot,
-             .serverCertificateNotYetValid,
-             .clientCertificateRejected,
-             .clientCertificateRequired,
-             .appTransportSecurityRequiresSecureConnection:
-            return true
-        default:
-            return false
-        }
+        return QuotaHTTPClient.isRetryableNetworkError(error)
     }
 
     private func shouldTreatAsTransientNetworkError(_ error: Error) -> Bool {
@@ -1168,7 +1096,7 @@ struct CodexProvider: Provider {
         }
 
         if isRetryableHTTPStatus(http.statusCode) {
-            throw HTTPRequestFailure(
+            throw QuotaHTTPError(
                 operation: "Codex token 刷新",
                 statusCode: http.statusCode,
                 isRetryable: true
@@ -1204,7 +1132,7 @@ struct CodexProvider: Provider {
                 guard shouldRetry, attempt < Self.maxNetworkAttempts - 1 else {
                     return (data, http)
                 }
-                lastError = HTTPRequestFailure(
+                lastError = QuotaHTTPError(
                     operation: "Codex token 刷新",
                     statusCode: http.statusCode,
                     isRetryable: true
@@ -1710,6 +1638,7 @@ struct CodexProvider: Provider {
     }
 
     private func resolveUsageURL(codexHomePath: String?) -> URL {
+        let fallback = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
         let configuredBase: String?
         if let codexHomePath {
             configuredBase = try? String(contentsOfFile: "\(codexHomePath)/config.toml", encoding: .utf8)
@@ -1726,13 +1655,29 @@ struct CodexProvider: Provider {
             base.removeLast()
         }
 
+        guard let baseURL = URL(string: base),
+              Self.isTrustedOAuthUsageHost(baseURL.host) else {
+            if configuredBase != nil {
+                AppLog.refresh.warning("Ignoring non-official Codex chatgpt_base_url for OAuth usage request")
+            }
+            return fallback
+        }
+
         if (base.hasPrefix("https://chatgpt.com") || base.hasPrefix("https://chat.openai.com")),
            !base.contains("/backend-api") {
             base += "/backend-api"
         }
 
         let path = base.contains("/backend-api") ? "/wham/usage" : "/api/codex/usage"
-        return URL(string: base + path) ?? URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+        return URL(string: base + path) ?? fallback
+    }
+
+    private static func isTrustedOAuthUsageHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return host == "chatgpt.com"
+            || host.hasSuffix(".chatgpt.com")
+            || host == "chat.openai.com"
+            || host.hasSuffix(".chat.openai.com")
     }
 
     private func resolveSubscriptionURL(codexHomePath: String?) -> URL {

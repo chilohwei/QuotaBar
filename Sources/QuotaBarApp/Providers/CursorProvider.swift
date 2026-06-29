@@ -43,6 +43,7 @@ struct CursorProvider: Provider {
 
     private static let fallbackQuotaCacheAge: TimeInterval = 24 * 60 * 60
     private static let maxNetworkAttempts = 3
+    private static let httpClient = QuotaHTTPClient(maxAttempts: maxNetworkAttempts)
     private static let includedUsageKeys: Set<String> = [
         "planUsage",
         "plan_usage",
@@ -186,16 +187,6 @@ struct CursorProvider: Provider {
         let snapshot: QuotaSnapshot
     }
 
-    private struct HTTPRequestFailure: LocalizedError {
-        let operation: String
-        let statusCode: Int
-        let isRetryable: Bool
-
-        var errorDescription: String? {
-            "\(operation)失败，HTTP \(statusCode)"
-        }
-    }
-
     private struct CursorStateSnapshot {
         let directoryPath: String
         let databasePath: String
@@ -337,7 +328,7 @@ struct CursorProvider: Provider {
     }
 
     func isAuthenticationFailure(_ error: Error) -> Bool {
-        if let failure = error as? HTTPRequestFailure {
+        if let failure = error as? QuotaHTTPError {
             return failure.statusCode == 401
         }
         return false
@@ -1639,68 +1630,11 @@ struct CursorProvider: Provider {
     }
 
     private func dataWithRetry(for request: URLRequest, operation: String) async throws -> Data {
-        var lastError: Error?
-        for attempt in 0 ..< Self.maxNetworkAttempts {
-            do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse else {
-                    throw ProviderError.network("\(operation)失败：无 HTTP 响应")
-                }
-                if 200 ..< 300 ~= http.statusCode {
-                    return data
-                }
-                let retryable = http.statusCode == 408 || http.statusCode == 429 || (500 ... 599).contains(http.statusCode)
-                let failure = HTTPRequestFailure(
-                    operation: operation,
-                    statusCode: http.statusCode,
-                    isRetryable: retryable
-                )
-                guard retryable, attempt < Self.maxNetworkAttempts - 1 else {
-                    throw failure
-                }
-                lastError = failure
-            } catch {
-                if error is CancellationError {
-                    throw error
-                }
-                guard isRetryableNetworkError(error), attempt < Self.maxNetworkAttempts - 1 else {
-                    throw error
-                }
-                lastError = error
-            }
-
-            let seconds = [0.35, 0.9, 1.8][min(attempt, 2)]
-            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-        }
-        throw lastError ?? ProviderError.network("\(operation)失败")
+        try await Self.httpClient.data(for: request, operation: operation)
     }
 
     private func isRetryableNetworkError(_ error: Error) -> Bool {
-        if error is CancellationError { return false }
-        if let failure = error as? HTTPRequestFailure {
-            return failure.isRetryable
-        }
-        guard let urlError = error as? URLError else { return false }
-        switch urlError.code {
-        case .timedOut,
-             .cannotFindHost,
-             .cannotConnectToHost,
-             .networkConnectionLost,
-             .dnsLookupFailed,
-             .notConnectedToInternet,
-             .resourceUnavailable,
-             .secureConnectionFailed,
-             .serverCertificateHasBadDate,
-             .serverCertificateUntrusted,
-             .serverCertificateHasUnknownRoot,
-             .serverCertificateNotYetValid,
-             .clientCertificateRejected,
-             .clientCertificateRequired,
-             .appTransportSecurityRequiresSecureConnection:
-            return true
-        default:
-            return false
-        }
+        QuotaHTTPClient.isRetryableNetworkError(error)
     }
 
     private func shouldUseCachedQuota(for error: Error) -> Bool {

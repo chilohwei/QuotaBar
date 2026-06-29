@@ -7,6 +7,7 @@ enum UpdateCheckResult: Sendable {
 }
 
 struct UpdateRelease: Sendable {
+    let tagName: String
     let version: String
     let currentVersion: String
     let releaseURL: URL
@@ -36,6 +37,7 @@ enum UpdateServiceError: LocalizedError {
     case digestMismatch(expected: String, actual: String)
     case installLocationNotWritable(String)
     case installerLaunchFailed(String)
+    case untrustedReleaseSource(String)
 
     var errorDescription: String? {
         switch self {
@@ -59,7 +61,37 @@ enum UpdateServiceError: LocalizedError {
             return "安装目录不可写：\(path)"
         case .installerLaunchFailed(let message):
             return "无法启动安装程序：\(message)"
+        case .untrustedReleaseSource(let value):
+            return "更新来源不是 QuotaBar 官方 GitHub Release：\(value)"
         }
+    }
+}
+
+enum OfficialReleaseSource {
+    private static let expectedHost = "github.com"
+    private static let expectedRepositoryPath = "/chilohwei/quotabar"
+
+    static func isOfficialReleaseURL(_ url: URL, tagName: String) -> Bool {
+        guard isHTTPSGitHubURL(url) else { return false }
+        let path = url.path.lowercased()
+        let expectedPath = "\(expectedRepositoryPath)/releases/tag/\(tagName.lowercased())"
+        return path == expectedPath
+    }
+
+    static func isOfficialAssetURL(_ url: URL, tagName: String? = nil, assetName: String) -> Bool {
+        guard isHTTPSGitHubURL(url) else { return false }
+        let path = url.path.lowercased()
+        let tagSegment = tagName.map { "/\($0.lowercased())/" } ?? "/"
+        guard path.hasPrefix("\(expectedRepositoryPath)/releases/download/"),
+              path.contains(tagSegment) else {
+            return false
+        }
+        return url.lastPathComponent == assetName
+    }
+
+    private static func isHTTPSGitHubURL(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https"
+            && url.host?.lowercased() == expectedHost
     }
 }
 
@@ -81,23 +113,30 @@ struct UpdateService: Sendable {
         guard let releaseURL = URL(string: release.htmlURL) else {
             throw UpdateServiceError.invalidReleaseURL
         }
+        guard OfficialReleaseSource.isOfficialReleaseURL(releaseURL, tagName: release.tagName) else {
+            throw UpdateServiceError.untrustedReleaseSource(release.htmlURL)
+        }
         guard let asset = release.bestAssetForCurrentMac else {
             throw UpdateServiceError.missingReleaseAsset
         }
         guard let assetURL = URL(string: asset.browserDownloadURL) else {
             throw UpdateServiceError.invalidAssetURL
         }
+        guard OfficialReleaseSource.isOfficialAssetURL(assetURL, tagName: release.tagName, assetName: asset.name) else {
+            throw UpdateServiceError.untrustedReleaseSource(asset.browserDownloadURL)
+        }
         let assetDigest: String
         if let rawDigest = asset.digest {
             assetDigest = try ReleaseAssetDigest.sha256Hex(from: rawDigest)
         } else if let digestAsset = release.sha256Asset(for: asset) {
-            assetDigest = try await fetchReleaseAssetDigest(digestAsset)
+            assetDigest = try await fetchReleaseAssetDigest(digestAsset, tagName: release.tagName)
         } else {
             throw UpdateServiceError.missingAssetDigest(asset.name)
         }
         AppLog.update.info("Update available, version=\(latestVersion, privacy: .public), asset=\(asset.name, privacy: .public)")
 
         return .updateAvailable(UpdateRelease(
+            tagName: release.tagName,
             version: latestVersion,
             currentVersion: currentVersion,
             releaseURL: releaseURL,
@@ -112,6 +151,9 @@ struct UpdateService: Sendable {
         progress: (@Sendable (UpdateDownloadProgress) -> Void)? = nil
     ) async throws {
         AppLog.update.info("Starting update install, version=\(release.version, privacy: .public), asset=\(release.assetName, privacy: .public)")
+        guard OfficialReleaseSource.isOfficialAssetURL(release.assetURL, tagName: release.tagName, assetName: release.assetName) else {
+            throw UpdateServiceError.untrustedReleaseSource(release.assetURL.absoluteString)
+        }
         let downloadURL = try await downloadReleaseAsset(release, progress: progress)
         try verifyDownloadedAsset(at: downloadURL, digest: release.assetDigest)
         let appURL = Bundle.main.bundleURL
@@ -122,13 +164,15 @@ struct UpdateService: Sendable {
         let scriptURL = try writeInstallerScript(
             dmgURL: downloadURL,
             destinationURL: destinationURL,
-            logURL: logURL
+            logURL: logURL,
+            expectedVersion: release.version
         )
         try launchInstaller(
             scriptURL: scriptURL,
             dmgURL: downloadURL,
             destinationURL: destinationURL,
-            logURL: logURL
+            logURL: logURL,
+            expectedVersion: release.version
         )
         AppLog.update.info("Launched update installer, log=\(logURL.path, privacy: .public)")
     }
@@ -181,9 +225,12 @@ struct UpdateService: Sendable {
         return destination
     }
 
-    private func fetchReleaseAssetDigest(_ asset: GitHubReleaseAsset) async throws -> String {
+    private func fetchReleaseAssetDigest(_ asset: GitHubReleaseAsset, tagName: String) async throws -> String {
         guard let url = URL(string: asset.browserDownloadURL) else {
             throw UpdateServiceError.invalidAssetURL
+        }
+        guard OfficialReleaseSource.isOfficialAssetURL(url, tagName: tagName, assetName: asset.name) else {
+            throw UpdateServiceError.untrustedReleaseSource(asset.browserDownloadURL)
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
@@ -250,7 +297,12 @@ struct UpdateService: Sendable {
         }
     }
 
-    private func writeInstallerScript(dmgURL: URL, destinationURL: URL, logURL: URL) throws -> URL {
+    private func writeInstallerScript(
+        dmgURL: URL,
+        destinationURL: URL,
+        logURL: URL,
+        expectedVersion: String
+    ) throws -> URL {
         let script = #"""
 #!/bin/zsh
 set -euo pipefail
@@ -259,6 +311,7 @@ DMG="$1"
 DEST="$2"
 OLD_PID="$3"
 LOG="$4"
+EXPECTED_VERSION="$5"
 MOUNT_DIR=""
 
 exec >>"$LOG" 2>&1
@@ -316,12 +369,17 @@ if [[ "$ACTUAL_BUNDLE_ID" != "com.chiloh.QuotaBar" ]]; then
     echo "Unexpected bundle identifier: ${ACTUAL_BUNDLE_ID:-missing}"
     exit 1
 fi
+ACTUAL_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$TMP_DEST/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]]; then
+    echo "Unexpected bundle version: ${ACTUAL_VERSION:-missing}; expected $EXPECTED_VERSION"
+    exit 1
+fi
 if [[ ! -x "$TMP_DEST/Contents/MacOS/QuotaBar" ]]; then
     echo "QuotaBar executable missing in update bundle"
     exit 1
 fi
 codesign --verify --deep --strict "$TMP_DEST"
-xattr -dr com.apple.quarantine "$TMP_DEST" >/dev/null 2>&1 || true
+echo "Quarantine attributes are preserved for unsigned/Homebrew distribution."
 
 if [[ -e "$DEST" ]]; then
     mv "$DEST" "$BACKUP_DEST"
@@ -349,7 +407,13 @@ echo "QuotaBar update install completed at $(date)"
         return scriptURL
     }
 
-    private func launchInstaller(scriptURL: URL, dmgURL: URL, destinationURL: URL, logURL: URL) throws {
+    private func launchInstaller(
+        scriptURL: URL,
+        dmgURL: URL,
+        destinationURL: URL,
+        logURL: URL,
+        expectedVersion: String
+    ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = [
@@ -357,7 +421,8 @@ echo "QuotaBar update install completed at $(date)"
             dmgURL.path,
             destinationURL.path,
             String(ProcessInfo.processInfo.processIdentifier),
-            logURL.path
+            logURL.path,
+            expectedVersion
         ]
 
         do {

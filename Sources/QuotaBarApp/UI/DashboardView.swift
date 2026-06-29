@@ -6,6 +6,7 @@ enum DashboardLayout {
     static let sidebarWidth: CGFloat = 54
     static let panelWidth: CGFloat = contentWidth
     static let fixedPanelHeight: CGFloat = 620
+    static let minimumUsablePanelHeight: CGFloat = 360
     static let accountCardHeight: CGFloat = 144
     static let accountCardSpacing: CGFloat = 10
     static let maxVisibleAccountCards = 3
@@ -22,7 +23,13 @@ enum DashboardLayout {
     }
 
     static var panelSize: NSSize {
-        NSSize(width: panelWidth, height: fixedPanelHeight)
+        NSSize(width: panelWidth, height: preferredPanelHeight)
+    }
+
+    static var preferredPanelHeight: CGFloat {
+        let availableHeight = (NSScreen.main?.visibleFrame.height ?? fixedPanelHeight) - 28
+        guard availableHeight > 0 else { return fixedPanelHeight }
+        return min(fixedPanelHeight, max(minimumUsablePanelHeight, availableHeight))
     }
 
     static let accountListHeight = maxAccountListHeight
@@ -71,16 +78,16 @@ struct DashboardView: View {
     }
 
     private var preferredPanelHeight: CGFloat {
-        DashboardLayout.fixedPanelHeight
+        DashboardLayout.preferredPanelHeight
     }
 
     private var accountListHeight: CGFloat {
         let updateNoticeReserve = shouldShowUpdateNotice
             ? DashboardLayout.updateNoticeHeight + DashboardLayout.stackSpacing
             : 0
-        let minimumUsefulHeight = CGFloat(DashboardLayout.maxVisibleAccountCards - 1) * DashboardLayout.accountCardHeight
-            + CGFloat(DashboardLayout.maxVisibleAccountCards - 2) * DashboardLayout.accountCardSpacing
-        return max(DashboardLayout.accountListHeight - updateNoticeReserve, minimumUsefulHeight)
+        let panelCompression = max(0, DashboardLayout.fixedPanelHeight - preferredPanelHeight)
+        let dynamicHeight = DashboardLayout.accountListHeight - updateNoticeReserve - panelCompression
+        return max(dynamicHeight, DashboardLayout.accountCardHeight)
     }
 
     private var isRefreshingSelectedTool: Bool {
@@ -556,12 +563,8 @@ struct DashboardView: View {
         let listHeight = accountListHeight
 
         ScrollViewReader { scrollProxy in
-            ScrollView(.vertical, showsIndicators: false) {
+            ScrollView(.vertical, showsIndicators: true) {
                 ZStack(alignment: .topLeading) {
-                    ScrollIndicatorHider()
-                        .frame(width: 0, height: 0)
-                        .allowsHitTesting(false)
-
                     if toolAccounts.isEmpty {
                         emptyState
                     } else if accounts.isEmpty {
@@ -598,7 +601,6 @@ struct DashboardView: View {
                 .id(AccountListScrollTarget.top)
                 .frame(maxWidth: .infinity, alignment: .top)
             }
-            .scrollIndicators(.never, axes: .vertical)
             .clipped()
             .frame(height: listHeight)
             .frame(maxWidth: .infinity)
@@ -781,11 +783,10 @@ struct DashboardView: View {
             Spacer()
                 .frame(height: 6)
 
-            ScrollView(.vertical, showsIndicators: false) {
+            ScrollView(.vertical, showsIndicators: true) {
                 settingsPanel
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .scrollIndicators(.never, axes: .vertical)
             .clipped()
 
             Spacer(minLength: DashboardLayout.bottomReserve)
@@ -844,10 +845,19 @@ struct DashboardView: View {
                     isOn: launchAtLoginBinding
                 )
 
+                settingsToggleRow(
+                    title: text.string(.localToolModification),
+                    subtitle: text.localToolModificationDescription,
+                    iconName: "lock.open",
+                    isOn: localToolModificationBinding
+                )
+
                 settingsActionRow(
                     title: settingsUpdateActionTitle,
+                    subtitle: settingsUpdateDetailTitle,
                     iconName: settingsUpdateIconName,
-                    isEnabled: isSettingsUpdateActionEnabled
+                    isEnabled: isSettingsUpdateActionEnabled,
+                    showsBadge: shouldShowSettingsUpdateBadge
                 ) {
                     runSettingsUpdateAction()
                 }
@@ -964,18 +974,19 @@ struct DashboardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func settingsToggleRow(title: String, iconName: String, isOn: Binding<Bool>) -> some View {
+    private func settingsToggleRow(
+        title: String,
+        subtitle: String? = nil,
+        iconName: String,
+        isOn: Binding<Bool>
+    ) -> some View {
         Button {
             isOn.wrappedValue.toggle()
         } label: {
             HStack(spacing: 8) {
                 settingsRowIcon(iconName)
 
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Branding.inkStrong)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.88)
+                settingsRowText(title: title, subtitle: subtitle, isEnabled: true)
 
                 Spacer(minLength: 8)
 
@@ -987,7 +998,7 @@ struct DashboardView: View {
             }
             .padding(.leading, 9)
             .padding(.trailing, 8)
-            .frame(height: 36)
+            .frame(height: subtitle == nil ? 36 : 48)
             .frame(maxWidth: .infinity)
             .background(settingsRowBackground)
         }
@@ -1037,21 +1048,26 @@ struct DashboardView: View {
 
     private func settingsActionRow(
         title: String,
+        subtitle: String? = nil,
         iconName: String,
         isEnabled: Bool,
+        showsBadge: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 settingsRowIcon(iconName)
 
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(isEnabled ? Branding.inkStrong : Branding.inkSubtle)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.88)
+                settingsRowText(title: title, subtitle: subtitle, isEnabled: isEnabled)
 
                 Spacer(minLength: 8)
+
+                if showsBadge {
+                    Circle()
+                        .fill(Branding.danger)
+                        .frame(width: 7, height: 7)
+                        .accessibilityHidden(true)
+                }
 
                 Image(systemName: "chevron.right")
                     .font(.system(size: 8.5, weight: .semibold))
@@ -1059,7 +1075,7 @@ struct DashboardView: View {
             }
             .padding(.leading, 9)
             .padding(.trailing, 10)
-            .frame(height: 36)
+            .frame(height: subtitle == nil ? 36 : 48)
             .frame(maxWidth: .infinity)
             .background(settingsRowBackground)
             .opacity(isEnabled ? 1 : 0.68)
@@ -1068,6 +1084,25 @@ struct DashboardView: View {
         .disabled(!isEnabled)
         .help(title)
         .accessibilityLabel(title)
+    }
+
+    private func settingsRowText(title: String, subtitle: String?, isEnabled: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isEnabled ? Branding.inkStrong : Branding.inkSubtle)
+                .lineLimit(1)
+                .minimumScaleFactor(0.88)
+
+            if let subtitle {
+                Text(subtitle)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(Branding.inkSubtle)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func settingsRowIcon(_ iconName: String) -> some View {
@@ -1098,6 +1133,14 @@ struct DashboardView: View {
         }
     }
 
+    private var localToolModificationBinding: Binding<Bool> {
+        Binding {
+            appState.isLocalToolModificationEnabled
+        } set: { enabled in
+            appState.setLocalToolModificationEnabled(enabled)
+        }
+    }
+
     private var settingsUpdateActionTitle: String {
         switch appState.updateBannerState {
         case .available:
@@ -1111,6 +1154,26 @@ struct DashboardView: View {
         case .idle:
             return text.string(.checkForUpdates)
         }
+    }
+
+    private var settingsUpdateDetailTitle: String {
+        let current = text.currentVersionLabel(currentAppVersion)
+        if case .available(let version) = appState.updateBannerState {
+            return "\(current) · \(text.updateAvailableLabel(version))"
+        }
+        return current
+    }
+
+    private var currentAppVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "0.0.0"
+    }
+
+    private var shouldShowSettingsUpdateBadge: Bool {
+        if case .available = appState.updateBannerState {
+            return true
+        }
+        return false
     }
 
     private var settingsUpdateIconName: String {
@@ -1517,97 +1580,5 @@ private struct HeaderRefreshGlyph: View {
         let progress = date.timeIntervalSinceReferenceDate
             .truncatingRemainder(dividingBy: duration) / duration
         return progress * 360
-    }
-}
-
-private struct ScrollIndicatorHider: NSViewRepresentable {
-    func makeNSView(context _: Context) -> NSView {
-        let view = ScrollIndicatorHidingView()
-        view.configureWhenReady()
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context _: Context) {
-        (nsView as? ScrollIndicatorHidingView)?.configureWhenReady()
-    }
-
-    private final class ScrollIndicatorHidingView: NSView {
-        private weak var configuredScrollView: NSScrollView?
-        private var isConfigureScheduled = false
-
-        override func viewDidMoveToSuperview() {
-            super.viewDidMoveToSuperview()
-            configureWhenReady()
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            configureWhenReady()
-        }
-
-        override func layout() {
-            super.layout()
-            configureWhenReady()
-        }
-
-        func configureWhenReady() {
-            guard !isConfigureScheduled else { return }
-            isConfigureScheduled = true
-            DispatchQueue.main.async { [weak self] in
-                self?.configureNearestScrollView()
-            }
-        }
-
-        private func configureNearestScrollView() {
-            isConfigureScheduled = false
-            guard let scrollView = enclosingScrollView ?? configuredScrollView ?? findNearestScrollView() else { return }
-            configure(scrollView)
-            configuredScrollView = scrollView
-        }
-
-        private func configure(_ scrollView: NSScrollView) {
-            scrollView.scrollerStyle = .overlay
-            scrollView.hasVerticalScroller = false
-            scrollView.hasHorizontalScroller = false
-            scrollView.verticalScroller?.alphaValue = 0
-            scrollView.horizontalScroller?.alphaValue = 0
-            scrollView.verticalScroller?.isHidden = true
-            scrollView.horizontalScroller?.isHidden = true
-            scrollView.verticalScroller = nil
-            scrollView.horizontalScroller = nil
-            scrollView.autohidesScrollers = true
-            scrollView.drawsBackground = false
-            scrollView.backgroundColor = .clear
-            scrollView.borderType = .noBorder
-            scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-            scrollView.contentView.drawsBackground = false
-            scrollView.contentView.backgroundColor = .clear
-            hideScrollerSubviews(in: scrollView)
-            scrollView.reflectScrolledClipView(scrollView.contentView)
-        }
-
-        private func findNearestScrollView() -> NSScrollView? {
-            var view: NSView? = self
-            while let current = view {
-                if let scrollView = current as? NSScrollView {
-                    return scrollView
-                }
-                if let scrollView = current.superview as? NSScrollView {
-                    return scrollView
-                }
-                view = current.superview
-            }
-            return nil
-        }
-
-        private func hideScrollerSubviews(in view: NSView) {
-            for subview in view.subviews {
-                if let scroller = subview as? NSScroller {
-                    scroller.alphaValue = 0
-                    scroller.isHidden = true
-                }
-                hideScrollerSubviews(in: subview)
-            }
-        }
     }
 }
