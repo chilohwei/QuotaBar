@@ -75,10 +75,11 @@ esac
 ASKPASS
 chmod 700 "$ASKPASS_FILE"
 
+export GIT_ASKPASS="$ASKPASS_FILE"
+export GIT_PASSWORD_FILE="$TOKEN_FILE"
+export GIT_TERMINAL_PROMPT=0
+
 TAP_DIR="$TMP_DIR/homebrew-quotabar"
-GIT_ASKPASS="$ASKPASS_FILE" \
-GIT_PASSWORD_FILE="$TOKEN_FILE" \
-GIT_TERMINAL_PROMPT=0 \
 git clone "https://github.com/${TAP_REPO}.git" "$TAP_DIR"
 git -C "$TAP_DIR" checkout "$TAP_BRANCH"
 
