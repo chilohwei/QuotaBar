@@ -79,6 +79,8 @@ jobs:
           fi
           BUILD_NUMBER="${{ steps.meta.outputs.build_number }}" \
           QUOTABAR_SKIP_REMOTE_VERSION_CHECK="$skip_check" \
+          QUOTABAR_SKIP_DMG_LAYOUT=false \
+          QUOTABAR_REQUIRE_DMG_LAYOUT=true \
           bash scripts/build_macos_app.sh \
             --arch "${{ matrix.arch }}" \
             --version "${{ steps.meta.outputs.version }}"

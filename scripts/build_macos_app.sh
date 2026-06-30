@@ -312,6 +312,10 @@ try png.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
 SWIFT
 }
 
+require_dmg_layout() {
+    [[ "${QUOTABAR_REQUIRE_DMG_LAYOUT:-false}" == true ]]
+}
+
 apply_dmg_layout() {
     local mount_dir="$1"
 
@@ -344,6 +348,10 @@ APPLESCRIPT
         if [[ "$waited" -ge 12 ]]; then
             kill "$script_pid" 2>/dev/null || true
             wait "$script_pid" 2>/dev/null || true
+            if require_dmg_layout; then
+                echo "Finder DMG layout timed out." >&2
+                return 1
+            fi
             echo "Warning: Finder DMG layout timed out; continuing with default icon layout." >&2
             return 0
         fi
@@ -352,6 +360,10 @@ APPLESCRIPT
     done
 
     wait "$script_pid" || {
+        if require_dmg_layout; then
+            echo "Finder DMG layout failed." >&2
+            return 1
+        fi
         echo "Warning: Finder DMG layout failed; continuing with default icon layout." >&2
         return 0
     }
