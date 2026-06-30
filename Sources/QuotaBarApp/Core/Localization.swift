@@ -77,7 +77,6 @@ enum AppString: String {
     case language
     case launchAtLogin
     case launchAtLoginFailedTitle
-    case localToolModification
     case nearLimit
     case noQuota
     case normal
@@ -284,17 +283,6 @@ struct AppText {
         }
     }
 
-    var localToolModificationDescription: String {
-        switch language {
-        case .english:
-            return "Allows account switching and token writes to local tool configs."
-        case .simplifiedChinese:
-            return "用于切换账号、写回 token 和安装 Claude Code 状态栏。"
-        case .traditionalChinese:
-            return "用於切換帳號、寫回 token 和安裝 Claude Code 狀態列。"
-        }
-    }
-
     func launchAtLoginFailedMessage(_ error: String) -> String {
         switch language {
         case .english:
@@ -306,14 +294,47 @@ struct AppText {
         }
     }
 
-    func localToolModificationDisabledMessage(tool: ToolKind) -> String {
+    func addAccountFailedMessage(_ error: String) -> String {
         switch language {
         case .english:
-            return "Local tool configuration changes are disabled. Enable this in Settings before switching the \(tool.displayName) account."
+            return "Add account failed: \(error)"
         case .simplifiedChinese:
-            return "本地工具配置写入已关闭。请先在设置中开启后再切换 \(tool.displayName) 账号。"
+            return "添加账号失败：\(error)"
         case .traditionalChinese:
-            return "本機工具設定寫入已關閉。請先在設定中開啟後再切換 \(tool.displayName) 帳號。"
+            return "新增帳號失敗：\(error)"
+        }
+    }
+
+    func deleteAccountFailedMessage(_ error: String) -> String {
+        switch language {
+        case .english:
+            return "Delete failed: \(error)"
+        case .simplifiedChinese:
+            return "删除失败：\(error)"
+        case .traditionalChinese:
+            return "刪除失敗：\(error)"
+        }
+    }
+
+    func switchAccountFailedMessage(_ error: String) -> String {
+        switch language {
+        case .english:
+            return "Switch failed: \(error)"
+        case .simplifiedChinese:
+            return "切换失败：\(error)"
+        case .traditionalChinese:
+            return "切換失敗：\(error)"
+        }
+    }
+
+    func refreshAccountFailedMessage(_ error: String) -> String {
+        switch language {
+        case .english:
+            return "Refresh failed: \(error)"
+        case .simplifiedChinese:
+            return "刷新失败：\(error)"
+        case .traditionalChinese:
+            return "刷新失敗：\(error)"
         }
     }
 
@@ -584,7 +605,6 @@ struct AppText {
             .language: "语言",
             .launchAtLogin: "开机自启",
             .launchAtLoginFailedTitle: "开机自启设置失败",
-            .localToolModification: "允许修改工具配置",
             .nearLimit: "偏低",
             .noQuota: "无额度",
             .normal: "正常",
@@ -643,7 +663,6 @@ struct AppText {
             .language: "語言",
             .launchAtLogin: "開機自啟",
             .launchAtLoginFailedTitle: "開機自啟設定失敗",
-            .localToolModification: "允許修改工具設定",
             .nearLimit: "偏低",
             .noQuota: "無額度",
             .normal: "正常",
@@ -702,7 +721,6 @@ struct AppText {
             .language: "Language",
             .launchAtLogin: "Launch at Login",
             .launchAtLoginFailedTitle: "Launch at Login Failed",
-            .localToolModification: "Allow Tool Config Writes",
             .nearLimit: "Low",
             .noQuota: "No quota",
             .normal: "OK",

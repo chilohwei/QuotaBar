@@ -28,6 +28,21 @@ fi
 
 VERSION="$1"
 
+if [[ ! "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-.][A-Za-z0-9._-]+)?$ ]]; then
+    echo "Invalid version: $VERSION" >&2
+    exit 1
+fi
+
+if [[ ! "$TAP_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Invalid TAP_REPO: $TAP_REPO" >&2
+    exit 1
+fi
+
+if [[ ! "$TAP_BRANCH" =~ ^[A-Za-z0-9._/-]+$ || "$TAP_BRANCH" == -* ]]; then
+    echo "Invalid TAP_BRANCH: $TAP_BRANCH" >&2
+    exit 1
+fi
+
 if [[ ! -f "$CASK_FILE" ]]; then
     echo "Missing cask file: $CASK_FILE" >&2
     exit 1
@@ -38,14 +53,33 @@ if [[ -z "$TOKEN" ]]; then
     exit 1
 fi
 
+OLD_UMASK="$(umask)"
+umask 077
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/quotabar-tap-sync.XXXXXX")"
+umask "$OLD_UMASK"
 cleanup() {
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
+TOKEN_FILE="$TMP_DIR/github-token"
+ASKPASS_FILE="$TMP_DIR/git-askpass.sh"
+printf '%s' "$TOKEN" > "$TOKEN_FILE"
+cat > "$ASKPASS_FILE" <<'ASKPASS'
+#!/usr/bin/env bash
+case "$1" in
+    *Username*) printf '%s\n' "x-access-token" ;;
+    *Password*) cat "$GIT_PASSWORD_FILE" ;;
+    *) printf '\n' ;;
+esac
+ASKPASS
+chmod 700 "$ASKPASS_FILE"
+
 TAP_DIR="$TMP_DIR/homebrew-quotabar"
-git clone "https://x-access-token:${TOKEN}@github.com/${TAP_REPO}.git" "$TAP_DIR"
+GIT_ASKPASS="$ASKPASS_FILE" \
+GIT_PASSWORD_FILE="$TOKEN_FILE" \
+GIT_TERMINAL_PROMPT=0 \
+git clone "https://github.com/${TAP_REPO}.git" "$TAP_DIR"
 git -C "$TAP_DIR" checkout "$TAP_BRANCH"
 
 mkdir -p "$TAP_DIR/Casks"

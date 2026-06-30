@@ -26,11 +26,16 @@ enum AppPaths {
 
     static func ensureDirectories() throws {
         try migrateLegacyAppSupportIfNeeded()
-        try FileManager.default.createDirectory(at: appSupportDirectory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: quotaCacheDirectory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: accountQuotaSnapshotsDirectory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: managedProfilesDirectory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: managedCodexHomesDirectory, withIntermediateDirectories: true)
+        try ensurePrivateDirectory(appSupportDirectory)
+        try ensurePrivateDirectory(quotaCacheDirectory)
+        try ensurePrivateDirectory(accountQuotaSnapshotsDirectory)
+        try ensurePrivateDirectory(managedProfilesDirectory)
+        try ensurePrivateDirectory(managedCodexHomesDirectory)
+    }
+
+    static func ensurePrivateDirectory(_ url: URL) throws {
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
     }
 
     private static func migrateLegacyAppSupportIfNeeded() throws {

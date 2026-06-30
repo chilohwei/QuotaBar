@@ -1,7 +1,5 @@
-import CoreGraphics
 import CryptoKit
 import Foundation
-import IOKit.ps
 
 @MainActor
 final class AppState: ObservableObject {
@@ -17,16 +15,16 @@ final class AppState: ObservableObject {
     @Published var addAccountErrorMessage: String?
     @Published var updateBannerState: AppUpdateBannerState = .idle
     @Published var isLaunchAtLoginEnabled = false
-    @Published var isRefreshOnOpenEnabled: Bool = AppPreferences.refreshOnOpenEnabled
-    @Published var recommendationStrategy: AccountRecommendationStrategy = AppPreferences.recommendationStrategy
-    @Published var menuBarVisibleTools: Set<ToolKind> = AppPreferences.menuBarVisibleTools
-    @Published var isLocalToolModificationEnabled: Bool = AppPreferences.localToolModificationEnabled
+    @Published var isRefreshOnOpenEnabled: Bool = AppPreferencesStore.refreshOnOpenEnabled
+    @Published var recommendationStrategy: AccountRecommendationStrategy = AppPreferencesStore.recommendationStrategy
+    @Published var menuBarVisibleTools: Set<ToolKind> = AppPreferencesStore.menuBarVisibleTools
 
     private let accountStore = AccountStore()
     private let secretStore = SecretStoreService()
     private let quotaCacheStore = QuotaSnapshotCacheStore()
     private let providerRegistry = ProviderRegistry()
     private let refreshBackoffPolicy = RefreshBackoffPolicy()
+    private let refreshIntervalPolicy = RefreshIntervalPolicy()
     private var checkForUpdatesAction: (() -> Void)?
     private var installAvailableUpdateAction: (() -> Void)?
     private var launchAtLoginEnabledProvider: (() -> Bool)?
@@ -45,15 +43,10 @@ final class AppState: ObservableObject {
     private var refreshFailureCountByAccount: [UUID: Int] = [:]
     private var refreshBackoffUntilByAccount: [UUID: Date] = [:]
     private let maxConcurrentRefreshes = 4
-    private let autoRefreshDefaultInterval: TimeInterval = 150
-    private let autoRefreshLowQuotaInterval: TimeInterval = 75
-    private let autoRefreshPowerSavingInterval: TimeInterval = 7.5 * 60
-    private let autoRefreshJitter: TimeInterval = 30
+    private let autoRefreshJitter = RefreshIntervalPolicy.jitterInterval
     private let foregroundRefreshFreshnessInterval: TimeInterval = 30
     private let dashboardOpenRefreshFreshnessInterval: TimeInterval = 25
     private let dashboardVisibleRefreshInterval: TimeInterval = 30
-    private let lowQuotaAutoRefreshThreshold = 0.20
-    private let idlePowerSavingThreshold: TimeInterval = 5 * 60
     private var supportedTools: [ToolKind] { providerRegistry.supportedTools }
 
     private var supportedToolsPrioritizingSelectedTool: [ToolKind] {
@@ -171,7 +164,7 @@ final class AppState: ObservableObject {
             } catch is CancellationError {
             } catch {
                 AppLog.account.error("Add account failed for \(tool.rawValue, privacy: .public): \(String(describing: error), privacy: .private)")
-                addAccountErrorMessage = "添加账号失败: \(resolvedErrorMessage(error))"
+                addAccountErrorMessage = text.addAccountFailedMessage(resolvedErrorMessage(error))
             }
         }
     }
@@ -208,7 +201,7 @@ final class AppState: ObservableObject {
                 try await persistState()
             } catch {
                 AppLog.account.error("Delete account failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
-                errorByAccount[account.id] = "删除失败: \(resolvedErrorMessage(error))"
+                errorByAccount[account.id] = text.deleteAccountFailedMessage(resolvedErrorMessage(error))
             }
         }
     }
@@ -219,7 +212,6 @@ final class AppState: ObservableObject {
         Task {
             do {
                 AppLog.account.info("Activating account \(account.id.uuidString, privacy: .public) for \(account.tool.rawValue, privacy: .public)")
-                try requireLocalToolModificationEnabled(for: account.tool)
                 let secret = try await resolveSecret(for: account, provider: provider)
                 let refreshedSecret = try await provider.refreshSecretIfNeeded(secret)
                 if refreshedSecret != secret {
@@ -238,7 +230,7 @@ final class AppState: ObservableObject {
                 await refreshQuota(for: syncedAccount ?? account, forceRefresh: true)
             } catch {
                 AppLog.account.error("Activate account failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
-                errorByAccount[account.id] = "切换失败: \(resolvedErrorMessage(error))"
+                errorByAccount[account.id] = text.switchAccountFailedMessage(resolvedErrorMessage(error))
             }
         }
     }
@@ -371,19 +363,13 @@ final class AppState: ObservableObject {
     func setRefreshOnOpenEnabled(_ enabled: Bool) {
         guard isRefreshOnOpenEnabled != enabled else { return }
         isRefreshOnOpenEnabled = enabled
-        AppPreferences.setRefreshOnOpenEnabled(enabled)
-    }
-
-    func setLocalToolModificationEnabled(_ enabled: Bool) {
-        guard isLocalToolModificationEnabled != enabled else { return }
-        isLocalToolModificationEnabled = enabled
-        AppPreferences.setLocalToolModificationEnabled(enabled)
+        AppPreferencesStore.setRefreshOnOpenEnabled(enabled)
     }
 
     func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {
         guard recommendationStrategy != strategy else { return }
         recommendationStrategy = strategy
-        AppPreferences.setRecommendationStrategy(strategy)
+        AppPreferencesStore.setRecommendationStrategy(strategy)
     }
 
     func isToolVisibleInMenuBar(_ tool: ToolKind) -> Bool {
@@ -396,7 +382,7 @@ final class AppState: ObservableObject {
         } else {
             menuBarVisibleTools.remove(tool)
         }
-        AppPreferences.setMenuBarVisibleTools(menuBarVisibleTools)
+        AppPreferencesStore.setMenuBarVisibleTools(menuBarVisibleTools)
     }
 
     @discardableResult
@@ -411,7 +397,7 @@ final class AppState: ObservableObject {
     ) async throws -> Account {
         let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let provider = provider(for: tool)
-        let detectedName = provider.suggestAccountName(from: secret) ?? extractEmail(from: secret)
+        let detectedName = provider.suggestAccountName(from: secret) ?? AccountIdentityResolver.extractEmail(from: secret)
         let detectedIdentity = provider.accountIdentity(from: secret)
         let detectedIdentityAliases = provider.accountIdentityAliases(from: secret)
 
@@ -427,7 +413,7 @@ final class AppState: ObservableObject {
             }
 
             if let index = accounts.firstIndex(where: { $0.id == duplicate.id }) {
-                let shouldRename = looksAutoGeneratedName(accounts[index].name, tool: tool)
+                let shouldRename = AccountIdentityResolver.looksAutoGeneratedName(accounts[index].name, tool: tool)
                     || accounts[index].name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 if shouldRename, let detectedName {
                     accounts[index].name = detectedName
@@ -447,7 +433,6 @@ final class AppState: ObservableObject {
             let syncedDuplicate = accounts.first(where: { $0.id == duplicate.id }) ?? resolvedDuplicate
             if let active = accounts.first(where: { $0.id == duplicate.id }) {
                 if applyToTool, activeAccountByTool[tool] == active.id {
-                    try requireLocalToolModificationEnabled(for: tool)
                     try await provider.activate(account: active, secret: secret)
                 }
             }
@@ -457,7 +442,7 @@ final class AppState: ObservableObject {
             return syncedDuplicate
         }
 
-        let resolvedName = resolvedAccountName(
+        let resolvedName = AccountIdentityResolver.resolvedName(
             tool: tool,
             provider: provider,
             inputName: cleanedName,
@@ -479,7 +464,6 @@ final class AppState: ObservableObject {
         try await persistState()
 
         if applyToTool, activeAccountByTool[tool] == account.id {
-            try requireLocalToolModificationEnabled(for: tool)
             try await provider.activate(account: account, secret: secret)
         }
 
@@ -590,56 +574,9 @@ final class AppState: ObservableObject {
     }
 
     private func automaticRefreshInterval() -> TimeInterval {
-        if shouldUsePowerSavingRefreshInterval {
-            return autoRefreshPowerSavingInterval
-        }
-        if hasLowActiveQuota {
-            return autoRefreshLowQuotaInterval
-        }
-        return autoRefreshDefaultInterval
-    }
-
-    private var hasLowActiveQuota: Bool {
-        supportedTools.compactMap { activeAccount(for: $0) }.contains { account in
-            guard let ratio = quotaByAccount[account.id]?.statusBarMetric?.ratio else { return false }
-            return ratio < lowQuotaAutoRefreshThreshold
-        }
-    }
-
-    private var shouldUsePowerSavingRefreshInterval: Bool {
-        isOnBatteryPower && userIdleDuration >= idlePowerSavingThreshold
-    }
-
-    private var isOnBatteryPower: Bool {
-        guard let powerSourceInfo = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let powerSources = IOPSCopyPowerSourcesList(powerSourceInfo)?.takeRetainedValue() as? [CFTypeRef] else {
-            return false
-        }
-
-        for source in powerSources {
-            guard let description = IOPSGetPowerSourceDescription(powerSourceInfo, source)?
-                .takeUnretainedValue() as? [String: Any],
-                let state = description[kIOPSPowerSourceStateKey as String] as? String else {
-                continue
-            }
-            if state == kIOPSBatteryPowerValue {
-                return true
-            }
-        }
-        return false
-    }
-
-    private var userIdleDuration: TimeInterval {
-        let eventTypes: [CGEventType] = [
-            .keyDown,
-            .leftMouseDown,
-            .rightMouseDown,
-            .mouseMoved,
-            .scrollWheel
-        ]
-        return eventTypes
-            .map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }
-            .min() ?? 0
+        let activeRemainingRatios = supportedTools.compactMap { activeAccount(for: $0) }
+            .compactMap { quotaByAccount[$0.id]?.statusBarMetric?.ratio }
+        return refreshIntervalPolicy.automaticRefreshInterval(activeRemainingRatios: activeRemainingRatios)
     }
 
     private func startRefreshEventMonitor() {
@@ -648,21 +585,7 @@ final class AppState: ObservableObject {
         }
         refreshEventMonitor?.stop()
         refreshEventMonitor = monitor
-        monitor.start(watchTargets: refreshWatchTargets())
-    }
-
-    private func refreshWatchTargets() -> [RefreshWatchTarget] {
-        var targets: [RefreshWatchTarget] = [
-            RefreshWatchTarget(url: AppPaths.claudeCodeStatusFile, reason: .claudeStatusLineChanged),
-            RefreshWatchTarget(url: codexAuthURL(), reason: .credentialsChanged(.codex)),
-            RefreshWatchTarget(url: claudeCodeAuthURL(), reason: .credentialsChanged(.claudeCode))
-        ]
-
-        targets.append(contentsOf: cursorStateDatabaseURLs().map {
-            RefreshWatchTarget(url: $0, reason: .credentialsChanged(.cursor))
-        })
-
-        return Array(Set(targets))
+        monitor.start(watchTargets: RefreshWatchTargetFactory().watchTargets())
     }
 
     private func handleRefreshEvent(_ reason: RefreshEventReason) {
@@ -701,9 +624,7 @@ final class AppState: ObservableObject {
 
             if let refreshed = try? await provider.refreshSecretIfNeeded(secret) {
                 if refreshed != secret {
-                    if isLocalToolModificationEnabled {
-                        try? await provider.updateCurrentCredentials(refreshed)
-                    }
+                    try? await provider.updateCurrentCredentials(refreshed)
                 }
                 secret = refreshed
             }
@@ -731,48 +652,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func codexAuthURL() -> URL {
-        let raw = ProcessInfo.processInfo.environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = raw?.isEmpty == false ? raw! : "~/.codex"
-        return URL(fileURLWithPath: (base as NSString).expandingTildeInPath)
-            .appendingPathComponent("auth.json")
-    }
-
-    private func claudeCodeAuthURL() -> URL {
-        let environment = ProcessInfo.processInfo.environment
-        if let explicit = environment["CLAUDE_CONFIG_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !explicit.isEmpty {
-            return URL(fileURLWithPath: (explicit as NSString).expandingTildeInPath)
-                .appendingPathComponent("auth.json")
-        }
-        if let xdgConfig = environment["XDG_CONFIG_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !xdgConfig.isEmpty {
-            return URL(fileURLWithPath: (xdgConfig as NSString).expandingTildeInPath)
-                .appendingPathComponent("claude-code", isDirectory: true)
-                .appendingPathComponent("auth.json")
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config", isDirectory: true)
-            .appendingPathComponent("claude-code", isDirectory: true)
-            .appendingPathComponent("auth.json")
-    }
-
-    private func cursorStateDatabaseURLs() -> [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return [
-            "Cursor",
-            "Cursor - Insiders",
-            "Cursor Nightly"
-        ].map { appName in
-            home.appendingPathComponent("Library", isDirectory: true)
-                .appendingPathComponent("Application Support", isDirectory: true)
-                .appendingPathComponent(appName, isDirectory: true)
-                .appendingPathComponent("User", isDirectory: true)
-                .appendingPathComponent("globalStorage", isDirectory: true)
-                .appendingPathComponent("state.vscdb")
-        }
-    }
-
     private func refreshRemainingAccountsInBackground(excluding refreshedAccountIDs: Set<UUID>) async {
         let remainingAccounts = accounts.filter { account in
             supportedTools.contains(account.tool) && !refreshedAccountIDs.contains(account.id)
@@ -782,14 +661,12 @@ final class AppState: ObservableObject {
     }
 
     private func applyActiveSelectionsToInstalledTools() async {
-        guard isLocalToolModificationEnabled else { return }
         for tool in supportedToolsPrioritizingSelectedTool {
             await applyActiveSelectionToInstalledTool(tool)
         }
     }
 
     private func applyActiveSelectionToInstalledTool(_ tool: ToolKind) async {
-        guard isLocalToolModificationEnabled else { return }
         guard let account = activeAccount(for: tool) else { return }
         let provider = provider(for: tool)
         do {
@@ -797,7 +674,7 @@ final class AppState: ObservableObject {
             try await provider.activate(account: account, secret: secret)
         } catch {
             AppLog.account.error("Apply active selection failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
-            errorByAccount[account.id] = "切换失败: \(resolvedErrorMessage(error))"
+            errorByAccount[account.id] = text.switchAccountFailedMessage(resolvedErrorMessage(error))
             loadStateByAccount[account.id] = quotaByAccount[account.id] == nil ? .failed : .stale
         }
     }
@@ -850,9 +727,7 @@ final class AppState: ObservableObject {
 
             if let refreshed = try? await provider.refreshSecretIfNeeded(secret) {
                 if refreshed != secret {
-                    if isLocalToolModificationEnabled {
-                        try? await provider.updateCurrentCredentials(refreshed)
-                    }
+                    try? await provider.updateCurrentCredentials(refreshed)
                 }
                 secret = refreshed
             }
@@ -1070,7 +945,7 @@ final class AppState: ObservableObject {
                 refreshBackoffUntilByAccount[account.id] = retryAt
             }
             AppLog.refresh.error("Refresh failed for account \(account.id.uuidString, privacy: .public), failures=\(failureCount, privacy: .public): \(String(describing: error), privacy: .private)")
-            errorByAccount[account.id] = "刷新失败: \(resolvedErrorMessage(error))"
+            errorByAccount[account.id] = text.refreshAccountFailedMessage(resolvedErrorMessage(error))
             loadStateByAccount[account.id] = loadStateAfterFailedRefresh(for: account)
         }
     }
@@ -1106,12 +981,6 @@ final class AppState: ObservableObject {
         supportedTools.contains(tool)
     }
 
-    private func requireLocalToolModificationEnabled(for tool: ToolKind) throws {
-        guard isLocalToolModificationEnabled else {
-            throw ProviderError.unsupported(text.localToolModificationDisabledMessage(tool: tool))
-        }
-    }
-
     private func persistRefreshedSecret(
         _ secret: String,
         previousSecret: String,
@@ -1123,7 +992,6 @@ final class AppState: ObservableObject {
         if shouldStoreSecretInKeychain(for: account.tool) {
             try secretStore.saveSecret(secret, accountKey: secretStoreKey(for: account.id))
         }
-        guard isLocalToolModificationEnabled else { return }
         try await provider.persistRefreshedSecret(secret, for: account, isActive: isActive)
         if isActive {
             try await provider.updateCurrentCredentials(secret)
@@ -1154,7 +1022,7 @@ final class AppState: ObservableObject {
         for index in accounts.indices {
             let account = accounts[index]
             guard supportedTools.contains(account.tool) else { continue }
-            guard looksAutoGeneratedName(account.name, tool: account.tool) else { continue }
+            guard AccountIdentityResolver.looksAutoGeneratedName(account.name, tool: account.tool) else { continue }
             let provider = provider(for: account.tool)
             guard let secret = try? await resolveSecret(for: account, provider: provider) else { continue }
 
@@ -1165,7 +1033,7 @@ final class AppState: ObservableObject {
                 didChange = true
             }
 
-            guard let readable = provider.suggestAccountName(from: secret) ?? extractEmail(from: secret) else { continue }
+            guard let readable = provider.suggestAccountName(from: secret) ?? AccountIdentityResolver.extractEmail(from: secret) else { continue }
 
             if accounts[index].name != readable {
                 accounts[index].name = readable
@@ -1176,61 +1044,6 @@ final class AppState: ObservableObject {
         if didChange {
             try? await persistState()
         }
-    }
-
-    private func resolvedAccountName(
-        tool: ToolKind,
-        provider: any Provider,
-        inputName: String,
-        secret: String
-    ) -> String {
-        let detectedName = provider.suggestAccountName(from: secret) ?? extractEmail(from: secret)
-        if let detectedName,
-           inputName.isEmpty || looksAutoGeneratedName(inputName, tool: tool) {
-            return detectedName
-        }
-
-        if !inputName.isEmpty {
-            return inputName
-        }
-
-        return "\(tool.displayName) 账号"
-    }
-
-    private func looksAutoGeneratedName(_ name: String, tool: ToolKind) -> Bool {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return true }
-
-        let lower = trimmed.lowercased()
-        let prefix = tool.displayName.lowercased()
-        if tool == .claudeCode,
-           lower.range(of: #"^claude [0-9a-f]{8}$"#, options: .regularExpression) != nil {
-            return true
-        }
-        if lower == prefix || lower == "\(prefix)账号" || lower.hasPrefix("\(prefix)-") {
-            return true
-        }
-
-        if trimmed.contains(":"), trimmed.rangeOfCharacter(from: .decimalDigits) != nil, lower.hasPrefix(prefix) {
-            return true
-        }
-
-        return false
-    }
-
-    private func extractEmail(from text: String) -> String? {
-        let pattern = #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: range),
-              let matchRange = Range(match.range, in: text) else {
-            return nil
-        }
-
-        return String(text[matchRange]).lowercased()
     }
 
     private func resolveSecret(for account: Account, provider: any Provider) async throws -> String {
@@ -1296,21 +1109,17 @@ final class AppState: ObservableObject {
         for tool: ToolKind,
         detectedIdentities: [String]
     ) -> Account? {
-        let normalizedDetectedIdentities = Set(detectedIdentities.map(normalizeIdentityName))
+        let normalizedDetectedIdentities = Set(detectedIdentities.map(AccountIdentityResolver.normalizeIdentityName))
         guard !normalizedDetectedIdentities.isEmpty else { return nil }
 
         for account in accounts where account.tool == tool {
-            if let storedIdentity = account.settings.identityKey.map(normalizeIdentityName),
+            if let storedIdentity = account.settings.identityKey.map(AccountIdentityResolver.normalizeIdentityName),
                normalizedDetectedIdentities.contains(storedIdentity) {
                 return account
             }
         }
 
         return nil
-    }
-
-    private func normalizeIdentityName(_ name: String) -> String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func updateAccountIdentityIfNeeded(accountID: UUID, identity: String?) -> Bool {
@@ -1323,7 +1132,7 @@ final class AppState: ObservableObject {
         let current = accounts[index].name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard current != identity else { return false }
 
-        let shouldPreferIdentity = looksAutoGeneratedName(current, tool: accounts[index].tool)
+        let shouldPreferIdentity = AccountIdentityResolver.looksAutoGeneratedName(current, tool: accounts[index].tool)
             || (identity.contains("@") && !current.contains("@"))
             || current.isEmpty
 
@@ -1341,7 +1150,7 @@ final class AppState: ObservableObject {
             return false
         }
         let current = accounts[index].name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard looksAutoGeneratedName(current, tool: accounts[index].tool) || current.isEmpty else {
+        guard AccountIdentityResolver.looksAutoGeneratedName(current, tool: accounts[index].tool) || current.isEmpty else {
             return false
         }
         guard let detected = provider.suggestAccountName(from: secret)?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1371,57 +1180,4 @@ final class AppState: ObservableObject {
         return true
     }
 
-}
-
-private enum AppPreferences {
-    private static let refreshOnOpenKey = "QuotaBar.RefreshOnOpenEnabled"
-    private static let localToolModificationKey = "QuotaBar.LocalToolModificationEnabled"
-    private static let recommendationStrategyKey = "QuotaBar.RecommendationStrategy"
-    private static let menuBarVisibleToolsKey = "QuotaBar.MenuBarVisibleTools"
-
-    static var refreshOnOpenEnabled: Bool {
-        bool(forKey: refreshOnOpenKey, defaultValue: true)
-    }
-
-    static var localToolModificationEnabled: Bool {
-        bool(forKey: localToolModificationKey, defaultValue: true)
-    }
-
-    static var menuBarVisibleTools: Set<ToolKind> {
-        // Absent key (first launch) means show everything; an explicitly empty
-        // saved array is honored as "show none".
-        guard let raw = UserDefaults.standard.array(forKey: menuBarVisibleToolsKey) as? [String] else {
-            return Set(ToolKind.allCases)
-        }
-        return Set(raw.compactMap(ToolKind.init(rawValue:)))
-    }
-
-    static func setMenuBarVisibleTools(_ tools: Set<ToolKind>) {
-        UserDefaults.standard.set(tools.map(\.rawValue), forKey: menuBarVisibleToolsKey)
-    }
-
-    static var recommendationStrategy: AccountRecommendationStrategy {
-        guard let rawValue = UserDefaults.standard.string(forKey: recommendationStrategyKey),
-              let strategy = AccountRecommendationStrategy(rawValue: rawValue) else {
-            return .preventWaste
-        }
-        return strategy
-    }
-
-    static func setRefreshOnOpenEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: refreshOnOpenKey)
-    }
-
-    static func setLocalToolModificationEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: localToolModificationKey)
-    }
-
-    static func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {
-        UserDefaults.standard.set(strategy.rawValue, forKey: recommendationStrategyKey)
-    }
-
-    private static func bool(forKey key: String, defaultValue: Bool) -> Bool {
-        guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
-        return UserDefaults.standard.bool(forKey: key)
-    }
 }

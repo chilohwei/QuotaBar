@@ -115,7 +115,7 @@ struct SecretStoreService {
 
 struct SystemSecretKeychainClient: SecretKeychainClient {
     func saveSecret(_ data: Data, service: String, account: String) throws {
-        var query = baseQuery(service: service, account: account)
+        var query = Self.baseQuery(service: service, account: account)
         query[kSecValueData as String] = data
         query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
@@ -129,10 +129,11 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
 
         let attributes: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
         ]
         let updateStatus = SecItemUpdate(
-            baseQuery(service: service, account: account) as CFDictionary,
+            Self.baseQuery(service: service, account: account) as CFDictionary,
             attributes as CFDictionary
         )
         guard updateStatus == errSecSuccess else {
@@ -141,7 +142,7 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
     }
 
     func readSecret(service: String, account: String) throws -> Data? {
-        var query = baseQuery(service: service, account: account)
+        var query = Self.baseQuery(service: service, account: account)
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -160,17 +161,18 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
     }
 
     func deleteSecret(service: String, account: String) throws {
-        let status = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
+        let status = SecItemDelete(Self.baseQuery(service: service, account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw SecretStoreError.keychain(status)
         }
     }
 
-    private func baseQuery(service: String, account: String) -> [String: Any] {
+    static func baseQuery(service: String, account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
         ]
     }
 }

@@ -314,26 +314,27 @@ SWIFT
 
 apply_dmg_layout() {
     local mount_dir="$1"
-    local volume_name="$2"
 
     /usr/bin/osascript <<APPLESCRIPT >/dev/null &
 tell application "Finder"
-    tell disk "$volume_name"
-        open
-        set current view of container window to icon view
-        set toolbar visible of container window to false
-        set statusbar visible of container window to false
-        set pathbar visible of container window to false
-        set bounds of container window to {140, 120, 800, 560}
-        set viewOptions to icon view options of container window
-        set arrangement of viewOptions to not arranged
-        set icon size of viewOptions to 112
-        set background picture of viewOptions to file ".background:background.png"
-        set position of item "$APP_NAME.app" of container window to {165, 220}
-        set position of item "Applications" of container window to {495, 220}
-        delay 1
-        close
-    end tell
+    open (POSIX file "$mount_dir")
+    delay 1
+    set containerWindow to front window
+    set mountedFolder to target of containerWindow
+    set current view of containerWindow to icon view
+    set toolbar visible of containerWindow to false
+    set statusbar visible of containerWindow to false
+    set pathbar visible of containerWindow to false
+    set bounds of containerWindow to {140, 120, 800, 560}
+    set viewOptions to icon view options of containerWindow
+    set arrangement of viewOptions to not arranged
+    set icon size of viewOptions to 112
+    set background picture of viewOptions to file ".background:background.png" of mountedFolder
+    set position of item "$APP_NAME.app" of mountedFolder to {165, 220}
+    set position of item "Applications" of mountedFolder to {495, 220}
+    update mountedFolder without registering applications
+    delay 1
+    close containerWindow
 end tell
 APPLESCRIPT
 

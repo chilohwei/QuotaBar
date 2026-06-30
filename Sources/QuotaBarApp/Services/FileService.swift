@@ -23,25 +23,34 @@ struct FileService {
         return try String(contentsOfFile: expanded, encoding: .utf8)
     }
 
-    func writeText(_ content: String, to path: String) throws {
+    func writeText(_ content: String, to path: String, permissions: Int? = nil) throws {
         let expanded = expand(path: path)
         let url = URL(fileURLWithPath: expanded)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
+        try applyPermissions(permissions, to: expanded)
     }
 
     func writeTextWithBackup(
         _ content: String,
         to path: String,
         backupBaseName: String? = nil,
-        maxBackups: Int = 5
+        maxBackups: Int = 5,
+        permissions: Int? = nil
     ) throws {
         let expanded = expand(path: path)
         let url = URL(fileURLWithPath: expanded)
         let data = Data(content.utf8)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try backupItemIfNeeded(at: expanded, newContents: data, backupBaseName: backupBaseName, maxBackups: maxBackups)
+        try backupItemIfNeeded(
+            at: expanded,
+            newContents: data,
+            backupBaseName: backupBaseName,
+            maxBackups: maxBackups,
+            backupPermissions: permissions
+        )
         try data.write(to: url, options: .atomic)
+        try applyPermissions(permissions, to: expanded)
     }
 
     func createDirectoryIfNeeded(at path: String) throws {
@@ -55,11 +64,23 @@ struct FileService {
         try FileManager.default.removeItem(at: URL(fileURLWithPath: expanded))
     }
 
-    func backupItemIfExists(at path: String, backupBaseName: String? = nil, maxBackups: Int = 5) throws {
+    func backupItemIfExists(
+        at path: String,
+        backupBaseName: String? = nil,
+        maxBackups: Int = 5,
+        permissions: Int? = nil
+    ) throws {
         let expanded = expand(path: path)
         guard FileManager.default.fileExists(atPath: expanded) else { return }
         let data = try Data(contentsOf: URL(fileURLWithPath: expanded))
-        try backupItemIfNeeded(at: expanded, newContents: nil, fallbackContents: data, backupBaseName: backupBaseName, maxBackups: maxBackups)
+        try backupItemIfNeeded(
+            at: expanded,
+            newContents: nil,
+            fallbackContents: data,
+            backupBaseName: backupBaseName,
+            maxBackups: maxBackups,
+            backupPermissions: permissions
+        )
     }
 
     func copyItemReplacing(from sourcePath: String, to targetPath: String) throws {
@@ -81,7 +102,9 @@ struct FileService {
         from sourcePath: String,
         to targetPath: String,
         backupBaseName: String? = nil,
-        maxBackups: Int = 5
+        maxBackups: Int = 5,
+        targetPermissions: Int? = nil,
+        backupPermissions: Int? = nil
     ) throws {
         let sourceExpanded = expand(path: sourcePath)
         let targetExpanded = expand(path: targetPath)
@@ -94,12 +117,19 @@ struct FileService {
         let targetURL = URL(fileURLWithPath: targetExpanded)
         let sourceData = try Data(contentsOf: sourceURL)
         try FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try backupItemIfNeeded(at: targetExpanded, newContents: sourceData, backupBaseName: backupBaseName, maxBackups: maxBackups)
+        try backupItemIfNeeded(
+            at: targetExpanded,
+            newContents: sourceData,
+            backupBaseName: backupBaseName,
+            maxBackups: maxBackups,
+            backupPermissions: backupPermissions
+        )
 
         if FileManager.default.fileExists(atPath: targetExpanded) {
             try FileManager.default.removeItem(at: targetURL)
         }
         try sourceData.write(to: targetURL, options: .atomic)
+        try applyPermissions(targetPermissions, to: targetExpanded)
     }
 
     private func backupItemIfNeeded(
@@ -107,7 +137,8 @@ struct FileService {
         newContents: Data?,
         fallbackContents: Data? = nil,
         backupBaseName: String?,
-        maxBackups: Int
+        maxBackups: Int,
+        backupPermissions: Int? = nil
     ) throws {
         let url = URL(fileURLWithPath: expandedPath)
         guard FileManager.default.fileExists(atPath: expandedPath) else { return }
@@ -123,7 +154,13 @@ struct FileService {
         let resolvedBaseName = backupBaseName ?? url.lastPathComponent
         let backupURL = try uniqueBackupURL(in: directory, baseName: resolvedBaseName)
         try contentsToBackup.write(to: backupURL, options: .atomic)
+        try applyPermissions(backupPermissions, to: backupURL.path)
         try pruneBackups(in: directory, baseName: resolvedBaseName, maxBackups: maxBackups)
+    }
+
+    private func applyPermissions(_ permissions: Int?, to path: String) throws {
+        guard let permissions else { return }
+        try FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: path)
     }
 
     private func uniqueBackupURL(in directory: URL, baseName: String) throws -> URL {

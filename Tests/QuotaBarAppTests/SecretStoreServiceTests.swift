@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 @testable import QuotaBarApp
 
@@ -37,6 +38,18 @@ struct SecretStoreServiceTests {
         #expect(try fixture.store.readSecret(accountKey: "account.1.secret") == "legacy-token")
         #expect(try fixture.keychain.readString(service: fixture.keychainService, account: "account.1.secret") == "legacy-token")
         #expect(!FileManager.default.fileExists(atPath: fixture.legacySecretsFile.path))
+    }
+
+    @Test("system keychain query is local-only")
+    func systemKeychainQueryIsLocalOnly() throws {
+        let query = SystemSecretKeychainClient.baseQuery(
+            service: "com.chiloh.QuotaBar.tests",
+            account: "account.1.secret"
+        )
+
+        #expect(query[kSecAttrService as String] as? String == "com.chiloh.QuotaBar.tests")
+        #expect(query[kSecAttrAccount as String] as? String == "account.1.secret")
+        #expect(query[kSecAttrSynchronizable as String] as? Bool == false)
     }
 }
 

@@ -6,13 +6,11 @@ QuotaBar is a local macOS menu bar app. It does not provide a QuotaBar-owned clo
 
 - Account tokens are stored in macOS Keychain under QuotaBar-owned generic password items.
 - Legacy `secrets.json` entries from older builds are read only as a migration source. When a legacy secret is successfully imported into Keychain, QuotaBar removes the migrated entry on a best-effort basis.
-- Account metadata and quota cache live under `~/Library/Application Support/QuotaBar/` and are written with user-private file permissions where practical.
+- App-owned account metadata, quota cache, managed profiles, and sensitive backup snapshots use user-private file or directory permissions.
 
 ## Local Tool Configuration Writes
 
 QuotaBar can write local Codex, Cursor, and Claude Code configuration files when switching accounts, writing refreshed tokens back to the tool, or installing Claude Code statusLine integration.
-
-Use `Settings -> Allow Tool Config Writes` to disable these writes. When disabled, QuotaBar can still import local accounts and refresh quota, but account switching and tool configuration updates are blocked.
 
 ## Updates
 

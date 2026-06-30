@@ -14,10 +14,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: macos-packages-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build (${{ matrix.arch }})
     runs-on: macos-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +61,10 @@ jobs:
           else
             echo "Skipping release version validation for non-release build version: $version"
           fi
+
+      - name: Check script syntax
+        shell: bash
+        run: bash -n scripts/*.sh
 
       - name: Run tests
         shell: bash
@@ -97,6 +106,7 @@ jobs:
     needs: build
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:

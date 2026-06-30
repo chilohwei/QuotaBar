@@ -19,7 +19,6 @@ QuotaBar 是一款 macOS 菜单栏工具，帮助你集中查看 Codex、Cursor�
 - 开机自启：可选择随 macOS 登录自动启动。
 - 多语言界面：支持简体中文、繁体中文和 English。
 - 检查更新：可在应用内检查新版本。
-- 本地写入控制：可在设置中关闭对 Codex、Cursor、Claude Code 本地配置的写入，进入只读管理模式。
 
 ## 安装
 
@@ -59,10 +58,6 @@ brew upgrade --cask quotabar
 
 如果 Homebrew 安装后的应用被 Gatekeeper 拦截，同样可以在确认来源后对 `/Applications/QuotaBar.app` 执行上面的 `xattr` 命令。
 
-发布新版本时，GitHub Actions 会在 Release 创建后根据远端 DMG 的实际 SHA256
-自动同步独立 tap 仓库 `chilohwei/homebrew-quotabar`。仓库需要配置
-`HOMEBREW_TAP_GITHUB_TOKEN` secret，且该 token 需要对 tap 仓库有写权限。
-
 系统要求：macOS Ventura 13 或更高版本。
 
 ## 怎么用
@@ -75,40 +70,11 @@ brew upgrade --cask quotabar
 6. 需要切换账号时，点击对应账号的“切换”。
 7. 按提示重启对应应用，让账号切换生效。
 
-## 发版
-
-版本号以 GitHub 远程 `vX.Y.Z` tag 为准。正式打包会校验新版本必须大于远程最新稳定版本，避免重复发布或回退版本号。
-
-查看远程最新版本和下一个 patch 版本：
-
-```bash
-scripts/release_version.sh latest
-scripts/release_version.sh next
-```
-
-本地正式打包时不传 `--version` 会自动使用远程最新版本的下一个 patch：
-
-```bash
-scripts/build_macos_app.sh --arch universal
-```
-
-当前项目没有 Developer ID 证书，构建脚本默认使用 ad-hoc 签名。应用内更新仅接受 `chilohwei/QuotaBar` 官方 GitHub Release 的 DMG 与 SHA256 asset，会校验下载包 SHA256、包内 Bundle ID、版本号、可执行文件和代码签名状态，但不会自动移除 macOS quarantine 标记。
-
-测试包请使用非正式版本号，避免和正式 release 混淆：
-
-```bash
-scripts/build_macos_app.sh --arch arm64 --version 1.0.2-test
-```
-
 ## 隐私说明
 
-QuotaBar 只在本机保存必要的账号信息和使用状态。账号 token 会保存到 macOS Keychain；旧版本留下的 `secrets.json` 会在读取时迁移到 Keychain，并尽量移除已迁移条目。
+QuotaBar 本地优先：账号 token 会保存到 macOS Keychain，本地账号元数据和额度缓存会保存在 `~/Library/Application Support/QuotaBar/`。
 
-QuotaBar 会读取和修改 Codex、Cursor、Claude Code 在本机的登录/配置文件，以便导入账号、切换账号和展示额度。本地账号元数据、额度缓存和托管配置会保存在 `~/Library/Application Support/QuotaBar/`。
-
-如果你希望 QuotaBar 只查看额度而不修改第三方工具配置，可以在设置中关闭“允许修改工具配置”。关闭后，账号切换、主动写回刷新后的 token、Claude Code statusLine 安装等写操作会被阻止；导入本机账号和额度刷新仍可继续使用。
-
-QuotaBar 不提供自有云端账号服务，也不会把你的账号数据上传到 QuotaBar 自有服务器。检查更新会访问 GitHub Releases；额度刷新会请求 Codex、Cursor、Claude Code 对应的官方接口。你仍需自行遵守 Codex、Cursor、Claude Code 及相关第三方服务的使用条款。
+为导入/切换账号、刷新 token、安装 Claude Code statusLine 和展示额度，QuotaBar 会读写 Codex、Cursor、Claude Code 的本机配置文件；额度刷新会请求对应官方接口，检查更新会访问 GitHub Releases。QuotaBar 不提供自有云端账号服务，也不会把你的账号数据上传到 QuotaBar 自有服务器。
 
 ## 支持与反馈
 

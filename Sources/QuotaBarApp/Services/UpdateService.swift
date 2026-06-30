@@ -159,13 +159,15 @@ struct UpdateService: Sendable {
         let appURL = Bundle.main.bundleURL
         let destinationURL = installationDestination(for: appURL)
         try validateInstallDestination(destinationURL)
-        let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("quotabar-update-\(UUID().uuidString).log")
+        let installerDirectory = try createPrivateTemporaryDirectory(prefix: "quotabar-installer")
+        let logURL = installerDirectory.appendingPathComponent("install-update.log")
+        try createPrivateLog(at: logURL)
         let scriptURL = try writeInstallerScript(
             dmgURL: downloadURL,
             destinationURL: destinationURL,
             logURL: logURL,
-            expectedVersion: release.version
+            expectedVersion: release.version,
+            in: installerDirectory
         )
         try launchInstaller(
             scriptURL: scriptURL,
@@ -220,6 +222,7 @@ struct UpdateService: Sendable {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("quotabar-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         let destination = directory.appendingPathComponent(release.assetName)
         try FileManager.default.moveItem(at: downloadedURL, to: destination)
         return destination
@@ -301,7 +304,8 @@ struct UpdateService: Sendable {
         dmgURL: URL,
         destinationURL: URL,
         logURL: URL,
-        expectedVersion: String
+        expectedVersion: String,
+        in directory: URL
     ) throws -> URL {
         let script = #"""
 #!/bin/zsh
@@ -398,13 +402,29 @@ rm -f "$DMG"
 echo "QuotaBar update install completed at $(date)"
 """#
 
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("quotabar-installer-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         let scriptURL = directory.appendingPathComponent("install-update.zsh")
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
         return scriptURL
+    }
+
+    private func createPrivateTemporaryDirectory(prefix: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        return directory
+    }
+
+    private func createPrivateLog(at url: URL) throws {
+        FileManager.default.createFile(
+            atPath: url.path,
+            contents: Data(),
+            attributes: [.posixPermissions: 0o600]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func launchInstaller(
