@@ -3,7 +3,7 @@ import Foundation
 extension CursorProvider {
     func parseCredentials(_ secret: String) throws -> CursorCredentials {
         guard let data = secret.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.credentialParsingFailed(tool: .cursor)
         }
         return try JSONDecoder().decode(CursorCredentials.self, from: data)
     }
@@ -75,11 +75,11 @@ extension CursorProvider {
         let data = try await dataWithRetry(for: request, operation: "Cursor token 刷新")
         let response = try JSONDecoder().decode(CursorTokenRefreshResponse.self, from: data)
         if response.shouldLogout == true {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.tokenExpired(tool: .cursor)
         }
         guard let accessToken = response.accessToken,
               !accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.tokenRefreshFailed(tool: .cursor)
         }
 
         let refreshed = CursorCredentials(

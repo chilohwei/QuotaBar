@@ -66,17 +66,26 @@ extension CursorProvider {
 
     func prepareAccount(_ account: Account, secret: String) async throws -> Account {
         var updated = account
+        let profilePath = account.settings.cursorProfilePath ?? AppPaths.managedCursorProfilePath(accountID: account.id)
+        updated.settings.cursorProfilePath = profilePath
         updated.settings.identityKey = accountIdentity(from: secret) ?? account.settings.identityKey
+
+        let encoded = encodeCredentials(try credentialsForInstalledTool(from: secret))
+        try writeManagedCredentialsSnapshot(encoded, for: updated)
         return updated
     }
 
     func activate(account: Account, secret: String) async throws {
-        _ = account
-        let credentials = try parseCredentials(secret)
+        let credentials = try credentialsForInstalledTool(from: secret)
         try writeLocalCursorCredentials(credentials)
-        let latest = try parseCredentials(try readLocalCursorCredentials())
-        guard cursorCredentialsRepresentSameAccount(credentials, latest) else {
-            throw ProviderError.network("Cursor 写入后读取到的账号不一致，请重启 Cursor 后重试")
+
+        let encoded = encodeCredentials(credentials)
+        try writeManagedCredentialsSnapshot(encoded, for: account)
+
+        if let latest = try? parseCredentials(try readLocalCursorCredentials()),
+           !cursorCredentialsRepresentSameAccount(credentials, latest) {
+            // Cursor may keep stale auth in memory until restart; treat the write as successful.
+            return
         }
     }
 
@@ -135,6 +144,9 @@ extension CursorProvider {
         if let failure = error as? QuotaHTTPError {
             return failure.statusCode == 401
         }
+        if case .tokenExpired = error as? ProviderError {
+            return true
+        }
         return false
     }
 
@@ -159,6 +171,26 @@ extension CursorProvider {
     }
 
     func recoverSecret(for account: Account) async throws -> String? {
+        let managedCandidates = [
+            account.settings.cursorProfilePath,
+            AppPaths.managedCursorProfilePath(accountID: account.id)
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+
+        for profilePath in Set(managedCandidates) {
+            let credentialsPath = "\(profilePath)/credentials.json"
+            guard fileService.fileExists(at: credentialsPath) else { continue }
+            let secret = try fileService.readText(at: credentialsPath)
+            if recoveredSecretMatches(secret, account: account) {
+                return secret
+            }
+        }
+
+        if account.settings.identityKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return nil
+        }
+
         guard let latest = try? readLocalCursorCredentials(),
               let latestCredentials = try? parseCredentials(latest) else {
             return nil

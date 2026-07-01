@@ -13,7 +13,7 @@ extension CodexProvider {
     func parseCredentialEnvelope(data: Data) throws -> (root: [String: Any], credentials: CodexCredentials) {
         let json = try JSONSerialization.jsonObject(with: data)
         guard let dict = json as? [String: Any] else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.credentialParsingFailed(tool: .codex)
         }
 
         let apiKey = (dict["OPENAI_API_KEY"] as? String)

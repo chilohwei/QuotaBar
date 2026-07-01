@@ -3,7 +3,7 @@ import Foundation
 extension ClaudeCodeProvider {
     func parseCredentials(_ secret: String) throws -> ClaudeCodeCredentials {
         guard let data = secret.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.credentialParsingFailed(tool: .claudeCode)
         }
         return try JSONDecoder().decode(ClaudeCodeCredentials.self, from: data)
     }

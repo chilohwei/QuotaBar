@@ -563,7 +563,7 @@ struct DashboardView: View {
         let listHeight = accountListHeight
 
         ScrollViewReader { scrollProxy in
-            ScrollView(.vertical, showsIndicators: true) {
+            ScrollView(.vertical, showsIndicators: false) {
                 ZStack(alignment: .topLeading) {
                     if toolAccounts.isEmpty {
                         emptyState

@@ -6,7 +6,18 @@ struct QuotaHTTPError: LocalizedError, Sendable {
     let isRetryable: Bool
 
     var errorDescription: String? {
-        "\(operation) 失败，HTTP \(statusCode)"
+        switch statusCode {
+        case 401:
+            return "登录已过期，请重新登录"
+        case 403:
+            return "访问被拒绝，请检查账号状态"
+        case 429:
+            return "请求过于频繁，稍后自动重试"
+        case 500...599:
+            return "服务器暂时不可用，稍后自动重试"
+        default:
+            return "请求失败（\(statusCode)），稍后重试"
+        }
     }
 }
 

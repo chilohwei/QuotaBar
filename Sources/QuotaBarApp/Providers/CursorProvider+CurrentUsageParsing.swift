@@ -33,7 +33,6 @@ extension CursorProvider {
             firstString(in: payload, keys: ["membershipType", "membership_type", "planName", "plan_name"])
                 ?? credentials.membershipType
         )
-        let isFreePlan = isFreeCursorPlan(planName)
         let periodEnd = firstDate(in: payload, keys: Self.cycleBoundaryDateKeys)
         let accountValidUntil = firstDate(
             in: payload,
@@ -59,9 +58,18 @@ extension CursorProvider {
         let fallbackWindows = extractCursorUsageWindows(from: payload, defaultResetAt: periodEnd)
         let quotaBlocked = isQuotaBlocked(in: payload)
 
+        let onDemandHasCapacity = onDemandHasPositiveCapacity(onDemand)
         let hasRealCapacity = planHasPositiveCapacity(plan)
-            || onDemandHasPositiveCapacity(onDemand)
+            || onDemandHasCapacity
             || !fallbackWindows.isEmpty
+        // Free / included accounts meter usage purely as percentages: they carry no
+        // spendable dollar limit on the plan and no on-demand budget. When the plan
+        // name is absent (Free logins often omit `stripeMembershipType`), fall back
+        // to this shape check so such accounts render a single "Total" bar instead of
+        // the paid three-bucket Auto / API layout.
+        let hasSpendableDollarCapacity = planHasSpendableDollarCapacity(plan) || onDemandHasCapacity
+        let isFreePlan = isFreeCursorPlan(planName)
+            || (planName == nil && !hasSpendableDollarCapacity)
         let hasPercentUsageSignal = [totalPercentUsed, autoPercentUsed, apiPercentUsed].contains { value in
             guard let value else { return false }
             return value > 0

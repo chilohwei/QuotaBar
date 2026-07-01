@@ -217,14 +217,35 @@ struct AppText {
         }
     }
 
-    func restartRequiredMessage(accountName: String) -> String {
+    func restartRequiredMessage(accountName: String, tool: ToolKind) -> String {
         switch language {
         case .english:
-            return "Switched to \(accountName). Restart the app to apply this account."
+            switch tool {
+            case .codex:
+                return "Switched to \(accountName). Restart Codex to apply this account."
+            case .cursor:
+                return "Switched to \(accountName). Restart Cursor to apply this account."
+            case .claudeCode:
+                return "Switched to \(accountName). Restart Claude Code to apply this account."
+            }
         case .simplifiedChinese:
-            return "已切换到 \(accountName)。请重启应用后生效。"
+            switch tool {
+            case .codex:
+                return "已切换到 \(accountName)。请重启 Codex 后生效。"
+            case .cursor:
+                return "已切换到 \(accountName)。请重启 Cursor 后生效。"
+            case .claudeCode:
+                return "已切换到 \(accountName)。请重启 Claude Code 后生效。"
+            }
         case .traditionalChinese:
-            return "已切換到 \(accountName)。請重啟應用後生效。"
+            switch tool {
+            case .codex:
+                return "已切換到 \(accountName)。請重啟 Codex 後生效。"
+            case .cursor:
+                return "已切換到 \(accountName)。請重啟 Cursor 後生效。"
+            case .claudeCode:
+                return "已切換到 \(accountName)。請重啟 Claude Code 後生效。"
+            }
         }
     }
 
@@ -306,36 +327,15 @@ struct AppText {
     }
 
     func deleteAccountFailedMessage(_ error: String) -> String {
-        switch language {
-        case .english:
-            return "Delete failed: \(error)"
-        case .simplifiedChinese:
-            return "删除失败：\(error)"
-        case .traditionalChinese:
-            return "刪除失敗：\(error)"
-        }
+        return error
     }
 
     func switchAccountFailedMessage(_ error: String) -> String {
-        switch language {
-        case .english:
-            return "Switch failed: \(error)"
-        case .simplifiedChinese:
-            return "切换失败：\(error)"
-        case .traditionalChinese:
-            return "切換失敗：\(error)"
-        }
+        return error
     }
 
     func refreshAccountFailedMessage(_ error: String) -> String {
-        switch language {
-        case .english:
-            return "Refresh failed: \(error)"
-        case .simplifiedChinese:
-            return "刷新失败：\(error)"
-        case .traditionalChinese:
-            return "刷新失敗：\(error)"
-        }
+        return error
     }
 
     func deleteAccountTitle(_ name: String) -> String {
@@ -374,14 +374,29 @@ struct AppText {
     }
 
     func staleQuotaMessage(_ error: String) -> String {
+        let strippedError = stripRefreshPrefix(error)
         switch language {
         case .english:
-            return "Refresh failed, showing last data: \(error)"
+            return "Stale · \(strippedError)"
         case .simplifiedChinese:
-            return "刷新失败，正在显示上次数据：\(error)"
+            return "旧数据 · \(strippedError)"
         case .traditionalChinese:
-            return "刷新失敗，正在顯示上次資料：\(error)"
+            return "舊資料 · \(strippedError)"
         }
+    }
+
+    private func stripRefreshPrefix(_ error: String) -> String {
+        let prefixes = [
+            "Refresh failed: ",
+            "刷新失败：",
+            "刷新失敗：",
+        ]
+        for prefix in prefixes {
+            if error.hasPrefix(prefix) {
+                return String(error.dropFirst(prefix.count))
+            }
+        }
+        return error
     }
 
     func resetAt(_ date: Date?) -> String {

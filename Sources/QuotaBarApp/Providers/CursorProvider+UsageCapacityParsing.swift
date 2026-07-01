@@ -9,6 +9,18 @@ extension CursorProvider {
         return limit > 0 || remaining > 0 || used > 0
     }
 
+    // A spendable dollar budget requires a positive *limit* or *remaining*. A bare
+    // `used` / `totalSpend` figure does not: Free accounts report their consumed
+    // bonus allowance as `totalSpend` with no limit, which must not be mistaken for
+    // paid capacity. Used to tell an included-usage (Free) account — metered purely
+    // as percentages — apart from a paid plan that has real dollar headroom.
+    func planHasSpendableDollarCapacity(_ plan: [String: Any]?) -> Bool {
+        guard let plan else { return false }
+        let limit = firstDouble(in: plan, keys: Self.limitAmountKeys) ?? 0
+        let remaining = firstDouble(in: plan, keys: Self.remainingAmountKeys) ?? 0
+        return limit > 0 || remaining > 0
+    }
+
     func planExplicitlyHasNoCapacity(_ plan: [String: Any]?) -> Bool {
         guard let plan else { return false }
         let limit = firstDouble(in: plan, keys: Self.limitAmountKeys)

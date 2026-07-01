@@ -6,7 +6,7 @@ struct QuotaSnapshotCacheStore: Sendable {
     func load(accountID: UUID) throws -> QuotaSnapshot {
         let text = try fileService.readText(at: cachePath(accountID: accountID))
         guard let data = text.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.cacheCorrupted(tool: .codex)
         }
         return try JSONDecoder().decode(QuotaSnapshot.self, from: data)
     }

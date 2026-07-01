@@ -154,7 +154,7 @@ extension CursorProvider {
     func loadCachedQuotaSnapshot(cacheKey: String) throws -> CachedQuotaSnapshot {
         let text = try fileService.readText(at: quotaCachePath(cacheKey: cacheKey))
         guard let data = text.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.cacheCorrupted(tool: .cursor)
         }
         return try JSONDecoder().decode(CachedQuotaSnapshot.self, from: data)
     }

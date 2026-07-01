@@ -273,7 +273,7 @@ extension CodexProvider {
         guard fileService.fileExists(at: path) else { return nil }
         let auth = try fileService.readText(at: path)
         guard let data = auth.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.credentialParsingFailed(tool: .codex)
         }
         let credentials = try parseCredentials(data: data)
         if let accessToken = credentials.accessToken, !accessToken.isEmpty {
@@ -282,7 +282,7 @@ extension CodexProvider {
         if let apiKey = credentials.apiKey, !apiKey.isEmpty {
             return auth
         }
-        throw ProviderError.invalidCredentials
+        throw ProviderError.noUsableCredential(tool: .codex)
     }
 
     func findCodexExecutable() -> URL? {

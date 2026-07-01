@@ -19,9 +19,14 @@ enum AppPaths {
     static let accountQuotaSnapshotsDirectory = quotaCacheDirectory.appendingPathComponent("accounts", isDirectory: true)
     static let managedProfilesDirectory = appSupportDirectory.appendingPathComponent("profiles", isDirectory: true)
     static let managedCodexHomesDirectory = managedProfilesDirectory.appendingPathComponent("codex", isDirectory: true)
+    static let managedCursorProfilesDirectory = managedProfilesDirectory.appendingPathComponent("cursor", isDirectory: true)
 
     static func managedCodexHomePath(accountID: UUID) -> String {
         managedCodexHomesDirectory.appendingPathComponent(accountID.uuidString, isDirectory: true).path
+    }
+
+    static func managedCursorProfilePath(accountID: UUID) -> String {
+        managedCursorProfilesDirectory.appendingPathComponent(accountID.uuidString, isDirectory: true).path
     }
 
     static func ensureDirectories() throws {
@@ -31,6 +36,7 @@ enum AppPaths {
         try ensurePrivateDirectory(accountQuotaSnapshotsDirectory)
         try ensurePrivateDirectory(managedProfilesDirectory)
         try ensurePrivateDirectory(managedCodexHomesDirectory)
+        try ensurePrivateDirectory(managedCursorProfilesDirectory)
     }
 
     static func ensurePrivateDirectory(_ url: URL) throws {

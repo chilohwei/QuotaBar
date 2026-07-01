@@ -24,7 +24,7 @@ extension CodexProvider {
 
     func activate(account: Account, secret: String) async throws {
         guard secret.data(using: .utf8) != nil else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.credentialParsingFailed(tool: .codex)
         }
 
         let managedHome = account.settings.codexHomePath ?? AppPaths.managedCodexHomePath(accountID: account.id)

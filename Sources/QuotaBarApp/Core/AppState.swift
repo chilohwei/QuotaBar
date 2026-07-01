@@ -225,9 +225,8 @@ final class AppState: ObservableObject {
                 try await provider.activate(account: account, secret: refreshedSecret)
                 activeAccountByTool[account.tool] = account.id
                 try await persistState()
-                let syncedAccount = await syncInstalledCurrentAccount(for: account.tool)
-                restartRequiredMessage = text.restartRequiredMessage(accountName: account.name)
-                await refreshQuota(for: syncedAccount ?? account, forceRefresh: true)
+                restartRequiredMessage = text.restartRequiredMessage(accountName: account.name, tool: account.tool)
+                await refreshQuota(for: account, forceRefresh: true)
             } catch {
                 AppLog.account.error("Activate account failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
                 errorByAccount[account.id] = text.switchAccountFailedMessage(resolvedErrorMessage(error))
@@ -1089,11 +1088,11 @@ final class AppState: ObservableObject {
                  .clientCertificateRejected,
                  .clientCertificateRequired,
                  .appTransportSecurityRequiresSecureConnection:
-                return "网络 SSL 握手失败，请检查代理/VPN/系统证书后重试"
+                return "网络连接失败，请检查代理或 VPN"
             case .notConnectedToInternet:
-                return "当前网络不可用，请检查网络后重试"
+                return "网络不可用"
             case .timedOut:
-                return "请求超时，请稍后重试"
+                return "请求超时，稍后自动重试"
             default:
                 break
             }

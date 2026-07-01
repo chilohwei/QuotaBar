@@ -96,15 +96,30 @@ extension Provider {
 enum ProviderError: LocalizedError {
     case missingFile(path: String)
     case invalidCredentials
+    case credentialParsingFailed(tool: ToolKind)
+    case tokenExpired(tool: ToolKind)
+    case tokenRefreshFailed(tool: ToolKind)
+    case cacheCorrupted(tool: ToolKind)
+    case noUsableCredential(tool: ToolKind)
     case unsupported(String)
     case network(String)
 
     var errorDescription: String? {
         switch self {
-        case .missingFile(let path):
-            return "缺少文件: \(path)"
+        case .missingFile:
+            return "未找到登录文件，请先登录对应工具"
         case .invalidCredentials:
-            return "凭据格式无效"
+            return "登录已失效，请重新登录"
+        case .credentialParsingFailed(let tool):
+            return "\(tool.displayName) 登录信息异常，请重新登录"
+        case .tokenExpired(let tool):
+            return "\(tool.displayName) 登录已过期，请重新登录"
+        case .tokenRefreshFailed(let tool):
+            return "\(tool.displayName) 登录续期失败，请重新登录"
+        case .cacheCorrupted:
+            return "缓存异常，点刷新即可恢复"
+        case .noUsableCredential(let tool):
+            return "未找到 \(tool.displayName) 登录信息，请先登录"
         case .unsupported(let message):
             return message
         case .network(let message):

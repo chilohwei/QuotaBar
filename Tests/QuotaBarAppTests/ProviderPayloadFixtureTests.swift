@@ -318,6 +318,53 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.tertiary == nil)
     }
 
+    @Test("Cursor free login without stored plan name still renders single Total bar")
+    func cursorFreeMissingPlanNameIncludedUsagePayload() throws {
+        // Real GetCurrentPeriodUsage response for a Free account whose local Cursor
+        // state omits `stripeMembershipType` (so membershipType is nil). The bonus
+        // allowance is reported via `totalSpend`/`bonusSpend` with no dollar limit —
+        // this must not be read as paid capacity and expose Auto / API buckets.
+        let payload = try jsonObject("""
+        {
+          "billingCycleStart": "1782119059049",
+          "billingCycleEnd": "1784711059049",
+          "planUsage": {
+            "totalSpend": 172,
+            "bonusSpend": 172,
+            "remainingBonus": false,
+            "autoPercentUsed": 0,
+            "apiPercentUsed": 100,
+            "totalPercentUsed": 86
+          },
+          "spendLimitUsage": {
+            "pooledLimit": 0,
+            "pooledRemaining": 0,
+            "individualLimit": 0,
+            "limitType": "user",
+            "overallLimit": 0,
+            "overallRemaining": 0
+          },
+          "displayThreshold": 200,
+          "displayMessage": "You've used 0% of your included usage",
+          "autoModelSelectedDisplayMessage": "You've used 86% of your included total usage",
+          "namedModelSelectedDisplayMessage": "You've used 100% of your included API usage",
+          "autoBucketModels": ["default"]
+        }
+        """)
+
+        let snapshot = try CursorProvider().parseCurrentPeriodUsageForTesting(
+            payload,
+            email: "cursor-free@example.com",
+            membershipType: nil
+        )
+
+        #expect(snapshot.primary?.label == "Total")
+        #expect(snapshot.primary?.used == 86)
+        #expect(snapshot.primary?.limit == 100)
+        #expect(snapshot.secondary == nil)
+        #expect(snapshot.tertiary == nil)
+    }
+
     @Test("Cursor free partially-used included usage does not expose paid Auto API buckets")
     func cursorFreePartiallyUsedIncludedUsagePayload() throws {
         let payload = try jsonObject("""

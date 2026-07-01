@@ -9,17 +9,8 @@ enum SecretStoreError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .dataEncoding:
-            return "凭据编码失败"
-        case .dataDecoding:
-            return "凭据解码失败"
-        case .keychain(let status):
-            if let message = SecCopyErrorMessageString(status, nil) as String? {
-                return "钥匙串访问失败：\(message)"
-            }
-            return "钥匙串访问失败，错误码 \(status)"
-        case .missingData:
-            return "本地凭据不存在，请重新导入或手动添加账号"
+        case .dataEncoding, .dataDecoding, .keychain, .missingData:
+            return "登录信息异常，请删除后重新添加"
         }
     }
 }
@@ -117,27 +108,43 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
     func saveSecret(_ data: Data, service: String, account: String) throws {
         var query = Self.baseQuery(service: service, account: account)
         query[kSecValueData as String] = data
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        Self.applyAccessPolicy(to: &query)
 
-        let addStatus = SecItemAdd(query as CFDictionary, nil)
-        if addStatus == errSecSuccess {
-            return
+        var addStatus = SecItemAdd(query as CFDictionary, nil)
+        if addStatus == errSecDuplicateItem {
+            // Replace instead of SecItemUpdate. The existing item may have been
+            // created by a different build of QuotaBar (ad-hoc signing gives every
+            // build a distinct code signature), so it is guarded by an ACL that
+            // trusts only that old signature. Reading or updating it would raise the
+            // macOS keychain password prompt. SecItemDelete is not gated by that ACL,
+            // so delete-then-add rewrites the item with the unrestricted access
+            // policy below — silently migrating legacy entries and never prompting.
+            SecItemDelete(Self.baseQuery(service: service, account: account) as CFDictionary)
+            addStatus = SecItemAdd(query as CFDictionary, nil)
         }
-        if addStatus != errSecDuplicateItem {
+        guard addStatus == errSecSuccess else {
             throw SecretStoreError.keychain(addStatus)
         }
+    }
 
-        let attributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
-        ]
-        let updateStatus = SecItemUpdate(
-            Self.baseQuery(service: service, account: account) as CFDictionary,
-            attributes as CFDictionary
-        )
-        guard updateStatus == errSecSuccess else {
-            throw SecretStoreError.keychain(updateStatus)
+    /// Attaches an access policy that lets any application on this Mac read the item
+    /// without an authorization prompt (the "Allow all applications to access this
+    /// item" option in Keychain Access). Without it, the item's ACL trusts only the
+    /// exact binary that stored it, so a rebuilt or updated QuotaBar — which has a
+    /// different code signature — triggers the keychain password dialog on every
+    /// read. The stored tokens are imported from the tools' own local files (which
+    /// are protected by nothing stronger than user file permissions), so an
+    /// unrestricted-but-still-encrypted keychain item is no weaker than the source.
+    private static func applyAccessPolicy(to query: inout [String: Any]) {
+        var access: SecAccess?
+        // A nil trusted-application list means "all applications", i.e. no prompt.
+        if SecAccessCreate("QuotaBar" as CFString, nil, &access) == errSecSuccess,
+           let access {
+            query[kSecAttrAccess as String] = access
+        } else {
+            // Fall back to the data-protection accessibility class if the legacy ACL
+            // API is unavailable. Still device-only and after-first-unlock.
+            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         }
     }
 
@@ -146,9 +153,19 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
+        // Never let a keychain ACL mismatch raise the interactive password dialog.
+        // An item stored by a previous, differently-signed build of QuotaBar is
+        // guarded by an ACL that trusts only that old signature, so reading it would
+        // normally prompt for the macOS login password. Disabling keychain UI for
+        // the read makes it return errSecInteractionNotAllowed instead; we treat
+        // that as "not found" so the caller re-imports the credential from source
+        // and re-saves it with the unrestricted access policy (no prompt).
+        SecKeychainSetUserInteractionAllowed(false)
+        defer { SecKeychainSetUserInteractionAllowed(true) }
+
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
+        if status == errSecItemNotFound || status == errSecInteractionNotAllowed {
             return nil
         }
         guard status == errSecSuccess else {

@@ -8,7 +8,7 @@ extension ClaudeCodeProvider {
         let output = try await runProcess(executable: executable, arguments: ["auth", "status"], timeout: 10)
         guard let data = output.data(using: .utf8),
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.credentialParsingFailed(tool: .claudeCode)
         }
         let loggedIn = object["loggedIn"] as? Bool ?? false
         return ClaudeCodeCredentials(

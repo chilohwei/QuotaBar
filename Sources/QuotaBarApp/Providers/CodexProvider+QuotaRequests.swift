@@ -15,7 +15,7 @@ extension CodexProvider {
 
     private func fetchQuotaCore(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
         guard let data = secret.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.credentialParsingFailed(tool: .codex)
         }
 
         let credentials = try parseCredentials(data: data)
@@ -73,7 +73,7 @@ extension CodexProvider {
             return try await fetchCreditGrants(apiKey: apiKey, note: nil)
         }
 
-        throw ProviderError.invalidCredentials
+        throw ProviderError.noUsableCredential(tool: .codex)
     }
 
     func fetchOAuthUsage(

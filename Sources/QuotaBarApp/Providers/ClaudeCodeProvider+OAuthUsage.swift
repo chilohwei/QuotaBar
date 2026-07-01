@@ -248,7 +248,7 @@ extension ClaudeCodeProvider {
     func loadCachedUsage(cacheKey: String) throws -> CachedClaudeUsage {
         let text = try fileService.readText(at: usageCachePath(cacheKey: cacheKey))
         guard let data = text.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.cacheCorrupted(tool: .claudeCode)
         }
         return try JSONDecoder().decode(CachedClaudeUsage.self, from: data)
     }

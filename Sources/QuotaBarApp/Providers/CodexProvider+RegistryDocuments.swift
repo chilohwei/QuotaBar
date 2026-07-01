@@ -7,7 +7,7 @@ extension CodexProvider {
         }
         let text = try fileService.readText(at: registryPath)
         guard let data = text.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.cacheCorrupted(tool: .codex)
         }
         return try JSONDecoder().decode(CodexRegistryDocument.self, from: data)
     }
@@ -61,7 +61,7 @@ extension CodexProvider {
         let text = try fileService.readText(at: path)
         guard let data = text.data(using: .utf8),
               let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.cacheCorrupted(tool: .codex)
         }
         return dict
     }

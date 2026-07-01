@@ -7,7 +7,7 @@ extension CodexProvider {
 
     func refreshSecret(_ secret: String, force: Bool) async throws -> String {
         guard let data = secret.data(using: .utf8) else {
-            throw ProviderError.invalidCredentials
+            throw ProviderError.credentialParsingFailed(tool: .codex)
         }
 
         let parsed = try parseCredentialEnvelope(data: data)
