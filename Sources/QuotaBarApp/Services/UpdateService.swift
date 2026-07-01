@@ -324,6 +324,7 @@ echo "Starting QuotaBar update install at $(date)"
 cleanup() {
     if [[ -n "${MOUNT_DIR:-}" ]]; then
         hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || hdiutil detach "$MOUNT_DIR" -force >/dev/null 2>&1 || true
+        rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true
     fi
 }
 
@@ -348,11 +349,19 @@ if kill -0 "$OLD_PID" 2>/dev/null; then
     exit 1
 fi
 
-ATTACH_OUTPUT="$(hdiutil attach "$DMG" -nobrowse -readonly)"
-MOUNT_DIR="$(printf '%s\n' "$ATTACH_OUTPUT" | sed -n 's#^/dev/[^[:space:]]*[[:space:]]*Apple_HFS[[:space:]]*##p' | tail -1)"
-if [[ -z "$MOUNT_DIR" || ! -d "$MOUNT_DIR" ]]; then
-    echo "Unable to resolve mounted DMG path"
-    printf '%s\n' "$ATTACH_OUTPUT"
+# Mount to a private mountpoint inside our own 0700 temp directory rather than
+# letting the image appear under /Volumes. A DMG surfaced in /Volumes is treated
+# by macOS as a removable volume, so reading the app out of it triggers the
+# "QuotaBar wants to access files on a removable volume" TCC prompt. A private
+# mountpoint keeps the whole update silent.
+MOUNT_DIR="$(dirname "$LOG")/dmg-mount"
+mkdir -p "$MOUNT_DIR"
+if ! hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_DIR" >/dev/null; then
+    echo "Unable to mount DMG at private mountpoint"
+    exit 1
+fi
+if [[ ! -d "$MOUNT_DIR" ]]; then
+    echo "Mounted DMG path missing after attach"
     exit 1
 fi
 
