@@ -59,7 +59,7 @@ extension CodexProvider {
                 )
             } catch {
                 if let apiKey = credentials.apiKey, !apiKey.isEmpty {
-                    return try await fetchCreditGrants(apiKey: apiKey, note: "OAuth 查询失败，已回退 API Key")
+                    return try await fetchCreditGrants(apiKey: apiKey, note: QuotaNoteCatalog.codexOAuthFellBackToApiKey)
                 }
                 throw error
             }
@@ -167,7 +167,7 @@ extension CodexProvider {
             accountValidUntil: paidAccountValidUntil(resolvedPlanName, fallbackAccountValidUntil),
             subscriptionWillRenew: fallbackSubscriptionWillRenew,
             subscriptionStatus: fallbackSubscriptionStatus,
-            note: windows.isEmpty ? "接口返回成功，但未识别到标准额度字段" : nil
+            note: windows.isEmpty ? QuotaNoteCatalog.codexNoStandardFields : nil
         )
         if let cacheKey {
             try? storeQuotaSnapshot(snapshot, cacheKey: cacheKey)

@@ -21,7 +21,7 @@ extension CursorProvider {
             accountValidUntil: credentials.subscriptionPeriodEnd,
             subscriptionWillRenew: inferSubscriptionWillRenew(from: credentials.subscriptionStatus),
             subscriptionStatus: normalizedSubscriptionStatus(credentials.subscriptionStatus),
-            note: sorted.isEmpty ? "Cursor legacy 接口返回成功，但未识别到标准额度字段" : nil
+            note: sorted.isEmpty ? QuotaNoteCatalog.cursorLegacyNoStandardFields : nil
         )
     }
 

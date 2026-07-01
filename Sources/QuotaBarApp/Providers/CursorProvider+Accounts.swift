@@ -111,7 +111,7 @@ extension CursorProvider {
                Date().timeIntervalSince(cached.cachedAt) <= Self.fallbackQuotaCacheAge {
                 return cached.snapshot.replacing(
                     source: "Cursor Cache",
-                    note: mergedNote(cached.snapshot.note, fallback: "实时接口暂不可用，正在显示缓存数据")
+                    note: mergedNote(cached.snapshot.note, fallback: QuotaNoteCatalog.cursorLiveUnavailableCache)
                 )
             }
 

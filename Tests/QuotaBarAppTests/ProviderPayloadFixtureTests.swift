@@ -628,7 +628,56 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.isQuotaBlocked == false)
     }
 
-    @Test("Claude statusLine payload drops an expired window instead of showing stale or invented data")
+    @Test("Provider notes localize into English and Traditional Chinese at render time")
+    func quotaNotesLocalize() {
+        let en = AppText(language: .english)
+        let tc = AppText(language: .traditionalChinese)
+        let sc = AppText(language: .simplifiedChinese)
+
+        // Canonical (Simplified) note → localized per language. The auth note is user-facing and
+        // guides re-login; it is actionable and has a short display form for the card.
+        #expect(en.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("authorization") == true)
+        #expect(tc.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("授權") == true)
+        #expect(sc.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited) == QuotaNoteCatalog.claudeUsageRateLimited)
+        #expect(en.isActionableNote(QuotaNoteCatalog.claudeUsageRateLimited) == true)
+        #expect(en.isActionableNote(QuotaNoteCatalog.claudeWindowStale) == false)
+        // Short form fits on one line and still tells the user to sign in again.
+        let shortEN = en.localizedNoteShort(QuotaNoteCatalog.claudeUsageRateLimited)
+        #expect(shortEN?.contains("sign in") == true)
+        #expect((shortEN?.count ?? 999) < QuotaNoteCatalog.claudeUsageRateLimited.count)
+        #expect(sc.localizedNoteShort(QuotaNoteCatalog.claudeWindowStale) == nil)
+
+        // Stale/expired-window note (shown when the frozen statusLine window is dropped).
+        #expect(en.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("hidden") == true)
+        #expect(tc.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("隱藏") == true)
+
+        // Parameterized stale note keeps the minute count in every language.
+        let stale = QuotaNoteCatalog.claudeStaleLiveData(minutes: 7)
+        #expect(en.localizedNote(stale)?.contains("7 min") == true)
+        #expect(tc.localizedNote(stale)?.contains("7 分鐘") == true)
+
+        // Cross-provider note also localizes.
+        #expect(en.localizedNote(QuotaNoteCatalog.codexOAuthFellBackToApiKey)?.contains("OAuth") == true)
+
+        // Unknown / composed (already language-neutral) notes pass through untouched.
+        #expect(en.localizedNote("Included $8/$20 · On-demand $3") == "Included $8/$20 · On-demand $3")
+        #expect(en.localizedNote(nil) == nil)
+        #expect(en.localizedNote("   ") == nil)
+    }
+
+    @Test("Refresh cooldown escalates on consecutive 429s and caps at the max")
+    func refreshCooldownEscalatesAndCaps() {
+        // 5 → 10 → 20 → 30 min, then held at the cap so a throttled auth endpoint gets real room.
+        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 1) == 5 * 60)
+        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 2) == 10 * 60)
+        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 3) == 20 * 60)
+        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 4) == 30 * 60)
+        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 9) == ClaudeCodeProvider.tokenRefreshCooldownMax)
+        // Defensive: non-positive attempts fall back to the base cooldown, never a negative delay.
+        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 0) == 5 * 60)
+    }
+
+    @Test("Claude statusLine drops an expired window instead of fabricating a value")
     func claudeStatusLinePayloadDropsExpiredWindows() throws {
         let status = try jsonDictionary("""
         {
@@ -652,11 +701,12 @@ struct ProviderPayloadFixtureTests {
             now: now
         )
 
-        // The expired 5h window has no truthful current value from the frozen statusLine, so it is
-        // dropped — never shown as the stale 8% nor invented as full. The fresh 7d window remains.
+        // The expired 5h window from a frozen statusLine is untrustworthy (could be idle-at-0 or
+        // just stale while real usage climbed elsewhere), so it is dropped rather than fabricated —
+        // never shown as the stale 8% nor invented as 0%/full. The fresh 7d window remains.
         #expect(snapshot.primary == nil)
         #expect(snapshot.secondary?.used == 31)
-        #expect(snapshot.note?.contains("过期") == true)
+        #expect(snapshot.note?.contains("隐藏") == true)
         #expect(QuotaFreshness.isStale(snapshot, now: now))
     }
 

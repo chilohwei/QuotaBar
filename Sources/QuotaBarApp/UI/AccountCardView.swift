@@ -382,17 +382,36 @@ struct AccountCardView: View {
         !metadataItems.isEmpty
     }
 
-    private var footerMessage: (message: String, color: Color)? {
+    private struct FooterContent {
+        let display: String        // short, one-line text shown on the card
+        let tooltip: String        // full text revealed on hover
+        let color: Color
+        let icon: String?          // SF Symbol for a prominent warning; nil for muted metadata
+        let weight: Font.Weight
+    }
+
+    private var footerMessage: FooterContent? {
         if let errorMessage {
             if let quota, QuotaFreshness.isStale(quota) {
-                return (text.staleQuotaMessage(errorMessage), Branding.warning)
+                let message = text.staleQuotaMessage(errorMessage)
+                return FooterContent(display: message, tooltip: message, color: Branding.warning, icon: nil, weight: .regular)
             }
             if let quota {
-                return (text.updatedAt(quota.updatedAt), Branding.inkSubtle)
+                let message = text.updatedAt(quota.updatedAt)
+                return FooterContent(display: message, tooltip: message, color: Branding.inkSubtle, icon: nil, weight: .regular)
             }
-            return (errorMessage, Branding.danger)
+            return FooterContent(display: errorMessage, tooltip: errorMessage, color: Branding.danger, icon: "exclamationmark.triangle.fill", weight: .medium)
         }
-        return nil
+        // No hard error: surface the snapshot's own status note. An actionable note (expired auth →
+        // re-login) gets a prominent, user-facing warning treatment — icon + hue + a short one-line
+        // summary that fits, with the full how-to in the tooltip. Other notes read as muted metadata.
+        guard let quota, let full = text.localizedNote(quota.note) else { return nil }
+        if text.isActionableNote(quota.note) {
+            let short = text.localizedNoteShort(quota.note) ?? full
+            return FooterContent(display: short, tooltip: full, color: Branding.warning, icon: "exclamationmark.triangle.fill", weight: .semibold)
+        }
+        let degraded = QuotaFreshness.isStale(quota) || quota.isQuotaBlocked == true
+        return FooterContent(display: full, tooltip: full, color: degraded ? Branding.warning : Branding.inkSubtle, icon: nil, weight: .regular)
     }
 
 
@@ -518,7 +537,7 @@ struct AccountCardView: View {
             parts.append(text.updatedAt(quota.updatedAt))
         }
         if let footerMessage {
-            parts.append(footerMessage.message)
+            parts.append(footerMessage.tooltip)
         }
         return parts.joined(separator: ", ")
     }
@@ -622,18 +641,21 @@ struct AccountCardView: View {
 
     @ViewBuilder
     private var footer: some View {
-        if hasFooterContent {
-            VStack(alignment: .leading, spacing: 4) {
-                if let footerMessage {
-                    Text(footerMessage.message)
-                        .font(.system(size: 10.4, weight: .regular))
+        if let footerMessage {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                if let icon = footerMessage.icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(footerMessage.color)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .help(footerMessage.message)
                 }
+                Text(footerMessage.display)
+                    .font(.system(size: 10.4, weight: footerMessage.weight))
+                    .foregroundStyle(footerMessage.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .help(footerMessage.tooltip)
         }
     }
 

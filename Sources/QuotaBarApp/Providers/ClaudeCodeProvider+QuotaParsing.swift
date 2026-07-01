@@ -113,10 +113,10 @@ extension ClaudeCodeProvider {
         hadExpiredWindows: Bool = false
     ) -> String? {
         guard status != nil else {
-            return "等待 Claude Code 会话同步；打开 Claude Code 并产生一次响应后会显示 5h/7d 用量。"
+            return QuotaNoteCatalog.claudeAwaitingSession
         }
         if hadExpiredWindows {
-            return "Claude Code statusLine 用量窗口已过期；正在拉取实时数据，或在 Claude Code 成功响应后自动同步。"
+            return QuotaNoteCatalog.claudeWindowStale
         }
         if ((status?["rate_limits"] as? [String: Any])?.isEmpty == false) {
             return nil
@@ -125,9 +125,9 @@ extension ClaudeCodeProvider {
         let isThirdParty = thirdPartyProviderName(credentials: credentials, status: status) != nil
             || (rawProvider?.isEmpty == false && !isFirstPartyClaudeProvider(rawProvider))
         if credentials.authMethod == "api_key" || isThirdParty {
-            return "API Key / 第三方提供方模式通常没有 Pro/Max 5h/7d 用量条。"
+            return QuotaNoteCatalog.claudeApiKeyNoWindows
         }
-        return "Claude Code statusLine 已同步，但本次快照尚未包含 5h/7d 用量；下一次响应后会自动更新。"
+        return QuotaNoteCatalog.claudeStatusLineNoWindows
     }
 
     func isQuotaBlocked(primary: QuotaWindow?, secondary: QuotaWindow?) -> Bool? {

@@ -96,13 +96,21 @@ extension ClaudeCodeProvider {
             ? statusLineLoad?.status
             : nil
 
-        return makeQuotaSnapshot(
+        let fallback = makeQuotaSnapshot(
             status: status,
             credentials: credentials,
             capturedAt: statusLineLoad?.capturedAt,
             now: now,
             rateLimitEvent: rateLimitEvent
         )
+
+        // The live path being down *because Anthropic is rate-limiting us* is a distinct, actionable
+        // state — override the generic note (but never the real "usage limit reached" one) so the
+        // panel explains it will self-recover and how to force a fix if it lingers.
+        if fallback.isQuotaBlocked != true, isAuthRateLimited(credentials, now: now) {
+            return fallback.replacing(note: Self.usageRateLimitedNote)
+        }
+        return fallback
     }
 
     func recoverSecret(for account: Account) async throws -> String? {

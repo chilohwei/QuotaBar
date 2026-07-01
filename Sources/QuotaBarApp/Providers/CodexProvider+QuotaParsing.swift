@@ -77,7 +77,7 @@ extension CodexProvider {
             subscriptionWillRenew: fallbackSubscriptionWillRenew,
             subscriptionStatus: fallbackSubscriptionStatus,
             isQuotaBlocked: (limitReached == true) || (allowed == false),
-            note: (primary == nil && secondary == nil && creditsRemaining == nil) ? "接口返回成功，但额度字段为空" : nil
+            note: (primary == nil && secondary == nil && creditsRemaining == nil) ? QuotaNoteCatalog.codexEmptyQuotaFields : nil
         )
         return snapshot
     }

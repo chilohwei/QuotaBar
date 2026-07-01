@@ -97,16 +97,25 @@ extension ClaudeCodeProvider {
         do {
             let payload = try await requestOAuthUsage(accessToken: accessToken)
             let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
-            if let cacheKey { try? storeCachedUsage(snapshot, cacheKey: cacheKey) }
+            if let cacheKey {
+                try? storeCachedUsage(snapshot, cacheKey: cacheKey)
+                clearUsageRateLimitMarker(cacheKey)
+            }
             return snapshot
         } catch OAuthUsageFetchError.unauthorized where !didRefresh {
             // Token looked locally valid but was rejected — refresh once (if allowed) and retry.
             if let refreshed = await refreshAccessTokenIfAllowed(refreshToken: token.refreshToken, cacheKey: cacheKey),
                let payload = try? await requestOAuthUsage(accessToken: refreshed) {
                 let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
-                if let cacheKey { try? storeCachedUsage(snapshot, cacheKey: cacheKey) }
+                if let cacheKey {
+                    try? storeCachedUsage(snapshot, cacheKey: cacheKey)
+                    clearUsageRateLimitMarker(cacheKey)
+                }
                 return snapshot
             }
+        } catch OAuthUsageFetchError.rateLimited {
+            // `/usage` is throttling us — remember it so the panel can show actionable guidance.
+            setUsageRateLimitMarker(cacheKey)
         } catch {
             // fall through to the stale-but-honest fallback below
         }
@@ -125,7 +134,7 @@ extension ClaudeCodeProvider {
         return cached.snapshot.replacing(
             source: "Claude Code OAuth Cache",
             updatedAt: cached.cachedAt,
-            note: "实时接口暂不可用，显示约 \(minutes) 分钟前的真实额度。"
+            note: QuotaNoteCatalog.claudeStaleLiveData(minutes: minutes)
         )
     }
 
@@ -261,25 +270,95 @@ extension ClaudeCodeProvider {
         AppPaths.quotaCacheDirectory.appendingPathComponent("\(cacheKey)-refresh-backoff").path
     }
 
-    func tokenRefreshBlockedUntil(_ cacheKey: String?) -> Date? {
+    struct TokenRefreshBackoff {
+        let attempts: Int
+        let until: Date
+    }
+
+    /// Cooldown for the Nth consecutive failed refresh: base × 2^(n-1), capped. Pure so the
+    /// escalation curve can be verified without touching the filesystem-backed backoff state.
+    static func escalatedRefreshCooldown(attempts: Int) -> TimeInterval {
+        min(
+            tokenRefreshCooldown * pow(2, Double(max(attempts, 1) - 1)),
+            tokenRefreshCooldownMax
+        )
+    }
+
+    /// Reads the persisted backoff. Understands the current JSON form `{"attempts":N,"until":epoch}`
+    /// and falls back to the legacy bare-epoch form so an old file still blocks correctly.
+    func tokenRefreshBackoffState(_ cacheKey: String?) -> TokenRefreshBackoff? {
         guard let cacheKey,
-              let text = try? fileService.readText(at: tokenRefreshBackoffPath(cacheKey)),
-              let epoch = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+              let text = try? fileService.readText(at: tokenRefreshBackoffPath(cacheKey)) else {
             return nil
         }
-        return Date(timeIntervalSince1970: epoch)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = trimmed.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let until = number(object["until"]) {
+            let attempts = number(object["attempts"]).map { Int($0) } ?? 1
+            return TokenRefreshBackoff(attempts: max(attempts, 1), until: Date(timeIntervalSince1970: until))
+        }
+        if let epoch = Double(trimmed) {
+            return TokenRefreshBackoff(attempts: 1, until: Date(timeIntervalSince1970: epoch))
+        }
+        return nil
+    }
+
+    func tokenRefreshBlockedUntil(_ cacheKey: String?) -> Date? {
+        tokenRefreshBackoffState(cacheKey)?.until
     }
 
     func setTokenRefreshBackoff(_ cacheKey: String?) {
         guard let cacheKey else { return }
         try? fileService.createDirectoryIfNeeded(at: AppPaths.quotaCacheDirectory.path)
-        let until = Date().addingTimeInterval(Self.tokenRefreshCooldown).timeIntervalSince1970
-        try? fileService.writeText(String(until), to: tokenRefreshBackoffPath(cacheKey), permissions: 0o600)
+        // Escalate on consecutive failures: base × 2^(n-1), capped. A persistently rate-limited
+        // auth endpoint (HTTP 429 with a misleading `retry-after: 0`) needs progressively longer
+        // room to recover; a fixed short cooldown just keeps the limit alive. `clearTokenRefreshBackoff`
+        // resets the count after any successful refresh.
+        let attempts = (tokenRefreshBackoffState(cacheKey)?.attempts ?? 0) + 1
+        let until = Date().addingTimeInterval(Self.escalatedRefreshCooldown(attempts: attempts)).timeIntervalSince1970
+        let json = "{\"attempts\":\(attempts),\"until\":\(until)}"
+        try? fileService.writeText(json, to: tokenRefreshBackoffPath(cacheKey), permissions: 0o600)
     }
 
     func clearTokenRefreshBackoff(_ cacheKey: String?) {
         guard let cacheKey else { return }
         try? fileService.removeItemIfExists(at: tokenRefreshBackoffPath(cacheKey))
+    }
+
+    func usageRateLimitMarkerPath(_ cacheKey: String) -> String {
+        AppPaths.quotaCacheDirectory.appendingPathComponent("\(cacheKey)-usage-429").path
+    }
+
+    /// Records that the `/usage` endpoint just answered 429, so the panel can explain the throttle.
+    func setUsageRateLimitMarker(_ cacheKey: String?) {
+        guard let cacheKey else { return }
+        try? fileService.createDirectoryIfNeeded(at: AppPaths.quotaCacheDirectory.path)
+        try? fileService.writeText(
+            String(Date().timeIntervalSince1970),
+            to: usageRateLimitMarkerPath(cacheKey),
+            permissions: 0o600
+        )
+    }
+
+    func clearUsageRateLimitMarker(_ cacheKey: String?) {
+        guard let cacheKey else { return }
+        try? fileService.removeItemIfExists(at: usageRateLimitMarkerPath(cacheKey))
+    }
+
+    /// True when the live path is currently blocked by Anthropic rate limiting — either the token
+    /// refresh is in an active 429 backoff, or `/usage` recently returned 429. Used to surface the
+    /// actionable `usageRateLimitedNote` when we fall back to frozen statusLine data.
+    func isAuthRateLimited(_ credentials: ClaudeCodeCredentials, now: Date = Date()) -> Bool {
+        guard let cacheKey = usageCacheKey(credentials) else { return false }
+        if let until = tokenRefreshBlockedUntil(cacheKey), until > now {
+            return true
+        }
+        if let text = try? fileService.readText(at: usageRateLimitMarkerPath(cacheKey)),
+           let epoch = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return now.timeIntervalSince(Date(timeIntervalSince1970: epoch)) <= Self.usageRateLimitMarkerFreshness
+        }
+        return false
     }
 
     func requestOAuthUsage(accessToken: String) async throws -> [String: Any] {

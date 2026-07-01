@@ -32,9 +32,12 @@ extension ClaudeCodeProvider {
         ))
         // The statusLine snapshot is only a fallback for when live `/usage` is unavailable, and
         // Claude Code freezes its `rate_limits` between API calls. Once a window's reset time has
-        // passed, its stored `used_percentage` belongs to a previous cycle and we have no truthful
-        // current value — drop it rather than show a stale or invented number. The live `/usage`
-        // path is the source of truth for an accurate, current figure.
+        // passed, its stored `used_percentage` is untrustworthy: it may mean the window reset and
+        // is now idle at 0%, OR that this frozen snapshot is simply stale while real usage kept
+        // climbing elsewhere (e.g. a managed/remote session that never feeds this local hook — in
+        // which case the true figure can be far from 0). We cannot distinguish the two, so we drop
+        // the window rather than fabricate a number. The accompanying note explains the gap, and
+        // live `/usage` remains the source of truth for an accurate current figure.
         if rejectExpiredWindows, let resetAt, resetAt.addingTimeInterval(60) < now {
             return nil
         }
