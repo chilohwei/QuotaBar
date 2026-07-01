@@ -10,6 +10,10 @@ extension CodexProvider {
     }
 
     func fetchQuota(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
+        try await fetchQuotaCore(account: account, secret: secret, forceRefresh: forceRefresh)
+    }
+
+    private func fetchQuotaCore(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
         guard let data = secret.data(using: .utf8) else {
             throw ProviderError.invalidCredentials
         }

@@ -7,33 +7,36 @@ import Foundation
 /// render time via `AppText.localizedNote(_:)`, so switching language re-localizes cached notes and
 /// no localized text is ever frozen into the cache. Simplified Chinese is the canonical/base form,
 /// mirroring how `AppText.string` falls back (`traditional ?? simplified`).
+///
+/// Wording is written for the user, not the implementation: it says what the reading means for them
+/// and what (if anything) to do — never internal terms like "接口 / 快照 / statusLine / 字段".
 enum QuotaNoteCatalog {
     // MARK: Claude Code
     static func claudeStaleLiveData(minutes: Int) -> String {
-        "实时接口暂不可用，显示约 \(minutes) 分钟前的真实额度。"
+        "暂时无法刷新，显示的是约 \(minutes) 分钟前的额度。"
     }
-    static let claudeStaleLiveDataPrefix = "实时接口暂不可用，显示约 "
+    static let claudeStaleLiveDataPrefix = "暂时无法刷新，显示的是约 "
     static let claudeRateLimitReached =
-        "Claude Code 已提示 Usage limit reached；QuotaBar 在重置前按 0% 剩余额度显示。"
+        "本轮额度已用完，需等到重置时间后自动恢复。"
     static let claudeUsageRateLimited =
-        "Claude 账号授权暂时失效，无法获取实时额度；请在终端运行 claude 并执行 /login 重新登录授权后点刷新。"
+        "Claude 登录授权已失效，无法获取实时额度；请在终端运行 claude 并执行 /login 重新登录后点刷新。"
     static let claudeAwaitingSession =
-        "等待 Claude Code 会话同步；打开 Claude Code 并产生一次响应后会显示 5h/7d 用量。"
+        "还没有额度数据，在 Claude Code 里用一次后即可显示。"
     static let claudeWindowStale =
-        "实时接口暂不可用，已隐藏过期的用量窗口以免显示旧数据；接口恢复或重新登录后自动更新为实时值。"
+        "暂时无法获取最新额度，恢复后会自动更新；可点刷新重试。"
     static let claudeApiKeyNoWindows =
-        "API Key / 第三方提供方模式通常没有 Pro/Max 5h/7d 用量条。"
+        "当前为 API Key / 第三方模式，没有 5 小时 / 每周额度限制。"
     static let claudeStatusLineNoWindows =
-        "Claude Code statusLine 已同步，但本次快照尚未包含 5h/7d 用量；下一次响应后会自动更新。"
+        "额度数据同步中，在 Claude Code 里用一次后会显示。"
 
     // MARK: Cursor
-    static let cursorLiveUnavailableCache = "实时接口暂不可用，正在显示缓存数据"
-    static let cursorLegacyNoStandardFields = "Cursor legacy 接口返回成功，但未识别到标准额度字段"
+    static let cursorLiveUnavailableCache = "暂时无法刷新，显示的是最近一次的额度。"
+    static let cursorLegacyNoStandardFields = "未能读取到额度数据，可能是该账号类型暂不支持。"
 
     // MARK: Codex
-    static let codexEmptyQuotaFields = "接口返回成功，但额度字段为空"
-    static let codexOAuthFellBackToApiKey = "OAuth 查询失败，已回退 API Key"
-    static let codexNoStandardFields = "接口返回成功，但未识别到标准额度字段"
+    static let codexEmptyQuotaFields = "暂时没有额度数据。"
+    static let codexOAuthFellBackToApiKey = "OAuth 暂时不可用，已改用 API Key 获取额度。"
+    static let codexNoStandardFields = "未能识别到额度数据。"
 
     /// Extracts the minute count from a canonical stale-live-data note, if that is what `raw` is.
     static func staleLiveDataMinutes(from raw: String) -> Int? {
@@ -58,121 +61,121 @@ extension AppText {
         case QuotaNoteCatalog.claudeRateLimitReached:
             switch language {
             case .english:
-                return "Claude Code reported “Usage limit reached”. QuotaBar shows 0% remaining until reset."
+                return "You’ve used up this window’s quota. It comes back at the reset time."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "Claude Code 已提示 Usage limit reached；QuotaBar 在重置前以 0% 剩餘額度顯示。"
+                return "本輪額度已用完，需等到重置時間後自動恢復。"
             }
         case QuotaNoteCatalog.claudeUsageRateLimited:
             switch language {
             case .english:
-                return "Your Claude account authorization has expired, so live usage can’t be fetched. Run claude in a terminal, use /login to sign in again, then hit Refresh."
+                return "Your Claude sign-in has expired, so live usage can’t load. Run claude in a terminal, use /login to sign in again, then hit Refresh."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "你的 Claude 帳號授權暫時失效，無法取得即時額度；請在終端機執行 claude 並使用 /login 重新登入授權後按重新整理。"
+                return "你的 Claude 登入授權已失效，無法取得即時額度；請在終端機執行 claude 並使用 /login 重新登入後按重新整理。"
             }
         case QuotaNoteCatalog.claudeAwaitingSession:
             switch language {
             case .english:
-                return "Waiting for a Claude Code session. Open Claude Code and get one response to show 5h/7d usage."
+                return "No usage data yet — use Claude Code once and it’ll show up here."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "等待 Claude Code 工作階段同步；開啟 Claude Code 並產生一次回應後會顯示 5h/7d 用量。"
+                return "還沒有額度資料，在 Claude Code 裡用一次後即可顯示。"
             }
         case QuotaNoteCatalog.claudeWindowStale:
             switch language {
             case .english:
-                return "Live data unavailable; expired usage windows are hidden to avoid showing stale numbers. They return once it recovers or you sign in again."
+                return "Can’t get the latest quota right now — it’ll update once it recovers. Try Refresh."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "即時介面暫時無法使用，已隱藏過期的用量視窗以免顯示舊資料；介面恢復或重新登入後會自動更新為即時值。"
+                return "暫時無法取得最新額度，恢復後會自動更新；可點重新整理重試。"
             }
         case QuotaNoteCatalog.claudeApiKeyNoWindows:
             switch language {
             case .english:
-                return "API key / third-party provider mode usually has no Pro/Max 5h/7d usage bars."
+                return "API key / third-party mode has no 5-hour or weekly limits to show."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "API Key／第三方提供方模式通常沒有 Pro/Max 5h/7d 用量條。"
+                return "目前為 API Key / 第三方模式，沒有 5 小時 / 每週額度限制。"
             }
         case QuotaNoteCatalog.claudeStatusLineNoWindows:
             switch language {
             case .english:
-                return "Claude Code statusLine synced, but this snapshot has no 5h/7d usage yet; it updates after the next response."
+                return "Syncing usage — it’ll appear after your next Claude Code response."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "Claude Code statusLine 已同步，但本次快照尚未包含 5h/7d 用量；下一次回應後會自動更新。"
+                return "額度資料同步中，在 Claude Code 裡用一次後會顯示。"
             }
         case QuotaNoteCatalog.cursorLiveUnavailableCache:
             switch language {
             case .english:
-                return "Live data unavailable; showing cached data."
+                return "Can’t refresh right now — showing your most recent quota."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "即時介面暫時無法使用，正在顯示快取資料。"
+                return "暫時無法刷新，顯示的是最近一次的額度。"
             }
         case QuotaNoteCatalog.cursorLegacyNoStandardFields:
             switch language {
             case .english:
-                return "Cursor legacy API succeeded but no standard quota fields were found."
+                return "Couldn’t read quota data — this account type may not be supported."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "Cursor legacy 介面回應成功，但未辨識到標準額度欄位。"
+                return "未能讀取到額度資料，可能是該帳號類型暫不支援。"
             }
         case QuotaNoteCatalog.codexEmptyQuotaFields:
             switch language {
             case .english:
-                return "The API succeeded but the quota fields are empty."
+                return "No quota data available right now."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "介面回應成功，但額度欄位為空。"
+                return "暫時沒有額度資料。"
             }
         case QuotaNoteCatalog.codexOAuthFellBackToApiKey:
             switch language {
             case .english:
-                return "OAuth lookup failed; fell back to the API key."
+                return "OAuth unavailable — using your API key instead."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "OAuth 查詢失敗，已回退 API Key。"
+                return "OAuth 暫時無法使用，已改用 API Key 取得額度。"
             }
         case QuotaNoteCatalog.codexNoStandardFields:
             switch language {
             case .english:
-                return "The API succeeded but no standard quota fields were found."
+                return "Couldn’t recognize any quota data."
             case .simplifiedChinese:
                 return raw
             case .traditionalChinese:
-                return "介面回應成功，但未辨識到標準額度欄位。"
+                return "未能辨識到額度資料。"
             }
         default:
             return raw
         }
     }
 
-    /// A short, one-line display form for notes that call the user to act (currently the expired-
-    /// authorization note). Full guidance stays in `localizedNote` (shown as the hover tooltip).
-    /// Returns nil for notes with no distinct short form — the caller falls back to the full text.
+    /// A short, one-line display form for notes that call the user to act (currently the expired
+    /// sign-in note). Full guidance stays in `localizedNote` (shown as the hover tooltip). Returns
+    /// nil for notes with no distinct short form — the caller falls back to the full text.
     func localizedNoteShort(_ raw: String?) -> String? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
         switch raw {
         case QuotaNoteCatalog.claudeUsageRateLimited:
             switch language {
             case .english:
-                return "Authorization expired — sign in to Claude Code again"
+                return "Sign-in expired — sign in to Claude Code again"
             case .simplifiedChinese:
-                return "登录授权已失效，请重新登录 Claude Code"
+                return "登录已失效，请重新登录 Claude Code"
             case .traditionalChinese:
-                return "登入授權已失效，請重新登入 Claude Code"
+                return "登入已失效，請重新登入 Claude Code"
             }
         default:
             return nil
@@ -188,11 +191,11 @@ extension AppText {
     private func claudeStaleLiveDataText(minutes: Int) -> String {
         switch language {
         case .english:
-            return "Live data unavailable; showing the real quota from about \(minutes) min ago."
+            return "Can’t refresh right now — showing your quota from about \(minutes) min ago."
         case .simplifiedChinese:
             return QuotaNoteCatalog.claudeStaleLiveData(minutes: minutes)
         case .traditionalChinese:
-            return "即時介面暫時無法使用，顯示約 \(minutes) 分鐘前的真實額度。"
+            return "暫時無法刷新，顯示的是約 \(minutes) 分鐘前的額度。"
         }
     }
 }

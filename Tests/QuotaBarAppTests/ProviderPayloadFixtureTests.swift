@@ -485,7 +485,7 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.secondary?.used == 12)
         #expect(snapshot.isQuotaBlocked == true)
         #expect(snapshot.statusBarMetric?.ratio == 0)
-        #expect(snapshot.note?.contains("Usage limit reached") == true)
+        #expect(snapshot.note == QuotaNoteCatalog.claudeRateLimitReached)
     }
 
     @Test("Claude expired local rate-limit transcript does not override current statusLine")
@@ -603,7 +603,7 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.primary?.used == 100)
         #expect(snapshot.isQuotaBlocked == true)
         #expect(snapshot.statusBarMetric?.ratio == 0)
-        #expect(snapshot.note?.contains("Usage limit reached") == true)
+        #expect(snapshot.note == QuotaNoteCatalog.claudeRateLimitReached)
         // The weekly window is a separate limit and should keep its real utilization.
         #expect(snapshot.secondary?.used == 12)
     }
@@ -636,7 +636,7 @@ struct ProviderPayloadFixtureTests {
 
         // Canonical (Simplified) note → localized per language. The auth note is user-facing and
         // guides re-login; it is actionable and has a short display form for the card.
-        #expect(en.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("authorization") == true)
+        #expect(en.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("sign-in") == true)
         #expect(tc.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("授權") == true)
         #expect(sc.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited) == QuotaNoteCatalog.claudeUsageRateLimited)
         #expect(en.isActionableNote(QuotaNoteCatalog.claudeUsageRateLimited) == true)
@@ -648,8 +648,8 @@ struct ProviderPayloadFixtureTests {
         #expect(sc.localizedNoteShort(QuotaNoteCatalog.claudeWindowStale) == nil)
 
         // Stale/expired-window note (shown when the frozen statusLine window is dropped).
-        #expect(en.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("hidden") == true)
-        #expect(tc.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("隱藏") == true)
+        #expect(en.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("latest quota") == true)
+        #expect(tc.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("更新") == true)
 
         // Parameterized stale note keeps the minute count in every language.
         let stale = QuotaNoteCatalog.claudeStaleLiveData(minutes: 7)
@@ -706,7 +706,7 @@ struct ProviderPayloadFixtureTests {
         // never shown as the stale 8% nor invented as 0%/full. The fresh 7d window remains.
         #expect(snapshot.primary == nil)
         #expect(snapshot.secondary?.used == 31)
-        #expect(snapshot.note?.contains("隐藏") == true)
+        #expect(snapshot.note == QuotaNoteCatalog.claudeWindowStale)
         #expect(QuotaFreshness.isStale(snapshot, now: now))
     }
 

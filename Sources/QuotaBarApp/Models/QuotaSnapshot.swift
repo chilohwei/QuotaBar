@@ -85,24 +85,6 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
     let isQuotaBlocked: Bool?
     let note: String?
 
-    private enum CodingKeys: String, CodingKey {
-        case source
-        case accountIdentifier
-        case planName
-        case primary
-        case secondary
-        case tertiary
-        case creditsRemaining
-        case creditsTotal
-        case updatedAt
-        case periodEnd
-        case accountValidUntil
-        case subscriptionWillRenew
-        case subscriptionStatus
-        case isQuotaBlocked
-        case note
-    }
-
     init(
         source: String,
         accountIdentifier: String? = nil,
@@ -205,7 +187,11 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         secondaryPanelMetric?.title ?? "Weekly"
     }
 
-    func replacing(source: String? = nil, updatedAt: Date? = nil, note: String? = nil) -> QuotaSnapshot {
+    func replacing(
+        source: String? = nil,
+        updatedAt: Date? = nil,
+        note: String? = nil
+    ) -> QuotaSnapshot {
         QuotaSnapshot(
             source: source ?? self.source,
             accountIdentifier: accountIdentifier,
