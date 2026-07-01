@@ -191,12 +191,17 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             dashboardPanel.close()
         } else {
             pendingPanelPresentationTask?.cancel()
+            // Show the panel immediately with whatever data is already cached, then
+            // do the (potentially slow) account sync / refresh in the background. The
+            // dashboard is bound to appState and updates reactively as fresh data
+            // arrives, so awaiting the preparation before presenting only added
+            // perceived latency to every click.
+            appState.refreshLaunchAtLoginState()
+            presentDashboardPanel(relativeTo: button)
             pendingPanelPresentationTask = Task { [weak self] in
                 guard let self else { return }
-                appState.refreshLaunchAtLoginState()
-                await appState.prepareSelectedToolForDashboardPresentation()
-                guard !Task.isCancelled else { return }
-                self.presentDashboardPanel(relativeTo: button)
+                await self.appState.prepareSelectedToolForDashboardPresentation()
+                self.pendingPanelPresentationTask = nil
             }
         }
     }
@@ -217,7 +222,6 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             self?.updateDashboardPanelSize()
         }
         NSApp.activate(ignoringOtherApps: true)
-        pendingPanelPresentationTask = nil
     }
 
     func windowWillClose(_ notification: Notification) {
