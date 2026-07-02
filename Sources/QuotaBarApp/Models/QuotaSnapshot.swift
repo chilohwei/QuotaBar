@@ -68,6 +68,14 @@ enum QuotaDisplayMetric: Equatable, Sendable {
     }
 }
 
+enum QuotaAvailabilityStatus: String, Codable, Equatable, Sendable {
+    case normal
+    case quotaExhausted
+    case sessionRateLimited
+    case authRateLimited
+    case serviceUnavailable
+}
+
 struct QuotaSnapshot: Codable, Equatable, Sendable {
     let source: String
     let accountIdentifier: String?
@@ -83,6 +91,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
     let subscriptionWillRenew: Bool?
     let subscriptionStatus: String?
     let isQuotaBlocked: Bool?
+    let availabilityStatus: QuotaAvailabilityStatus?
     let note: String?
 
     init(
@@ -100,6 +109,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         subscriptionWillRenew: Bool? = nil,
         subscriptionStatus: String? = nil,
         isQuotaBlocked: Bool? = nil,
+        availabilityStatus: QuotaAvailabilityStatus? = nil,
         note: String?
     ) {
         self.source = source
@@ -116,6 +126,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         self.subscriptionWillRenew = subscriptionWillRenew
         self.subscriptionStatus = subscriptionStatus
         self.isQuotaBlocked = isQuotaBlocked
+        self.availabilityStatus = availabilityStatus
         self.note = note
     }
 
@@ -136,8 +147,38 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
             subscriptionWillRenew: try container.decodeIfPresent(Bool.self, forKey: .subscriptionWillRenew),
             subscriptionStatus: try container.decodeIfPresent(String.self, forKey: .subscriptionStatus),
             isQuotaBlocked: try container.decodeIfPresent(Bool.self, forKey: .isQuotaBlocked),
+            availabilityStatus: try container.decodeIfPresent(QuotaAvailabilityStatus.self, forKey: .availabilityStatus),
             note: try container.decodeIfPresent(String.self, forKey: .note)
         )
+    }
+
+    var effectiveAvailabilityStatus: QuotaAvailabilityStatus {
+        if let availabilityStatus {
+            return availabilityStatus
+        }
+        if note == QuotaNoteCatalog.claudeRateLimitReached {
+            return .sessionRateLimited
+        }
+        if note == QuotaNoteCatalog.claudeUsageRateLimited {
+            return .authRateLimited
+        }
+        if hasExhaustedQuota {
+            return .quotaExhausted
+        }
+        return .normal
+    }
+
+    var isTemporarilyBlocked: Bool {
+        effectiveAvailabilityStatus == .sessionRateLimited
+            || effectiveAvailabilityStatus == .authRateLimited
+            || effectiveAvailabilityStatus == .serviceUnavailable
+    }
+
+    var hasExhaustedQuota: Bool {
+        orderedMetrics
+            .compactMap(\.ratio)
+            .contains { $0 <= 0.001 }
+            || isQuotaBlocked == true
     }
 
     var statusBarMetric: QuotaDisplayMetric? {
@@ -190,7 +231,8 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
     func replacing(
         source: String? = nil,
         updatedAt: Date? = nil,
-        note: String? = nil
+        note: String? = nil,
+        availabilityStatus: QuotaAvailabilityStatus? = nil
     ) -> QuotaSnapshot {
         QuotaSnapshot(
             source: source ?? self.source,
@@ -207,6 +249,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
             subscriptionWillRenew: subscriptionWillRenew,
             subscriptionStatus: subscriptionStatus,
             isQuotaBlocked: isQuotaBlocked,
+            availabilityStatus: availabilityStatus ?? self.availabilityStatus,
             note: note ?? self.note
         )
     }

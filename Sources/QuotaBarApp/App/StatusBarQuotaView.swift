@@ -4,6 +4,9 @@ struct StatusBarQuotaEntry {
     let tool: ToolKind
     let accountName: String
     let remainingPercent: Int
+    let source: String
+    let updatedAt: Date
+    let availabilityStatus: QuotaAvailabilityStatus
     let lines: [StatusBarQuotaLine]
 }
 

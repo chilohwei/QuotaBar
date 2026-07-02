@@ -10,7 +10,7 @@ protocol Provider: Sendable {
     func activate(account: Account, secret: String) async throws
     func fetchQuota(secret: String) async throws -> QuotaSnapshot
     func fetchQuota(account: Account, secret: String) async throws -> QuotaSnapshot
-    func fetchQuota(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot
+    func fetchQuota(account: Account, secret: String, intent: RefreshIntent) async throws -> QuotaSnapshot
     func refreshSecretIfNeeded(_ secret: String) async throws -> String
     func refreshSecretAfterAuthenticationFailure(_ secret: String) async throws -> String?
     func persistRefreshedSecret(_ secret: String, for account: Account, isActive: Bool) async throws
@@ -50,8 +50,8 @@ extension Provider {
         return try await fetchQuota(secret: secret)
     }
 
-    func fetchQuota(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
-        _ = forceRefresh
+    func fetchQuota(account: Account, secret: String, intent: RefreshIntent) async throws -> QuotaSnapshot {
+        _ = intent
         return try await fetchQuota(account: account, secret: secret)
     }
 
@@ -101,6 +101,7 @@ enum ProviderError: LocalizedError {
     case tokenRefreshFailed(tool: ToolKind)
     case cacheCorrupted(tool: ToolKind)
     case noUsableCredential(tool: ToolKind)
+    case rateLimited(tool: ToolKind, retryAfter: Date?)
     case unsupported(String)
     case network(String)
 
@@ -120,6 +121,8 @@ enum ProviderError: LocalizedError {
             return "缓存异常，点刷新即可恢复"
         case .noUsableCredential(let tool):
             return "未找到 \(tool.displayName) 登录信息，请先登录"
+        case .rateLimited(let tool, _):
+            return "\(tool.displayName) 刷新暂时变慢，稍后自动重试"
         case .unsupported(let message):
             return message
         case .network(let message):

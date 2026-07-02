@@ -459,6 +459,37 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.isQuotaBlocked == false)
     }
 
+    @Test("Claude statusLine payload accepts weekly aliases")
+    func claudeStatusLinePayloadAcceptsWeeklyAliases() throws {
+        let status = try jsonDictionary("""
+        {
+          "rate_limits": {
+            "fiveHour": {
+              "used_percentage": 64,
+              "resetsAt": "2026-06-05T14:00:00Z"
+            },
+            "weekly_all_models": {
+              "used_percentage": 15,
+              "nextResetAt": 1780200000000
+            }
+          }
+        }
+        """)
+
+        let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
+            status,
+            capturedAt: Date(timeIntervalSince1970: 1_770_000_000),
+            now: Date(timeIntervalSince1970: 1_770_000_000)
+        )
+
+        #expect(snapshot.primary?.label == "5h")
+        #expect(snapshot.primary?.used == 64)
+        #expect(snapshot.primary?.resetAt == ISO8601DateFormatter().date(from: "2026-06-05T14:00:00Z"))
+        #expect(snapshot.secondary?.label == "7d")
+        #expect(snapshot.secondary?.used == 15)
+        #expect(snapshot.orderedMetrics.count == 2)
+    }
+
     @Test("Claude OAuth token expiry is not shown as account expiration")
     func claudeOAuthTokenExpiryIsNotAccountExpiration() throws {
         let status = try jsonDictionary("""
@@ -500,8 +531,8 @@ struct ProviderPayloadFixtureTests {
         #expect(ClaudeCodeProvider().shouldUseStatusLineSnapshotForTesting(status) == true)
     }
 
-    @Test("Claude local rate-limit transcript overrides stale statusLine percentage")
-    func claudeRateLimitTranscriptOverridesStatusLine() throws {
+    @Test("Claude local rate-limit transcript marks block without rewriting statusLine quota")
+    func claudeRateLimitTranscriptMarksBlockWithoutRewritingStatusLine() throws {
         let status = try jsonDictionary("""
         {
           "rate_limits": {
@@ -527,11 +558,12 @@ struct ProviderPayloadFixtureTests {
             rateLimitTranscriptLine: rateLimitLine
         )
 
-        #expect(snapshot.primary?.used == 100)
+        #expect(snapshot.primary?.used == 71)
         #expect(snapshot.primary?.resetAt == Date(timeIntervalSince1970: 1_782_733_800))
         #expect(snapshot.secondary?.used == 12)
         #expect(snapshot.isQuotaBlocked == true)
-        #expect(snapshot.statusBarMetric?.ratio == 0)
+        #expect(snapshot.effectiveAvailabilityStatus == .sessionRateLimited)
+        #expect(approximately(snapshot.statusBarMetric?.ratio, 0.29))
         #expect(snapshot.note == QuotaNoteCatalog.claudeRateLimitReached)
     }
 
@@ -618,13 +650,41 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.primary?.used == 100)
         #expect(snapshot.secondary?.used == 31)
         #expect(snapshot.isQuotaBlocked == true)
+        #expect(snapshot.effectiveAvailabilityStatus == .quotaExhausted)
     }
 
-    @Test("Claude OAuth live snapshot honors active session limit even when utilization is low")
-    func claudeOAuthUsagePayloadHonorsActiveRateLimit() throws {
-        // Mirrors the real bug: the rolling-window utilization reads 71%/12% while Claude Code
-        // has logged a 429 "Usage limit reached". The live OAuth snapshot must still flip to
-        // 0% remaining / blocked instead of showing the stale 29% remaining.
+    @Test("Claude OAuth usage payload accepts weekly aliases")
+    func claudeOAuthUsagePayloadAcceptsWeeklyAliases() throws {
+        let payload = try jsonDictionary("""
+        {
+          "rateLimits": {
+            "fiveHour": {
+              "utilization": 100,
+              "resetsAt": "2026-06-28T07:00:00Z"
+            },
+            "weekly_all_models": {
+              "utilization": 15,
+              "nextResetAt": "2026-07-05T12:00:00Z"
+            }
+          }
+        }
+        """)
+
+        let snapshot = ClaudeCodeProvider().parseOAuthUsagePayloadForTesting(
+            payload,
+            authStatusJSON: #"{"email":"claude-user@example.com"}"#
+        )
+
+        #expect(snapshot.primary?.used == 100)
+        #expect(snapshot.secondary?.label == "7d")
+        #expect(snapshot.secondary?.used == 15)
+        #expect(snapshot.orderedMetrics.count == 2)
+    }
+
+    @Test("Claude OAuth live snapshot marks active session limit without rewriting utilization")
+    func claudeOAuthUsagePayloadMarksActiveRateLimitWithoutRewritingUsage() throws {
+        // A Claude Code 429 can mean the current session is blocked, but the OAuth rolling-window
+        // utilization is still the real quota percentage the panel and menu bar should display.
         let payload = try jsonDictionary("""
         {
           "five_hour": {
@@ -647,12 +707,47 @@ struct ProviderPayloadFixtureTests {
             rateLimitTranscriptLine: rateLimitLine
         )
 
-        #expect(snapshot.primary?.used == 100)
+        #expect(snapshot.primary?.used == 71)
         #expect(snapshot.isQuotaBlocked == true)
-        #expect(snapshot.statusBarMetric?.ratio == 0)
+        #expect(snapshot.effectiveAvailabilityStatus == .sessionRateLimited)
+        #expect(approximately(snapshot.statusBarMetric?.ratio, 0.29))
         #expect(snapshot.note == QuotaNoteCatalog.claudeRateLimitReached)
         // The weekly window is a separate limit and should keep its real utilization.
         #expect(snapshot.secondary?.used == 12)
+    }
+
+    @Test("Claude active rate limit keeps cached weekly window")
+    func claudeActiveRateLimitKeepsCachedWeeklyWindow() {
+        let provider = ClaudeCodeProvider()
+        let resetAt = Date(timeIntervalSince1970: 1_782_736_800)
+        let cached = QuotaSnapshot(
+            source: "Claude Code OAuth Cache",
+            accountIdentifier: "claude-user@example.com",
+            planName: "Claude.ai",
+            primary: QuotaWindow(label: "5h", used: 0, limit: 100, resetAt: nil),
+            secondary: QuotaWindow(label: "7d", used: 15, limit: 100, resetAt: Date(timeIntervalSince1970: 1_783_242_000)),
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_782_730_000),
+            note: QuotaNoteCatalog.claudeStaleLiveData(minutes: 7)
+        )
+        let event = ClaudeCodeProvider.ClaudeRateLimitEvent(
+            resetAt: resetAt,
+            capturedAt: Date(timeIntervalSince1970: 1_782_730_800),
+            message: nil
+        )
+
+        let snapshot = provider.applyActiveRateLimit(
+            to: cached,
+            rateLimitEvent: event,
+            now: Date(timeIntervalSince1970: 1_782_730_800)
+        )
+
+        #expect(snapshot.primary?.used == 100)
+        #expect(snapshot.primary?.resetAt == resetAt)
+        #expect(snapshot.secondary?.used == 15)
+        #expect(snapshot.orderedMetrics.count == 2)
+        #expect(snapshot.effectiveAvailabilityStatus == .sessionRateLimited)
     }
 
     @Test("Claude OAuth live snapshot keeps utilization when no active rate limit")
@@ -681,30 +776,30 @@ struct ProviderPayloadFixtureTests {
         let tc = AppText(language: .traditionalChinese)
         let sc = AppText(language: .simplifiedChinese)
 
-        // Canonical (Simplified) note → localized per language. The auth note is user-facing and
-        // guides re-login; it is actionable and has a short display form for the card.
-        #expect(en.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("sign-in") == true)
-        #expect(tc.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("授權") == true)
+        // Canonical (Simplified) note → localized per language. The Claude refresh slowdown note
+        // stays quiet because QuotaBar retries automatically; sign-in errors are handled separately.
+        #expect(en.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("automatically") == true)
+        #expect(tc.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited)?.contains("自動重試") == true)
         #expect(sc.localizedNote(QuotaNoteCatalog.claudeUsageRateLimited) == QuotaNoteCatalog.claudeUsageRateLimited)
-        #expect(en.isActionableNote(QuotaNoteCatalog.claudeUsageRateLimited) == true)
-        #expect(en.isActionableNote(QuotaNoteCatalog.claudeWindowStale) == false)
-        // Short form fits on one line and still tells the user to sign in again.
-        let shortEN = en.localizedNoteShort(QuotaNoteCatalog.claudeUsageRateLimited)
-        #expect(shortEN?.contains("sign in") == true)
-        #expect((shortEN?.count ?? 999) < QuotaNoteCatalog.claudeUsageRateLimited.count)
-        #expect(sc.localizedNoteShort(QuotaNoteCatalog.claudeWindowStale) == nil)
+        #expect(sc.shouldDisplayNoteOnCard(QuotaNoteCatalog.claudeRateLimitReached) == false)
+        #expect(sc.shouldDisplayNoteOnCard(QuotaNoteCatalog.claudeUsageRateLimited) == false)
+        #expect(sc.shouldDisplayNoteOnCard(QuotaNoteCatalog.claudeWindowStale) == false)
 
         // Stale/expired-window note (shown when the frozen statusLine window is dropped).
-        #expect(en.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("latest quota") == true)
+        #expect(en.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("most recent") == true)
         #expect(tc.localizedNote(QuotaNoteCatalog.claudeWindowStale)?.contains("更新") == true)
 
         // Parameterized stale note keeps the minute count in every language.
         let stale = QuotaNoteCatalog.claudeStaleLiveData(minutes: 7)
         #expect(en.localizedNote(stale)?.contains("7 min") == true)
         #expect(tc.localizedNote(stale)?.contains("7 分鐘") == true)
+        #expect(sc.localizedNote("暂时无法刷新，显示的是约 7 分钟前的额度。") == "显示约 7 分钟前的额度，稍后会自动更新。")
+        #expect(sc.shouldDisplayNoteOnCard(stale) == false)
+        #expect(sc.shouldDisplayNoteOnCard(QuotaNoteCatalog.claudeAwaitingSession) == true)
 
         // Cross-provider note also localizes.
-        #expect(en.localizedNote(QuotaNoteCatalog.codexOAuthFellBackToApiKey)?.contains("OAuth") == true)
+        #expect(en.localizedNote(QuotaNoteCatalog.codexOAuthFellBackToApiKey)?.contains("API key") == true)
+        #expect(en.shouldDisplayNoteOnCard(QuotaNoteCatalog.codexOAuthFellBackToApiKey) == false)
 
         // Unknown / composed (already language-neutral) notes pass through untouched.
         #expect(en.localizedNote("Included $8/$20 · On-demand $3") == "Included $8/$20 · On-demand $3")
@@ -722,6 +817,98 @@ struct ProviderPayloadFixtureTests {
         #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 9) == ClaudeCodeProvider.tokenRefreshCooldownMax)
         // Defensive: non-positive attempts fall back to the base cooldown, never a negative delay.
         #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 0) == 5 * 60)
+    }
+
+    @Test("Claude refresh intents respect token refresh cooldown")
+    func claudeRefreshIntentsRespectTokenRefreshCooldown() {
+        let now = Date(timeIntervalSince1970: 1_782_980_000)
+        let future = now.addingTimeInterval(10 * 60)
+        let past = now.addingTimeInterval(-1)
+
+        #expect(ClaudeCodeProvider.shouldBlockTokenRefresh(until: future, intent: .background, now: now))
+        #expect(ClaudeCodeProvider.shouldBlockTokenRefresh(until: future, intent: .visible, now: now))
+        #expect(!ClaudeCodeProvider.shouldBlockTokenRefresh(until: future, intent: .manual, now: now))
+        #expect(!ClaudeCodeProvider.shouldBlockTokenRefresh(until: past, intent: .visible, now: now))
+        #expect(!ClaudeCodeProvider.shouldBlockTokenRefresh(until: nil, intent: .manual, now: now))
+    }
+
+    @Test("Claude statusLine is fallback when live usage is unavailable")
+    func claudeStatusLineIsFallbackWhenLiveUsageUnavailable() {
+        let provider = ClaudeCodeProvider()
+        let statusLine = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            accountIdentifier: "claude-user@example.com",
+            planName: "Claude.ai",
+            primary: QuotaWindow(label: "5h", used: 6, limit: 100, resetAt: nil),
+            secondary: QuotaWindow(label: "7d", used: 8, limit: 100, resetAt: nil),
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_782_977_000),
+            note: nil
+        )
+        let syncingStatusLine = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            accountIdentifier: "claude-user@example.com",
+            planName: "Claude.ai",
+            primary: nil,
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_782_978_000),
+            note: QuotaNoteCatalog.claudeStatusLineNoWindows
+        )
+        let liveOAuth = QuotaSnapshot(
+            source: "Claude Code OAuth",
+            accountIdentifier: "claude-user@example.com",
+            planName: "Claude.ai",
+            primary: QuotaWindow(label: "5h", used: 2, limit: 100, resetAt: nil),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_782_979_000),
+            note: nil
+        )
+
+        #expect(provider.shouldUseStatusLineSnapshotAsPrimary(statusLine))
+        #expect(!provider.shouldUseStatusLineSnapshotAsPrimary(syncingStatusLine))
+        #expect(!provider.shouldUseStatusLineSnapshotAsPrimary(liveOAuth))
+
+        let now = statusLine.updatedAt.addingTimeInterval(60)
+        let staleLiveCache = liveOAuth.replacing(
+            source: "Claude Code OAuth Cache",
+            updatedAt: now.addingTimeInterval(-31 * 60)
+        )
+        #expect(provider.preferredClaudeSnapshot(
+            liveSnapshot: liveOAuth,
+            statusLineSnapshot: statusLine,
+            hasUsableStatusLineSnapshot: true
+        ).source == "Claude Code OAuth")
+        let mergedLiveOAuth = provider.preferredClaudeSnapshot(
+            liveSnapshot: liveOAuth,
+            statusLineSnapshot: statusLine,
+            hasUsableStatusLineSnapshot: true
+        )
+        #expect(mergedLiveOAuth.secondary?.used == 8)
+        #expect(mergedLiveOAuth.orderedMetrics.count == 2)
+        #expect(provider.preferredClaudeSnapshot(
+            liveSnapshot: staleLiveCache,
+            statusLineSnapshot: statusLine,
+            hasUsableStatusLineSnapshot: true
+        ).source == "Claude Code StatusLine")
+
+        let blockedStatusLine = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            accountIdentifier: "claude-user@example.com",
+            planName: "Claude.ai",
+            primary: QuotaWindow(label: "5h", used: 100, limit: 100, resetAt: nil),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: now.addingTimeInterval(-31 * 60),
+            isQuotaBlocked: true,
+            note: QuotaNoteCatalog.claudeRateLimitReached
+        )
+        #expect(provider.shouldUseStatusLineSnapshotAsPrimary(blockedStatusLine))
     }
 
     @Test("Claude statusLine drops an expired window instead of fabricating a value")

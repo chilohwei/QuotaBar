@@ -21,23 +21,38 @@ extension ClaudeCodeProvider {
         now: Date = Date(),
         rejectExpiredWindows: Bool = true
     ) -> QuotaWindow? {
+        makeWindow(
+            status: status,
+            keys: [key],
+            label: label,
+            now: now,
+            rejectExpiredWindows: rejectExpiredWindows
+        )
+    }
+
+    func makeWindow(
+        status: [String: Any]?,
+        keys: Set<String>,
+        label: String,
+        now: Date = Date(),
+        rejectExpiredWindows: Bool = true
+    ) -> QuotaWindow? {
         guard let rateLimits = status?["rate_limits"] as? [String: Any],
-              let window = rateLimits[key] as? [String: Any],
+              let window = firstDictionary(in: rateLimits, keys: keys),
               let usedPercentage = number(window["used_percentage"]) else {
             return nil
         }
         let resetAt = parseFlexibleDate(firstValue(
             in: window,
-            keys: ["resets_at", "reset_at", "resetAt", "next_reset_at", "nextResetAt"]
+            keys: ["resets_at", "reset_at", "resetAt", "resetsAt", "next_reset_at", "nextResetAt"]
         ))
-        // The statusLine snapshot is only a fallback for when live `/usage` is unavailable, and
-        // Claude Code freezes its `rate_limits` between API calls. Once a window's reset time has
-        // passed, its stored `used_percentage` is untrustworthy: it may mean the window reset and
-        // is now idle at 0%, OR that this frozen snapshot is simply stale while real usage kept
-        // climbing elsewhere (e.g. a managed/remote session that never feeds this local hook — in
-        // which case the true figure can be far from 0). We cannot distinguish the two, so we drop
-        // the window rather than fabricate a number. The accompanying note explains the gap, and
-        // live `/usage` remains the source of truth for an accurate current figure.
+        // statusLine is the primary Claude source, but Claude Code can freeze its `rate_limits`
+        // between API calls. Once a window's reset time has passed, its stored `used_percentage` is
+        // untrustworthy: it may mean the window reset and is now idle at 0%, OR that this frozen
+        // snapshot is simply stale while real usage kept climbing elsewhere (e.g. a managed/remote
+        // session that never feeds this local hook, in which case the true figure can be far from
+        // 0). We cannot distinguish the two, so we drop the window rather than fabricate a number.
+        // The OAuth path may then be used as a fallback.
         if rejectExpiredWindows, let resetAt, resetAt.addingTimeInterval(60) < now {
             return nil
         }
@@ -86,7 +101,8 @@ extension ClaudeCodeProvider {
             in: status as Any,
             keys: ["transcript_path", "transcriptPath", "transcript"]
         ) {
-            urls.append(URL(fileURLWithPath: fileService.expand(path: transcriptPath)))
+            let url = URL(fileURLWithPath: fileService.expand(path: transcriptPath))
+            return [url]
         }
 
         urls.append(contentsOf: recentClaudeProjectTranscriptURLs(now: now))
@@ -221,7 +237,10 @@ extension ClaudeCodeProvider {
         guard let used = number(dict["utilization"]) ?? number(dict["used_percentage"]) else {
             return nil
         }
-        let resetAt = parseFlexibleDate(dict["resets_at"] ?? dict["reset_at"] ?? dict["resetAt"])
+        let resetAt = parseFlexibleDate(firstValue(
+            in: dict,
+            keys: ["resets_at", "reset_at", "resetAt", "resetsAt", "next_reset_at", "nextResetAt"]
+        ))
         return QuotaWindow(
             label: label,
             used: min(max(used, 0), 100),

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Security
 
 enum SecretStoreError: LocalizedError {
@@ -105,6 +106,12 @@ struct SecretStoreService {
 }
 
 struct SystemSecretKeychainClient: SecretKeychainClient {
+    private typealias SecAccessCreateFunction = @convention(c) (
+        CFString,
+        CFArray?,
+        UnsafeMutablePointer<SecAccess?>?
+    ) -> OSStatus
+
     func saveSecret(_ data: Data, service: String, account: String) throws {
         var query = Self.baseQuery(service: service, account: account)
         query[kSecValueData as String] = data
@@ -138,7 +145,7 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
     private static func applyAccessPolicy(to query: inout [String: Any]) {
         var access: SecAccess?
         // A nil trusted-application list means "all applications", i.e. no prompt.
-        if SecAccessCreate("QuotaBar" as CFString, nil, &access) == errSecSuccess,
+        if legacySecAccessCreate("QuotaBar" as CFString, trustedApplications: nil, access: &access) == errSecSuccess,
            let access {
             query[kSecAttrAccess as String] = access
         } else {
@@ -148,20 +155,36 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
         }
     }
 
+    private static func legacySecAccessCreate(
+        _ descriptor: CFString,
+        trustedApplications: CFArray?,
+        access: UnsafeMutablePointer<SecAccess?>?
+    ) -> OSStatus {
+        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW) else {
+            return errSecUnimplemented
+        }
+        defer { dlclose(handle) }
+
+        guard let symbol = dlsym(handle, "SecAccessCreate") else {
+            return errSecUnimplemented
+        }
+        let createAccess = unsafeBitCast(symbol, to: SecAccessCreateFunction.self)
+        return createAccess(descriptor, trustedApplications, access)
+    }
+
     func readSecret(service: String, account: String) throws -> Data? {
         var query = Self.baseQuery(service: service, account: account)
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
 
         // Never let a keychain ACL mismatch raise the interactive password dialog.
         // An item stored by a previous, differently-signed build of QuotaBar is
         // guarded by an ACL that trusts only that old signature, so reading it would
-        // normally prompt for the macOS login password. Disabling keychain UI for
-        // the read makes it return errSecInteractionNotAllowed instead; we treat
-        // that as "not found" so the caller re-imports the credential from source
-        // and re-saves it with the unrestricted access policy (no prompt).
-        SecKeychainSetUserInteractionAllowed(false)
-        defer { SecKeychainSetUserInteractionAllowed(true) }
+        // normally prompt for the macOS login password. Skipping authentication UI
+        // makes it return errSecInteractionNotAllowed instead; we treat that as
+        // "not found" so the caller re-imports the credential from source and
+        // re-saves it with the unrestricted access policy (no prompt).
 
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)

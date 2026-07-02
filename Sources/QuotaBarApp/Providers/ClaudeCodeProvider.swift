@@ -17,8 +17,8 @@ struct ClaudeCodeProvider: Provider {
     // `/api/oauth/usage` is aggressively rate-limited (see anthropics/claude-code#30930); the
     // community-recommended floor for polling it is ~180s, so we stay at or above that.
     static let liveUsageMinFetchInterval: TimeInterval = 180
-    // When `/usage` is temporarily unavailable, the last live snapshot may be shown — clearly
-    // labeled with its age — up to this old, instead of falling back to stale statusLine data.
+    // When the OAuth fallback path is temporarily unavailable, the last live snapshot may be shown
+    // up to this old, clearly labeled with its age.
     static let liveUsageStaleMax: TimeInterval = 30 * 60
     // After a token refresh fails, wait this long before trying again, so a throttled auth endpoint
     // is given room to recover instead of being hammered on every poll cycle. This is the *base*
@@ -31,11 +31,39 @@ struct ClaudeCodeProvider: Provider {
     static let recentTranscriptFileLimit = 16
     static let transcriptTailByteLimit: UInt64 = 512 * 1024
     static let rateLimitWithoutResetFreshness: TimeInterval = 10 * 60
+    static let fiveHourLimitKeys: Set<String> = [
+        "five_hour",
+        "fiveHour",
+        "five_hour_limit",
+        "fiveHourLimit",
+        "five_hour_usage",
+        "fiveHourUsage",
+        "5h"
+    ]
+    static let weeklyLimitKeys: Set<String> = [
+        "seven_day",
+        "sevenDay",
+        "seven_day_limit",
+        "sevenDayLimit",
+        "seven_day_usage",
+        "sevenDayUsage",
+        "seven_day_all_models",
+        "sevenDayAllModels",
+        "weekly",
+        "week",
+        "weekly_limit",
+        "weeklyLimit",
+        "weekly_usage",
+        "weeklyUsage",
+        "weekly_all_models",
+        "weeklyAllModels",
+        "7d"
+    ]
     // Canonical (Simplified) note strings live in `QuotaNoteCatalog`; the UI localizes them at render
     // time via `AppText.localizedNote`. These aliases keep call sites readable.
     static let rateLimitReachedNote = QuotaNoteCatalog.claudeRateLimitReached
-    // Shown when the live `/usage`/token endpoints are throttling us (HTTP 429), so the panel is on
-    // frozen statusLine data. Tells the user it will self-recover and how to force a fix if it lingers.
+    // Shown when the OAuth fallback `/usage`/token endpoints are throttling us (HTTP 429). Tells
+    // the user it will self-recover and how to force a fix if it lingers.
     static let usageRateLimitedNote = QuotaNoteCatalog.claudeUsageRateLimited
     // How long a `/usage` 429 keeps signalling "rate limited" for the note, absent a fresh success.
     static let usageRateLimitMarkerFreshness: TimeInterval = 30 * 60

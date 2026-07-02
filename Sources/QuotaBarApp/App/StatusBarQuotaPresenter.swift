@@ -20,6 +20,9 @@ struct StatusBarQuotaPresenter {
                 tool: input.tool,
                 accountName: input.accountName,
                 remainingPercent: Int(max(remainingRatio * 100, 0).rounded()),
+                source: input.quota.source,
+                updatedAt: input.quota.updatedAt,
+                availabilityStatus: input.quota.effectiveAvailabilityStatus,
                 lines: lines
             )
         }
@@ -34,7 +37,9 @@ struct StatusBarQuotaPresenter {
                 text.statusBarTooltip(
                     tool: entry.tool,
                     remainingPercent: entry.remainingPercent,
-                    accountName: entry.accountName
+                    accountName: entry.accountName,
+                    metadata: text.quotaSnapshotMeta(source: entry.source, updatedAt: entry.updatedAt),
+                    availability: entry.availabilityStatus
                 )
             }
             .joined(separator: "\n")

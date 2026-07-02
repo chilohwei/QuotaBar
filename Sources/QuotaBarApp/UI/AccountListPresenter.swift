@@ -93,9 +93,15 @@ struct AccountListPresenter {
         _ account: Account,
         quotaByAccount: [UUID: QuotaSnapshot]
     ) -> Bool {
-        guard let quota = quotaByAccount[account.id],
-              quota.isQuotaBlocked != true else {
+        guard let quota = quotaByAccount[account.id] else {
             return false
+        }
+
+        switch quota.effectiveAvailabilityStatus {
+        case .quotaExhausted, .sessionRateLimited:
+            return false
+        case .normal, .authRateLimited, .serviceUnavailable:
+            break
         }
 
         let ratios = [quota.primary, quota.secondary, quota.tertiary]
@@ -359,8 +365,18 @@ struct AccountListPresenter {
             return .available
         }
 
-        if quota.isQuotaBlocked == true {
+        switch quota.effectiveAvailabilityStatus {
+        case .sessionRateLimited:
             return .blocked
+        case .quotaExhausted:
+            if earliestResetDate(account, quotaByAccount: quotaByAccount) != .distantFuture {
+                return .recovering
+            }
+            return .exhausted
+        case .authRateLimited, .serviceUnavailable:
+            return .failed
+        case .normal:
+            break
         }
 
         if earliestResetDate(account, quotaByAccount: quotaByAccount) != .distantFuture {

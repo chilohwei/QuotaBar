@@ -17,6 +17,15 @@ extension ClaudeCodeProvider {
         return nil
     }
 
+    func firstDictionary(in dict: [String: Any], keys: Set<String>) -> [String: Any]? {
+        for (key, value) in dict where keys.contains(key) {
+            if let value = value as? [String: Any] {
+                return value
+            }
+        }
+        return nil
+    }
+
     func firstString(in object: Any, keys: Set<String>) -> String? {
         findString(in: object, keys: keys)
     }

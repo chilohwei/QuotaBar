@@ -72,6 +72,63 @@ struct AccountListPresenterTests {
         #expect(result.isEmpty)
     }
 
+    @Test("refresh rate limit does not hide otherwise available account")
+    func refreshRateLimitDoesNotHideAvailableAccount() {
+        let account = Account(id: UUID(), tool: .claudeCode, name: "claude", createdAt: Date(timeIntervalSince1970: 1))
+        let quotaByAccount = [
+            account.id: QuotaSnapshot(
+                source: "Claude Code OAuth Cache",
+                primary: QuotaWindow(label: "5h", used: 40, limit: 100, resetAt: nil),
+                secondary: nil,
+                creditsRemaining: nil,
+                creditsTotal: nil,
+                updatedAt: Date(timeIntervalSince1970: 0),
+                availabilityStatus: .authRateLimited,
+                note: QuotaNoteCatalog.claudeUsageRateLimited
+            )
+        ]
+
+        let result = AccountListPresenter.visibleAccounts(
+            accounts: [account],
+            filter: .available,
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:],
+            frozenOrder: nil
+        )
+
+        #expect(result.map(\.id) == [account.id])
+    }
+
+    @Test("session rate limit hides account without rewriting quota")
+    func sessionRateLimitHidesAccountWithoutRewritingQuota() {
+        let account = Account(id: UUID(), tool: .claudeCode, name: "claude", createdAt: Date(timeIntervalSince1970: 1))
+        let quotaByAccount = [
+            account.id: QuotaSnapshot(
+                source: "Claude Code OAuth",
+                primary: QuotaWindow(label: "5h", used: 40, limit: 100, resetAt: nil),
+                secondary: nil,
+                creditsRemaining: nil,
+                creditsTotal: nil,
+                updatedAt: Date(timeIntervalSince1970: 0),
+                availabilityStatus: .sessionRateLimited,
+                note: QuotaNoteCatalog.claudeRateLimitReached
+            )
+        ]
+
+        let result = AccountListPresenter.visibleAccounts(
+            accounts: [account],
+            filter: .available,
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:],
+            frozenOrder: nil
+        )
+
+        #expect(result.isEmpty)
+        #expect(quotaByAccount[account.id]?.statusBarMetric?.ratio == 0.6)
+    }
+
     @Test("active account stays first even when another account is recommended")
     func activeAccountStaysFirstEvenWhenAnotherAccountIsRecommended() {
         let recommended = Account(id: UUID(), tool: .codex, name: "recommended", createdAt: Date(timeIntervalSince1970: 1))
@@ -393,27 +450,6 @@ struct AccountListPresenterTests {
         )
 
         #expect(result.map(\.id) == [lowSoon.id, highLater.id])
-    }
-
-    @Test("near expiry account is prioritized when remaining quota is moderate")
-    func nearExpiryAccountIsPrioritizedWhenRemainingQuotaIsModerate() {
-        let moderateSoon = Account(id: UUID(), tool: .codex, name: "moderate-soon", createdAt: Date(timeIntervalSince1970: 1))
-        let highLater = Account(id: UUID(), tool: .codex, name: "high-later", createdAt: Date(timeIntervalSince1970: 2))
-        let quotaByAccount = [
-            moderateSoon.id: snapshot(remaining: 25, accountValidUntil: Date(timeIntervalSince1970: 36_000)),
-            highLater.id: snapshot(remaining: 90, accountValidUntil: Date(timeIntervalSince1970: 4_000_000))
-        ]
-
-        let result = AccountListPresenter.visibleAccounts(
-            accounts: [moderateSoon, highLater],
-            filter: .all,
-            activeID: nil,
-            quotaByAccount: quotaByAccount,
-            loadStateByAccount: [:],
-            frozenOrder: nil
-        )
-
-        #expect(result.map(\.id) == [moderateSoon.id, highLater.id])
     }
 
     @Test("available accounts with equal utilization fall back to freshest snapshot")

@@ -8,8 +8,8 @@ extension ClaudeCodeProvider {
         now: Date = Date(),
         rateLimitEvent: ClaudeRateLimitEvent? = nil
     ) -> QuotaSnapshot {
-        let primary = makeWindow(status: status, key: "five_hour", label: "5h", now: now)
-        let secondary = makeWindow(status: status, key: "seven_day", label: "7d", now: now)
+        let primary = makeWindow(status: status, keys: Self.fiveHourLimitKeys, label: "5h", now: now)
+        let secondary = makeWindow(status: status, keys: Self.weeklyLimitKeys, label: "7d", now: now)
         let base = QuotaSnapshot(
             source: status == nil ? "Claude Code" : "Claude Code StatusLine",
             accountIdentifier: readableIdentity(from: credentials),
@@ -24,6 +24,7 @@ extension ClaudeCodeProvider {
             subscriptionWillRenew: nil,
             subscriptionStatus: nil,
             isQuotaBlocked: isQuotaBlocked(primary: primary, secondary: secondary),
+            availabilityStatus: isQuotaBlocked(primary: primary, secondary: secondary) == true ? .quotaExhausted : nil,
             note: statusNote(
                 status: status,
                 credentials: credentials,
@@ -33,10 +34,9 @@ extension ClaudeCodeProvider {
         return applyActiveRateLimit(to: base, rateLimitEvent: rateLimitEvent, now: now)
     }
 
-    /// Overlays an active session/rate limit onto an existing snapshot (e.g. the live OAuth
-    /// snapshot, whose rolling-window utilization does not reflect a session limit). When a
-    /// limit is active the primary window is forced to 0% remaining and the snapshot is marked
-    /// blocked, mirroring what Claude Code shows as "Usage limit reached".
+    /// Overlays an active session/rate limit onto an existing snapshot without rewriting real quota
+    /// percentages. A Claude Code 429 means the current session is blocked, but the OAuth/statusLine
+    /// windows still carry the real 5h/7d utilization that the panel and menu bar should display.
     func applyActiveRateLimit(
         to snapshot: QuotaSnapshot,
         rateLimitEvent: ClaudeRateLimitEvent?,
@@ -50,13 +50,14 @@ extension ClaudeCodeProvider {
             return snapshot
         }
 
-        // `activeRateLimit.resetAt` already falls back to the primary window's reset time.
-        let primary = QuotaWindow(
-            label: snapshot.primary?.label ?? "5h",
+        let shouldUseActiveLimitAsPrimary = snapshot.primary == nil
+            || snapshot.source == "Claude Code OAuth Cache"
+        let primary = shouldUseActiveLimitAsPrimary ? QuotaWindow(
+            label: "5h",
             used: 100,
             limit: 100,
             resetAt: activeRateLimit.resetAt
-        )
+        ) : snapshot.primary!
 
         return QuotaSnapshot(
             source: snapshot.source,
@@ -73,6 +74,7 @@ extension ClaudeCodeProvider {
             subscriptionWillRenew: snapshot.subscriptionWillRenew,
             subscriptionStatus: snapshot.subscriptionStatus,
             isQuotaBlocked: true,
+            availabilityStatus: .sessionRateLimited,
             note: Self.rateLimitReachedNote
         )
     }
@@ -81,8 +83,8 @@ extension ClaudeCodeProvider {
         guard let status else { return false }
         let snapshot = QuotaSnapshot(
             source: "Claude Code StatusLine",
-            primary: makeWindow(status: status, key: "five_hour", label: "5h", now: now, rejectExpiredWindows: false),
-            secondary: makeWindow(status: status, key: "seven_day", label: "7d", now: now, rejectExpiredWindows: false),
+            primary: makeWindow(status: status, keys: Self.fiveHourLimitKeys, label: "5h", now: now, rejectExpiredWindows: false),
+            secondary: makeWindow(status: status, keys: Self.weeklyLimitKeys, label: "7d", now: now, rejectExpiredWindows: false),
             creditsRemaining: nil,
             creditsTotal: nil,
             updatedAt: now,

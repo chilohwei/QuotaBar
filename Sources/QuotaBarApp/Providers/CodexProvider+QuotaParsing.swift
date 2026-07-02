@@ -57,11 +57,12 @@ extension CodexProvider {
         }
         let planName = normalizedPlanName(
             extractPlanName(from: dict) ?? fallbackPlanName,
-            cycle: extractBillingCycle(from: dict) ?? fallbackPlanName
+            cycle: extractBillingCycle(from: dict)
         )
         let allowed = (rateLimit["allowed"] as? Bool)
         let limitReached = (rateLimit["limit_reached"] as? Bool)
             ?? (rateLimit["limitReached"] as? Bool)
+        let isBlocked = (limitReached == true) || (allowed == false)
 
         let snapshot = QuotaSnapshot(
             source: "Codex OAuth",
@@ -76,7 +77,8 @@ extension CodexProvider {
             accountValidUntil: paidAccountValidUntil(planName, fallbackAccountValidUntil),
             subscriptionWillRenew: fallbackSubscriptionWillRenew,
             subscriptionStatus: fallbackSubscriptionStatus,
-            isQuotaBlocked: (limitReached == true) || (allowed == false),
+            isQuotaBlocked: isBlocked,
+            availabilityStatus: isBlocked ? .quotaExhausted : nil,
             note: (primary == nil && secondary == nil && creditsRemaining == nil) ? QuotaNoteCatalog.codexEmptyQuotaFields : nil
         )
         return snapshot

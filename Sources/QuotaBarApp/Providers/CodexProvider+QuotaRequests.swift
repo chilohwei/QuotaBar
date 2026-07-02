@@ -6,14 +6,11 @@ extension CodexProvider {
     }
 
     func fetchQuota(account: Account, secret: String) async throws -> QuotaSnapshot {
-        try await fetchQuota(account: account, secret: secret, forceRefresh: false)
+        try await fetchQuota(account: account, secret: secret, intent: .background)
     }
 
-    func fetchQuota(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
-        try await fetchQuotaCore(account: account, secret: secret, forceRefresh: forceRefresh)
-    }
-
-    private func fetchQuotaCore(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
+    func fetchQuota(account: Account, secret: String, intent: RefreshIntent) async throws -> QuotaSnapshot {
+        _ = intent
         guard let data = secret.data(using: .utf8) else {
             throw ProviderError.credentialParsingFailed(tool: .codex)
         }
@@ -111,9 +108,13 @@ extension CodexProvider {
                Date().timeIntervalSince(cached.cachedAt) <= Self.fallbackQuotaCacheAge {
                 let note = mergedNote(
                     cached.snapshot.note,
-                    fallback: "实时接口暂不可用，正在显示缓存数据"
+                    fallback: QuotaNoteCatalog.codexLiveUnavailableCache
                 )
-                return cached.snapshot.replacing(source: "Codex OAuth Cache", note: note)
+                return cached.snapshot.replacing(
+                    source: "Codex OAuth Cache",
+                    note: note,
+                    availabilityStatus: .serviceUnavailable
+                )
             }
             throw error
         }
@@ -126,7 +127,7 @@ extension CodexProvider {
         )
         let resolvedPlanName = normalizedPlanName(
             extractPlanName(from: payload) ?? fallbackPlanName,
-            cycle: extractBillingCycle(from: payload) ?? fallbackPlanName
+            cycle: extractBillingCycle(from: payload)
         )
         let directSnapshot = parseCodexRateLimitPayload(
             payload,

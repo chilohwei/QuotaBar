@@ -123,8 +123,13 @@ extension ClaudeCodeProvider {
         model = (((data.get("model") or {}).get("display_name")) or "Claude").strip()
         limits = data.get("rate_limits") or {}
         parts = []
-        for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
-            value = (limits.get(key) or {}).get("used_percentage")
+        windows = (
+            (("five_hour", "fiveHour", "five_hour_limit", "fiveHourLimit", "5h"), "5h"),
+            (("seven_day", "sevenDay", "weekly", "weekly_all_models", "weeklyAllModels", "7d"), "7d"),
+        )
+        for keys, label in windows:
+            window = next((limits.get(key) for key in keys if isinstance(limits.get(key), dict)), {})
+            value = window.get("used_percentage")
             if isinstance(value, (int, float)):
                 parts.append(f"{label}: {value:.0f}%")
         print(f"[{model}] " + " ".join(parts) if parts else f"[{model}]")
@@ -160,7 +165,7 @@ extension ClaudeCodeProvider {
 
 enum OAuthUsageFetchError: Error, Equatable {
     case unauthorized
-    case rateLimited
+    case rateLimited(retryAfter: Date?)
     case invalidResponse
     case httpStatus(Int)
 }

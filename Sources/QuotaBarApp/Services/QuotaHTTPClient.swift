@@ -4,6 +4,14 @@ struct QuotaHTTPError: LocalizedError, Sendable {
     let operation: String
     let statusCode: Int
     let isRetryable: Bool
+    let retryAfter: Date?
+
+    init(operation: String, statusCode: Int, isRetryable: Bool, retryAfter: Date? = nil) {
+        self.operation = operation
+        self.statusCode = statusCode
+        self.isRetryable = isRetryable
+        self.retryAfter = retryAfter
+    }
 
     var errorDescription: String? {
         switch statusCode {
@@ -48,7 +56,8 @@ struct QuotaHTTPClient: Sendable {
                 let failure = QuotaHTTPError(
                     operation: operation,
                     statusCode: http.statusCode,
-                    isRetryable: retryable
+                    isRetryable: retryable,
+                    retryAfter: Self.retryAfterDeadline(from: http)
                 )
                 guard retryable, attempt < maxAttempts - 1 else {
                     throw failure
@@ -118,19 +127,24 @@ struct QuotaHTTPClient: Sendable {
         try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
     }
 
-    private func retryAfterSeconds(from response: HTTPURLResponse?) -> Double? {
+    static func retryAfterDeadline(from response: HTTPURLResponse?, now: Date = Date()) -> Date? {
         guard let raw = response?.value(forHTTPHeaderField: "Retry-After")?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !raw.isEmpty else {
             return nil
         }
         if let seconds = Double(raw), seconds >= 0 {
-            return min(seconds, 30)
+            return now.addingTimeInterval(seconds)
         }
         if let date = HTTPDateFormatter.shared.date(from: raw) {
-            return min(max(date.timeIntervalSinceNow, 0), 30)
+            return max(date, now)
         }
         return nil
+    }
+
+    private func retryAfterSeconds(from response: HTTPURLResponse?) -> Double? {
+        guard let deadline = Self.retryAfterDeadline(from: response) else { return nil }
+        return min(max(deadline.timeIntervalSinceNow, 0), 30)
     }
 
     private func defaultRetryDelaySeconds(for attempt: Int) -> Double {

@@ -10,6 +10,7 @@ struct AccountCardView: View {
     let loadState: AccountLoadState
     let quota: QuotaSnapshot?
     let errorMessage: String?
+    let errorRequiresUserAction: Bool
     let canActivate: Bool
     let refreshCycleID: Int
     let onActivate: () -> Void
@@ -268,11 +269,20 @@ struct AccountCardView: View {
     }
 
     private var status: AccountVisualStatus {
-        if errorMessage != nil, quota == nil { return .error }
+        if errorMessage != nil, quota == nil {
+            return errorRequiresUserAction ? .error : .pending
+        }
         if isRefreshing || loadState == .refreshing || loadState == .loadingInitial { return .refreshing }
         guard let quota else { return .pending }
         if isStaleQuota(quota) { return .stale }
-        if quota.isQuotaBlocked == true { return .exhausted }
+        switch quota.effectiveAvailabilityStatus {
+        case .quotaExhausted:
+            return .exhausted
+        case .sessionRateLimited, .authRateLimited, .serviceUnavailable:
+            return .warning
+        case .normal:
+            break
+        }
         if metrics.isEmpty {
             if account.tool == .claudeCode {
                 return .healthy
@@ -304,8 +314,10 @@ struct AccountCardView: View {
         switch status {
         case .healthy, .warning, .exhausted:
             return false
-        case .refreshing, .pending, .noQuota, .stale, .error:
+        case .refreshing, .pending, .noQuota, .error:
             return true
+        case .stale:
+            return false
         }
     }
 
@@ -359,6 +371,11 @@ struct AccountCardView: View {
             items.append((planSummaryBadge.text, planSummaryBadge.tint, .medium))
         }
 
+        if let quota,
+           let freshnessBadge = text.quotaFreshnessBadge(quota) {
+            items.append((freshnessBadge, Branding.inkSubtle, .light))
+        }
+
         if isRecommended, !isActive {
             items.append((recommendationReason ?? text.string(.recommendedReason), Branding.success, .semibold))
         }
@@ -392,26 +409,21 @@ struct AccountCardView: View {
 
     private var footerMessage: FooterContent? {
         if let errorMessage {
-            if let quota, QuotaFreshness.isStale(quota) {
-                let message = text.staleQuotaMessage(errorMessage)
-                return FooterContent(display: message, tooltip: message, color: Branding.warning, icon: nil, weight: .regular)
+            if errorRequiresUserAction {
+                return FooterContent(display: errorMessage, tooltip: errorMessage, color: Branding.warning, icon: "exclamationmark.circle.fill", weight: .medium)
             }
-            if let quota {
-                let message = text.updatedAt(quota.updatedAt)
-                return FooterContent(display: message, tooltip: message, color: Branding.inkSubtle, icon: nil, weight: .regular)
+            if quota != nil {
+                return nil
             }
-            return FooterContent(display: errorMessage, tooltip: errorMessage, color: Branding.danger, icon: "exclamationmark.triangle.fill", weight: .medium)
+            return FooterContent(display: errorMessage, tooltip: errorMessage, color: Branding.warning, icon: nil, weight: .regular)
         }
-        // No hard error: surface the snapshot's own status note. An actionable note (expired auth →
-        // re-login) gets a prominent, user-facing warning treatment — icon + hue + a short one-line
-        // summary that fits, with the full how-to in the tooltip. Other notes read as muted metadata.
-        guard let quota, let full = text.localizedNote(quota.note) else { return nil }
-        if text.isActionableNote(quota.note) {
-            let short = text.localizedNoteShort(quota.note) ?? full
-            return FooterContent(display: short, tooltip: full, color: Branding.warning, icon: "exclamationmark.triangle.fill", weight: .semibold)
-        }
-        let degraded = QuotaFreshness.isStale(quota) || quota.isQuotaBlocked == true
-        return FooterContent(display: full, tooltip: full, color: degraded ? Branding.warning : Branding.inkSubtle, icon: nil, weight: .regular)
+        // No hard error: surface the snapshot's own status note as muted metadata.
+        // Transient refresh/freshness notes are filtered out by AppText.
+        guard let quota,
+              text.shouldDisplayNoteOnCard(quota.note),
+              let full = text.localizedNote(quota.note) else { return nil }
+        let isBlocked = quota.isTemporarilyBlocked
+        return FooterContent(display: full, tooltip: full, color: isBlocked ? Branding.warning : Branding.inkSubtle, icon: nil, weight: .regular)
     }
 
 
@@ -431,6 +443,14 @@ struct AccountCardView: View {
             ]
         }
         return visibleMetrics.map { ($0.title, $0) }
+    }
+
+    private var metricFallbackDetail: String? {
+        guard visibleMetrics.isEmpty,
+              let quota else {
+            return nil
+        }
+        return text.localizedNote(quota.note)
     }
 
     private var contentSpacing: CGFloat {
@@ -457,7 +477,8 @@ struct AccountCardView: View {
                 CompactQuotaMetricStrip(
                     tiles: metricTiles,
                     fallbackResetAt: quota?.periodEnd,
-                    language: language
+                    language: language,
+                    fallbackDetail: metricFallbackDetail
                 )
             }
 
@@ -535,6 +556,10 @@ struct AccountCardView: View {
         parts.append(contentsOf: metadataItems.map(\.text))
         if let quota {
             parts.append(text.updatedAt(quota.updatedAt))
+            parts.append(text.quotaSnapshotMeta(quota))
+            if let availability = text.quotaAvailabilityText(quota.effectiveAvailabilityStatus) {
+                parts.append(availability)
+            }
         }
         if let footerMessage {
             parts.append(footerMessage.tooltip)
@@ -665,36 +690,14 @@ struct AccountCardView: View {
             return nil
         case .refreshing:
             return (
-                refreshText(.refreshing),
+                text.string(.refreshing),
                 Branding.accentBlueDark
             )
         case .success:
             return (
-                refreshText(.success),
+                text.string(.updated),
                 Branding.success
             )
-        }
-    }
-    private func refreshText(_ state: CardRefreshFeedback) -> String {
-        switch language {
-        case .english:
-            switch state {
-            case .refreshing: return "Refreshing..."
-            case .success: return "Updated"
-            case .idle: return ""
-            }
-        case .simplifiedChinese:
-            switch state {
-            case .refreshing: return "刷新中..."
-            case .success: return "已更新"
-            case .idle: return ""
-            }
-        case .traditionalChinese:
-            switch state {
-            case .refreshing: return "刷新中..."
-            case .success: return "已更新"
-            case .idle: return ""
-            }
         }
     }
 
@@ -824,7 +827,7 @@ private enum AccountVisualStatus {
         case .healthy: return Branding.success
         case .refreshing: return Branding.accentBlue
         case .pending, .noQuota: return Branding.inkMuted
-        case .stale: return Branding.warning
+        case .stale: return Branding.inkMuted
         case .warning: return Branding.warning
         case .exhausted, .error: return Branding.danger
         }

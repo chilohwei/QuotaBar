@@ -66,10 +66,10 @@ extension ClaudeCodeProvider {
     }
 
     func fetchQuota(account: Account, secret: String) async throws -> QuotaSnapshot {
-        try await fetchQuota(account: account, secret: secret, forceRefresh: false)
+        try await fetchQuota(account: account, secret: secret, intent: .background)
     }
 
-    func fetchQuota(account: Account, secret: String, forceRefresh: Bool) async throws -> QuotaSnapshot {
+    func fetchQuota(account: Account, secret: String, intent: RefreshIntent) async throws -> QuotaSnapshot {
         let storedCredentials = try parseCredentials(secret)
         let credentials: ClaudeCodeCredentials
         if let latest = try? await readClaudeCodeCredentials(),
@@ -82,35 +82,114 @@ extension ClaudeCodeProvider {
         let now = Date()
         let statusLineLoad = try? loadStatusLineSnapshot()
         let rateLimitEvent = loadActiveRateLimitEvent(status: statusLineLoad?.status, now: now)
-
-        // The live OAuth `utilization` numbers track the 5h/7d rolling windows, which are
-        // distinct from the session limit Claude Code reports via a 429 "Usage limit reached".
-        // When a session limit is active those windows can still read well under 100%, so the
-        // active rate-limit event must be overlaid onto the live snapshot too — otherwise the
-        // panel keeps showing stale "remaining" while Claude Code is blocked.
-        if let liveSnapshot = await fetchOAuthUsageSnapshot(credentials: credentials, forceRefresh: forceRefresh) {
-            return applyActiveRateLimit(to: liveSnapshot, rateLimitEvent: rateLimitEvent, now: now)
-        }
-
-        let status = shouldUseStatusLineSnapshot(statusLineLoad?.status, settingsJSON: credentials.claudeSettingsJSON)
+        let cachedOAuthSnapshot = loadCachedOAuthUsage(credentials: credentials)
+            .flatMap(historicalLiveFallback)
+        let statusLineStatus = shouldUseStatusLineSnapshot(statusLineLoad?.status, settingsJSON: credentials.claudeSettingsJSON)
             ? statusLineLoad?.status
             : nil
-
-        let fallback = makeQuotaSnapshot(
-            status: status,
+        let statusLineSnapshot = makeQuotaSnapshot(
+            status: statusLineStatus,
             credentials: credentials,
             capturedAt: statusLineLoad?.capturedAt,
             now: now,
             rateLimitEvent: rateLimitEvent
         )
+        let hasUsableStatusLineSnapshot = shouldUseStatusLineSnapshotAsPrimary(statusLineSnapshot)
+        let canFillFromHistoricalOAuthCache = statusLineSnapshot.effectiveAvailabilityStatus == .sessionRateLimited
+            || !statusLineSnapshot.orderedMetrics.isEmpty
+        let statusLineOrCachedSnapshot = canFillFromHistoricalOAuthCache ? (cachedOAuthSnapshot.map {
+            mergeClaudeSnapshot(statusLineSnapshot, fillingMissingMetricsFrom: $0)
+        } ?? statusLineSnapshot) : statusLineSnapshot
 
-        // The live path being down *because Anthropic is rate-limiting us* is a distinct, actionable
-        // state — override the generic note (but never the real "usage limit reached" one) so the
-        // panel explains it will self-recover and how to force a fix if it lingers.
-        if fallback.isQuotaBlocked != true, isAuthRateLimited(credentials, now: now) {
-            return fallback.replacing(note: Self.usageRateLimitedNote)
+        // For first-party Claude.ai OAuth accounts, the official usage endpoint is the source of
+        // truth for quota percentages. statusLine is fast and useful, but Claude Code can freeze its
+        // `rate_limits` between API calls, so use it as a fallback when live usage is unavailable.
+        // The live OAuth `utilization` numbers track the 5h/7d rolling windows, which are
+        // distinct from the session limit Claude Code reports via a 429 "Usage limit reached".
+        if let liveSnapshot = try await fetchOAuthUsageSnapshot(credentials: credentials, intent: intent) {
+            let preferredSnapshot = preferredClaudeSnapshot(
+                liveSnapshot: liveSnapshot,
+                statusLineSnapshot: statusLineSnapshot,
+                hasUsableStatusLineSnapshot: hasUsableStatusLineSnapshot
+            )
+            return applyActiveRateLimit(to: preferredSnapshot, rateLimitEvent: rateLimitEvent, now: now)
         }
-        return fallback
+
+        // The OAuth fallback path being down *because Anthropic is rate-limiting us* is a distinct,
+        // actionable state. Override the generic note (but never the real "usage limit reached" one)
+        // so the panel explains it will self-recover and how to force a fix if it lingers.
+        if statusLineSnapshot.isQuotaBlocked != true, isAuthRateLimited(credentials, now: now) {
+            return statusLineOrCachedSnapshot.replacing(
+                note: Self.usageRateLimitedNote,
+                availabilityStatus: .authRateLimited
+            )
+        }
+        if hasUsableStatusLineSnapshot {
+            return applyActiveRateLimit(to: statusLineOrCachedSnapshot, rateLimitEvent: rateLimitEvent, now: now)
+        }
+        return statusLineOrCachedSnapshot
+    }
+
+    func preferredClaudeSnapshot(
+        liveSnapshot: QuotaSnapshot,
+        statusLineSnapshot: QuotaSnapshot,
+        hasUsableStatusLineSnapshot: Bool
+    ) -> QuotaSnapshot {
+        guard hasUsableStatusLineSnapshot else {
+            return liveSnapshot
+        }
+        if liveSnapshot.source == "Claude Code OAuth Cache",
+           statusLineSnapshot.updatedAt > liveSnapshot.updatedAt {
+            return statusLineSnapshot
+        }
+        return mergeClaudeSnapshot(liveSnapshot, fillingMissingMetricsFrom: statusLineSnapshot)
+    }
+
+    func mergeClaudeSnapshot(
+        _ preferred: QuotaSnapshot,
+        fillingMissingMetricsFrom fallback: QuotaSnapshot
+    ) -> QuotaSnapshot {
+        let primary = preferred.primary ?? fallback.primary
+        let secondary = preferred.secondary ?? fallback.secondary
+        let tertiary = preferred.tertiary ?? fallback.tertiary
+
+        guard primary != preferred.primary
+            || secondary != preferred.secondary
+            || tertiary != preferred.tertiary else {
+            return preferred
+        }
+
+        let isBlocked = preferred.isQuotaBlocked == true
+            || fallback.isQuotaBlocked == true
+            || isQuotaBlocked(primary: primary, secondary: secondary) == true
+        let availabilityStatus = preferred.availabilityStatus
+            ?? fallback.availabilityStatus
+            ?? (isBlocked ? .quotaExhausted : nil)
+
+        return QuotaSnapshot(
+            source: preferred.source,
+            accountIdentifier: preferred.accountIdentifier ?? fallback.accountIdentifier,
+            planName: preferred.planName ?? fallback.planName,
+            primary: primary,
+            secondary: secondary,
+            tertiary: tertiary,
+            creditsRemaining: preferred.creditsRemaining ?? fallback.creditsRemaining,
+            creditsTotal: preferred.creditsTotal ?? fallback.creditsTotal,
+            updatedAt: preferred.updatedAt,
+            accountValidUntil: preferred.accountValidUntil ?? fallback.accountValidUntil,
+            subscriptionWillRenew: preferred.subscriptionWillRenew ?? fallback.subscriptionWillRenew,
+            subscriptionStatus: preferred.subscriptionStatus ?? fallback.subscriptionStatus,
+            isQuotaBlocked: isBlocked,
+            availabilityStatus: availabilityStatus,
+            note: preferred.note ?? fallback.note
+        )
+    }
+
+    func shouldUseStatusLineSnapshotAsPrimary(_ snapshot: QuotaSnapshot) -> Bool {
+        guard snapshot.source == "Claude Code StatusLine" else {
+            return false
+        }
+        return !snapshot.orderedMetrics.isEmpty || snapshot.isQuotaBlocked == true
     }
 
     func recoverSecret(for account: Account) async throws -> String? {

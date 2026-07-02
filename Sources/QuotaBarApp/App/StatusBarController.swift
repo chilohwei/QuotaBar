@@ -318,16 +318,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         menu.addItem(updateItem)
         menu.addItem(.separator())
 
-        let quitTitle: String
-        switch appState.language {
-        case .english:
-            quitTitle = "Quit"
-        case .simplifiedChinese:
-            quitTitle = "退出"
-        case .traditionalChinese:
-            quitTitle = "退出"
-        }
-        let quitItem = NSMenuItem(title: quitTitle, action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: appState.text.string(.quit), action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
@@ -428,12 +419,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     private func resolvedErrorMessage(_ error: Error) -> String {
-        if let localized = error as? LocalizedError,
-           let text = localized.errorDescription,
-           !text.isEmpty {
-            return text
-        }
-        return error.localizedDescription
+        appState.text.userFacingErrorMessage(error)
     }
 
     private func performUpdateCheck(showFeedback: Bool) {

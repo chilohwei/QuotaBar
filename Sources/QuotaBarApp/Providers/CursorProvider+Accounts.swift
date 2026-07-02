@@ -94,10 +94,11 @@ extension CursorProvider {
     }
 
     func fetchQuota(account: Account, secret: String) async throws -> QuotaSnapshot {
-        try await fetchQuota(account: account, secret: secret, forceRefresh: false)
+        try await fetchQuota(account: account, secret: secret, intent: .background)
     }
 
-    func fetchQuota(account: Account, secret: String, forceRefresh _: Bool) async throws -> QuotaSnapshot {
+    func fetchQuota(account: Account, secret: String, intent: RefreshIntent) async throws -> QuotaSnapshot {
+        _ = intent
         let credentials = try parseCredentials(secret)
         try validateCursorCredentialsMatchAccount(credentials, account: account)
         let cacheKey = quotaCacheKey(credentials)
@@ -120,7 +121,8 @@ extension CursorProvider {
                Date().timeIntervalSince(cached.cachedAt) <= Self.fallbackQuotaCacheAge {
                 return cached.snapshot.replacing(
                     source: "Cursor Cache",
-                    note: mergedNote(cached.snapshot.note, fallback: QuotaNoteCatalog.cursorLiveUnavailableCache)
+                    note: mergedNote(cached.snapshot.note, fallback: QuotaNoteCatalog.cursorLiveUnavailableCache),
+                    availabilityStatus: .serviceUnavailable
                 )
             }
 
@@ -142,7 +144,7 @@ extension CursorProvider {
 
     func isAuthenticationFailure(_ error: Error) -> Bool {
         if let failure = error as? QuotaHTTPError {
-            return failure.statusCode == 401
+            return failure.statusCode == 401 || failure.statusCode == 403
         }
         if case .tokenExpired = error as? ProviderError {
             return true

@@ -582,6 +582,7 @@ struct DashboardView: View {
                                     loadState: accountLoadState(account),
                                     quota: appState.quotaByAccount[account.id],
                                     errorMessage: appState.errorByAccount[account.id],
+                                    errorRequiresUserAction: appState.errorRequiresUserActionByAccount[account.id] == true,
                                     canActivate: true,
                                     refreshCycleID: refreshCycleID,
                                     onActivate: { appState.activateAccount(account) },
@@ -845,69 +846,11 @@ struct DashboardView: View {
     }
 
     private var updateNoticeTitle: String {
-        switch appState.updateBannerState {
-        case .available(let version):
-            switch appState.language {
-            case .english:
-                return "New version \(version) available"
-            case .simplifiedChinese:
-                return "新版本 \(version) 可用"
-            case .traditionalChinese:
-                return "新版本 \(version) 可用"
-            }
-        case .checking:
-            switch appState.language {
-            case .english:
-                return "Checking..."
-            case .simplifiedChinese:
-                return "检查中..."
-            case .traditionalChinese:
-                return "檢查中..."
-            }
-        case .downloading(let progress):
-            if let progress {
-                let percent = Int((progress * 100).rounded())
-                switch appState.language {
-                case .english:
-                    return "Downloading \(percent)%"
-                case .simplifiedChinese:
-                    return "下载 \(percent)%"
-                case .traditionalChinese:
-                    return "下載 \(percent)%"
-                }
-            }
-            switch appState.language {
-            case .english:
-                return "Downloading..."
-            case .simplifiedChinese:
-                return "下载中..."
-            case .traditionalChinese:
-                return "下載中..."
-            }
-        case .installing:
-            switch appState.language {
-            case .english:
-                return "Installing..."
-            case .simplifiedChinese:
-                return "安装中..."
-            case .traditionalChinese:
-                return "安裝中..."
-            }
-        case .idle:
-            return ""
-        }
+        text.updateNoticeTitle(appState.updateBannerState)
     }
 
     private var updateNoticeActionLabel: String? {
-        guard case .available = appState.updateBannerState else { return nil }
-        switch appState.language {
-        case .english:
-            return "Update"
-        case .simplifiedChinese:
-            return "更新"
-        case .traditionalChinese:
-            return "更新"
-        }
+        text.updateNoticeActionLabel(appState.updateBannerState)
     }
 
     private var updateNoticeTint: Color {

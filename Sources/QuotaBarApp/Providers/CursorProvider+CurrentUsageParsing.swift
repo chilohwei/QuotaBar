@@ -170,6 +170,7 @@ extension CursorProvider {
                 subscriptionWillRenew: inferSubscriptionWillRenew(from: subscriptionStatus),
                 subscriptionStatus: normalizedSubscriptionStatus(subscriptionStatus),
                 isQuotaBlocked: quotaBlocked,
+                availabilityStatus: quotaBlocked == true ? .quotaExhausted : nil,
                 note: note
             )
         }
@@ -193,6 +194,7 @@ extension CursorProvider {
             subscriptionWillRenew: inferSubscriptionWillRenew(from: subscriptionStatus),
             subscriptionStatus: normalizedSubscriptionStatus(subscriptionStatus),
             isQuotaBlocked: quotaBlocked,
+            availabilityStatus: quotaBlocked == true ? .quotaExhausted : nil,
             note: note
         )
     }

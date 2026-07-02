@@ -53,4 +53,44 @@ struct PackageStructureTests {
             )
         )
     }
+
+    @Test("Claude OAuth source label does not claim primary live data")
+    func claudeOAuthSourceLabelDoesNotClaimPrimaryLiveData() {
+        let snapshot = QuotaSnapshot(
+            source: "Claude Code OAuth",
+            primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1),
+            note: nil
+        )
+
+        #expect(AppText(language: .english).quotaSnapshotMeta(snapshot).contains("Claude Code OAuth"))
+        #expect(!AppText(language: .simplifiedChinese).quotaSnapshotMeta(snapshot).contains("实时"))
+        #expect(!AppText(language: .traditionalChinese).quotaSnapshotMeta(snapshot).contains("即時"))
+    }
+
+    @Test("user-facing errors are grouped and hide low-level details")
+    func userFacingErrorsAreGroupedAndHideLowLevelDetails() {
+        let text = AppText(language: .simplifiedChinese)
+
+        let loginFailure = text.userFacingErrorMessage(
+            ProviderError.unsupported("Codex 登录失败：raw browser stack with tokens")
+        )
+        #expect(loginFailure == "Codex 还没有完成登录。请完成浏览器授权后重试。")
+        #expect(!loginFailure.contains("raw browser"))
+
+        let serviceFailure = text.userFacingErrorMessage(
+            ProviderError.network("Codex token 刷新失败，HTTP 500")
+        )
+        #expect(serviceFailure == "这次连接没有完成，QuotaBar 会稍后自动重试。")
+        #expect(!serviceFailure.contains("HTTP 500"))
+
+        let updateFailure = text.userFacingErrorMessage(
+            UpdateServiceError.digestMismatch(expected: "abc123", actual: "def456")
+        )
+        #expect(updateFailure == "为确保安全，更新包没有通过校验，QuotaBar 已停止安装。请稍后重试，或从官方发布页下载。")
+        #expect(!updateFailure.contains("abc123"))
+    }
 }

@@ -3,12 +3,16 @@ import Foundation
 struct QuotaSnapshotCacheStore: Sendable {
     private let fileService = FileService()
 
-    func load(accountID: UUID) throws -> QuotaSnapshot {
+    func load(accountID: UUID, tool: ToolKind) throws -> QuotaSnapshot {
         let text = try fileService.readText(at: cachePath(accountID: accountID))
         guard let data = text.data(using: .utf8) else {
-            throw ProviderError.cacheCorrupted(tool: .codex)
+            throw ProviderError.cacheCorrupted(tool: tool)
         }
         return try JSONDecoder().decode(QuotaSnapshot.self, from: data)
+    }
+
+    func load(accountID: UUID) throws -> QuotaSnapshot {
+        try load(accountID: accountID, tool: .codex)
     }
 
     func save(_ snapshot: QuotaSnapshot, accountID: UUID) throws {

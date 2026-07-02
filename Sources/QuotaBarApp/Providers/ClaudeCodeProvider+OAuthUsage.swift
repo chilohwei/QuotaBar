@@ -62,19 +62,27 @@ extension ClaudeCodeProvider {
 
     func fetchOAuthUsageSnapshot(
         credentials: ClaudeCodeCredentials,
-        forceRefresh: Bool
-    ) async -> QuotaSnapshot? {
-        guard shouldFetchOAuthUsage(credentials),
-              let token = parseOAuthToken(from: credentials) else {
+        intent: RefreshIntent
+    ) async throws -> QuotaSnapshot? {
+        guard shouldFetchOAuthUsage(credentials) else {
             return nil
         }
 
         let cacheKey = usageCacheKey(credentials)
         let cached = cacheKey.flatMap { try? loadCachedUsage(cacheKey: $0) }
+        guard let token = parseOAuthToken(from: credentials) else {
+            return staleLiveFallback(cached)
+        }
 
         // Collapse bursty triggers: a very recent live snapshot is reused as-is, so QuotaBar does
         // not re-hit the endpoint (and trip its per-account rate limit) several times a minute.
-        if !forceRefresh,
+        if !intent.bypassesProviderCache,
+           isAuthRateLimited(credentials),
+           let fallback = staleLiveFallback(cached) {
+            return fallback.replacing(availabilityStatus: .authRateLimited)
+        }
+
+        if !intent.bypassesProviderCache,
            let cached,
            Date().timeIntervalSince(cached.cachedAt) < Self.liveUsageMinFetchInterval {
             return cached.snapshot
@@ -87,7 +95,11 @@ extension ClaudeCodeProvider {
             // The token is dead; refreshing it is the only way to get live data. If the refresh is
             // in cooldown (a recent attempt failed), don't call either endpoint — a dead token only
             // yields 401s and hammering keeps the auth endpoint throttled. Show honest stale data.
-            guard let refreshed = await refreshAccessTokenIfAllowed(refreshToken: token.refreshToken, cacheKey: cacheKey) else {
+            guard let refreshed = try await refreshAccessTokenIfAllowed(
+                refreshToken: token.refreshToken,
+                cacheKey: cacheKey,
+                intent: intent
+            ) else {
                 return staleLiveFallback(cached)
             }
             accessToken = refreshed
@@ -100,22 +112,47 @@ extension ClaudeCodeProvider {
             if let cacheKey {
                 try? storeCachedUsage(snapshot, cacheKey: cacheKey)
                 clearUsageRateLimitMarker(cacheKey)
+                clearTokenRefreshBackoff(cacheKey)
             }
             return snapshot
         } catch OAuthUsageFetchError.unauthorized where !didRefresh {
             // Token looked locally valid but was rejected — refresh once (if allowed) and retry.
-            if let refreshed = await refreshAccessTokenIfAllowed(refreshToken: token.refreshToken, cacheKey: cacheKey),
-               let payload = try? await requestOAuthUsage(accessToken: refreshed) {
+            do {
+                guard let refreshed = try await refreshAccessTokenIfAllowed(
+                    refreshToken: token.refreshToken,
+                    cacheKey: cacheKey,
+                    intent: intent
+                ) else {
+                    return staleLiveFallback(cached)
+                }
+                let payload = try await requestOAuthUsage(accessToken: refreshed)
                 let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
                 if let cacheKey {
                     try? storeCachedUsage(snapshot, cacheKey: cacheKey)
                     clearUsageRateLimitMarker(cacheKey)
+                    clearTokenRefreshBackoff(cacheKey)
                 }
                 return snapshot
+            } catch OAuthUsageFetchError.unauthorized {
+                throw ProviderError.tokenExpired(tool: .claudeCode)
+            } catch OAuthUsageFetchError.rateLimited(let retryAfter) {
+                setUsageRateLimitMarker(cacheKey)
+                if let fallback = staleLiveFallback(cached) {
+                    return fallback.replacing(availabilityStatus: .authRateLimited)
+                }
+                throw ProviderError.rateLimited(tool: .claudeCode, retryAfter: retryAfter)
+            } catch {
+                return staleLiveFallback(cached)
             }
-        } catch OAuthUsageFetchError.rateLimited {
+        } catch OAuthUsageFetchError.unauthorized {
+            throw ProviderError.tokenExpired(tool: .claudeCode)
+        } catch OAuthUsageFetchError.rateLimited(let retryAfter) {
             // `/usage` is throttling us — remember it so the panel can show actionable guidance.
             setUsageRateLimitMarker(cacheKey)
+            if let fallback = staleLiveFallback(cached) {
+                return fallback.replacing(availabilityStatus: .authRateLimited)
+            }
+            throw ProviderError.rateLimited(tool: .claudeCode, retryAfter: retryAfter)
         } catch {
             // fall through to the stale-but-honest fallback below
         }
@@ -123,13 +160,18 @@ extension ClaudeCodeProvider {
         return staleLiveFallback(cached)
     }
 
-    /// The last real `/usage` value, labeled with its age, while recent enough to be meaningful.
-    /// Never fabricated and never the frozen statusLine — just the last truth, honestly aged.
+    /// The last real `/usage` value from the OAuth fallback path, labeled with its age while recent
+    /// enough to be meaningful.
     func staleLiveFallback(_ cached: CachedClaudeUsage?) -> QuotaSnapshot? {
         guard let cached,
               Date().timeIntervalSince(cached.cachedAt) <= Self.liveUsageStaleMax else {
             return nil
         }
+        return historicalLiveFallback(cached)
+    }
+
+    func historicalLiveFallback(_ cached: CachedClaudeUsage?) -> QuotaSnapshot? {
+        guard let cached else { return nil }
         let minutes = max(1, Int(Date().timeIntervalSince(cached.cachedAt) / 60))
         return cached.snapshot.replacing(
             source: "Claude Code OAuth Cache",
@@ -138,21 +180,48 @@ extension ClaudeCodeProvider {
         )
     }
 
+    func loadCachedOAuthUsage(credentials: ClaudeCodeCredentials) -> CachedClaudeUsage? {
+        usageCacheKey(credentials).flatMap { try? loadCachedUsage(cacheKey: $0) }
+    }
+
     /// Refreshes the access token unless a recent refresh failed and we're still in its cooldown.
     /// On failure it sets a cooldown so the app stops hammering the auth endpoint every poll cycle
     /// (which would otherwise sustain the very rate limit that's blocking recovery).
-    func refreshAccessTokenIfAllowed(refreshToken: String?, cacheKey: String?) async -> String? {
-        if let until = tokenRefreshBlockedUntil(cacheKey), until > Date() {
+    func refreshAccessTokenIfAllowed(
+        refreshToken: String?,
+        cacheKey: String?,
+        intent: RefreshIntent = .background
+    ) async throws -> String? {
+        if Self.shouldBlockTokenRefresh(
+            until: tokenRefreshBlockedUntil(cacheKey),
+            intent: intent
+        ) {
             return nil
         }
         do {
             let access = try await refreshAndPersistToken(refreshToken: refreshToken)
             clearTokenRefreshBackoff(cacheKey)
             return access
+        } catch OAuthUsageFetchError.unauthorized {
+            clearTokenRefreshBackoff(cacheKey)
+            throw ProviderError.tokenExpired(tool: .claudeCode)
+        } catch OAuthUsageFetchError.rateLimited(_) {
+            setTokenRefreshBackoff(cacheKey)
+            return nil
         } catch {
             setTokenRefreshBackoff(cacheKey)
             return nil
         }
+    }
+
+    static func shouldBlockTokenRefresh(
+        until: Date?,
+        intent: RefreshIntent,
+        now: Date = Date()
+    ) -> Bool {
+        guard intent != .manual else { return false }
+        guard let until else { return false }
+        return until > now
     }
 
     func requestTokenRefresh(refreshToken: String) async throws -> RefreshedOAuthToken {
@@ -193,7 +262,7 @@ extension ClaudeCodeProvider {
         case 401, 403:
             throw OAuthUsageFetchError.unauthorized
         case 429:
-            throw OAuthUsageFetchError.rateLimited
+            throw OAuthUsageFetchError.rateLimited(retryAfter: QuotaHTTPClient.retryAfterDeadline(from: http))
         default:
             throw OAuthUsageFetchError.httpStatus(http.statusCode)
         }
@@ -346,9 +415,9 @@ extension ClaudeCodeProvider {
         try? fileService.removeItemIfExists(at: usageRateLimitMarkerPath(cacheKey))
     }
 
-    /// True when the live path is currently blocked by Anthropic rate limiting — either the token
-    /// refresh is in an active 429 backoff, or `/usage` recently returned 429. Used to surface the
-    /// actionable `usageRateLimitedNote` when we fall back to frozen statusLine data.
+    /// True when the OAuth fallback path is currently blocked by Anthropic rate limiting, either
+    /// because the token refresh is in an active 429 backoff or `/usage` recently returned 429.
+    /// Used to surface the actionable `usageRateLimitedNote` when the fallback cannot be refreshed.
     func isAuthRateLimited(_ credentials: ClaudeCodeCredentials, now: Date = Date()) -> Bool {
         guard let cacheKey = usageCacheKey(credentials) else { return false }
         if let until = tokenRefreshBlockedUntil(cacheKey), until > now {
@@ -386,7 +455,7 @@ extension ClaudeCodeProvider {
         case 401, 403:
             throw OAuthUsageFetchError.unauthorized
         case 429:
-            throw OAuthUsageFetchError.rateLimited
+            throw OAuthUsageFetchError.rateLimited(retryAfter: QuotaHTTPClient.retryAfterDeadline(from: http))
         default:
             throw OAuthUsageFetchError.httpStatus(http.statusCode)
         }
@@ -396,8 +465,14 @@ extension ClaudeCodeProvider {
         payload: [String: Any],
         credentials: ClaudeCodeCredentials
     ) -> QuotaSnapshot {
-        let primary = parseOAuthUsageWindow(payload["five_hour"] as? [String: Any], label: "5h")
-        let secondary = parseOAuthUsageWindow(payload["seven_day"] as? [String: Any], label: "7d")
+        let primary = parseOAuthUsageWindow(
+            usageWindowDictionary(in: payload, keys: Self.fiveHourLimitKeys),
+            label: "5h"
+        )
+        let secondary = parseOAuthUsageWindow(
+            usageWindowDictionary(in: payload, keys: Self.weeklyLimitKeys),
+            label: "7d"
+        )
 
         return QuotaSnapshot(
             source: "Claude Code OAuth",
@@ -413,6 +488,7 @@ extension ClaudeCodeProvider {
             subscriptionWillRenew: nil,
             subscriptionStatus: nil,
             isQuotaBlocked: isQuotaBlocked(primary: primary, secondary: secondary),
+            availabilityStatus: isQuotaBlocked(primary: primary, secondary: secondary) == true ? .quotaExhausted : nil,
             note: nil
         )
     }
@@ -426,8 +502,23 @@ extension ClaudeCodeProvider {
     }
 
     func hasRateLimitWindow(_ status: [String: Any]?) -> Bool {
-        makeWindow(status: status, key: "five_hour", label: "5h", rejectExpiredWindows: false) != nil
-            || makeWindow(status: status, key: "seven_day", label: "7d", rejectExpiredWindows: false) != nil
+        makeWindow(status: status, keys: Self.fiveHourLimitKeys, label: "5h", rejectExpiredWindows: false) != nil
+            || makeWindow(status: status, keys: Self.weeklyLimitKeys, label: "7d", rejectExpiredWindows: false) != nil
+    }
+
+    func usageWindowDictionary(in payload: [String: Any], keys: Set<String>) -> [String: Any]? {
+        if let window = firstDictionary(in: payload, keys: keys) {
+            return window
+        }
+
+        for containerKey in ["rate_limits", "rateLimits", "usage", "plan_usage", "planUsage", "limits"] {
+            guard let container = payload[containerKey] as? [String: Any],
+                  let window = firstDictionary(in: container, keys: keys) else {
+                continue
+            }
+            return window
+        }
+        return nil
     }
 
 }
