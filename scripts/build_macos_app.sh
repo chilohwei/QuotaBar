@@ -579,13 +579,24 @@ create_dmg() {
         sleep 1
     fi
 
+    # CI runners can keep the image busy for a few seconds after detach while
+    # diskimages-helper flushes Finder layout metadata. Wait briefly before
+    # conversion and keep retrying instead of failing a valid build.
+    for _ in 1 2 3 4 5; do
+        if ! hdiutil info | grep -Fq "$temp_dmg"; then
+            break
+        fi
+        sleep 1
+    done
+
     local converted=0
-    for attempt in 1 2 3; do
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
         if hdiutil convert "$temp_dmg" -format UDZO -imagekey zlib-level=9 -o "$dmg_path"; then
             converted=1
             break
         fi
-        sleep 1
+        sync
+        sleep "$attempt"
     done
     if [[ "$converted" -eq 0 || ! -f "$dmg_path" ]]; then
         echo "Failed to create DMG: $dmg_path" >&2
