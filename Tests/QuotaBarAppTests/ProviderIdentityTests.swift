@@ -32,6 +32,40 @@ struct ProviderIdentityTests {
         #expect(aliases.contains("cursor:token:\(accessToken.suffix(16))"))
     }
 
+    @Test("Cursor add flow rejects existing account when a new account is required")
+    func cursorAddFlowRejectsExistingAccountWhenNewAccountIsRequired() throws {
+        let provider = CursorProvider()
+        let existingSecret = cursorSecret(
+            accessToken: jwt(payload: [
+                "sub": "User-123",
+                "email": "USER@example.com"
+            ])
+        )
+        let newSecret = cursorSecret(
+            accessToken: jwt(payload: [
+                "sub": "User-456",
+                "email": "OTHER@example.com"
+            ])
+        )
+        let existingCredentials = try provider.parseCredentials(existingSecret)
+
+        #expect(provider.cursorImportedSecret(
+            existingSecret,
+            isAcceptableComparedTo: existingCredentials,
+            allowExistingCredentials: true
+        ))
+        #expect(!provider.cursorImportedSecret(
+            existingSecret,
+            isAcceptableComparedTo: existingCredentials,
+            allowExistingCredentials: false
+        ))
+        #expect(provider.cursorImportedSecret(
+            newSecret,
+            isAcceptableComparedTo: existingCredentials,
+            allowExistingCredentials: false
+        ))
+    }
+
     @Test("Claude identity aliases keep keychain fingerprint and legacy fallback")
     func claudeIdentityAliasesKeepFingerprintAndLegacyFallback() {
         let keychainCredentials = "claude-keychain-secret"
@@ -83,6 +117,21 @@ struct ProviderIdentityTests {
         let payloadData = try! JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         let payloadText = String(data: payloadData, encoding: .utf8)!
         return "\(header).\(base64URL(payloadText)).signature"
+    }
+
+    private func cursorSecret(accessToken: String) -> String {
+        """
+        {
+          "accessToken": "\(accessToken)",
+          "refreshToken": null,
+          "email": null,
+          "membershipType": null,
+          "subscriptionStatus": null,
+          "subscriptionPeriodEnd": null,
+          "stateDatabasePath": null,
+          "source": null
+        }
+        """
     }
 
     private func base64URL(_ text: String) -> String {

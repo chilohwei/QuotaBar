@@ -153,7 +153,7 @@ final class AppState: ObservableObject {
             let provider = provider(for: tool)
             do {
                 try Task.checkCancellation()
-                let secret = try await provider.authenticateViaBrowser()
+                let secret = try await quickAddSecret(tool: tool, provider: provider)
                 try Task.checkCancellation()
                 try await addAccount(
                     tool: tool,
@@ -169,6 +169,31 @@ final class AppState: ObservableObject {
                 addAccountErrorMessage = text.addAccountFailedMessage(resolvedErrorMessage(error))
             }
         }
+    }
+
+    private func quickAddSecret(tool: ToolKind, provider: any Provider) async throws -> String {
+        if let importedSecret = try? await provider.importCurrentCredentials(),
+           !importedSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           storedDuplicate(for: tool, provider: provider, secret: importedSecret) == nil {
+            return importedSecret
+        }
+
+        return try await provider.authenticateViaBrowser(allowExistingCredentials: false)
+    }
+
+    private func storedDuplicate(
+        for tool: ToolKind,
+        provider: any Provider,
+        secret: String
+    ) -> Account? {
+        let detectedIdentity = provider.accountIdentity(from: secret)
+        let detectedIdentityAliases = provider.accountIdentityAliases(from: secret)
+        return findDuplicateStoredAccount(
+            for: tool,
+            detectedIdentities: detectedIdentityAliases.isEmpty
+                ? detectedIdentity.map { [$0] } ?? []
+                : detectedIdentityAliases
+        )
     }
 
     func cancelAddAccount() {

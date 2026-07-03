@@ -6,6 +6,7 @@ protocol Provider: Sendable {
     func importCurrentCredentials() async throws -> String
     func updateCurrentCredentials(_ secret: String) async throws
     func authenticateViaBrowser() async throws -> String
+    func authenticateViaBrowser(allowExistingCredentials: Bool) async throws -> String
     func prepareAccount(_ account: Account, secret: String) async throws -> Account
     func activate(account: Account, secret: String) async throws
     func fetchQuota(secret: String) async throws -> QuotaSnapshot
@@ -33,6 +34,11 @@ extension Provider {
 
     func authenticateViaBrowser() async throws -> String {
         throw ProviderError.unsupported("当前工具暂不支持浏览器登录导入")
+    }
+
+    func authenticateViaBrowser(allowExistingCredentials: Bool) async throws -> String {
+        _ = allowExistingCredentials
+        return try await authenticateViaBrowser()
     }
 
     func prepareAccount(_ account: Account, secret: String) async throws -> Account {

@@ -13,7 +13,19 @@ extension CursorProvider {
     }
 
     func authenticateViaBrowser() async throws -> String {
-        if let existingSecret = await currentImportedCursorSecret() {
+        try await authenticateViaBrowser(allowExistingCredentials: true)
+    }
+
+    func authenticateViaBrowser(allowExistingCredentials: Bool) async throws -> String {
+        let initialSecret = await currentImportedCursorSecret()
+        let initialCredentials = initialSecret.flatMap { try? parseCredentials($0) }
+
+        if let existingSecret = initialSecret,
+           cursorImportedSecret(
+               existingSecret,
+               isAcceptableComparedTo: initialCredentials,
+               allowExistingCredentials: allowExistingCredentials
+           ) {
             return existingSecret
         }
 
@@ -21,17 +33,33 @@ extension CursorProvider {
             do {
                 try await runCursorAgentLogin(agentURL: agentURL, timeout: 240)
                 if let latestSecret = await currentImportedCursorSecret() {
-                    return latestSecret
+                    if cursorImportedSecret(
+                        latestSecret,
+                        isAcceptableComparedTo: initialCredentials,
+                        allowExistingCredentials: allowExistingCredentials
+                    ) {
+                        return latestSecret
+                    }
                 }
                 throw ProviderError.unsupported("Cursor Agent 登录完成，但未读取到本地凭据")
             } catch {
                 try? openCursorLoginPage()
-                return try await waitForImportedCursorCredentials(timeout: 240, lastError: error)
+                return try await waitForImportedCursorCredentials(
+                    timeout: 240,
+                    lastError: error,
+                    initialCredentials: initialCredentials,
+                    allowExistingCredentials: allowExistingCredentials
+                )
             }
         }
 
         try openCursorLoginPage()
-        return try await waitForImportedCursorCredentials(timeout: 240, lastError: nil)
+        return try await waitForImportedCursorCredentials(
+            timeout: 240,
+            lastError: nil,
+            initialCredentials: initialCredentials,
+            allowExistingCredentials: allowExistingCredentials
+        )
     }
 
     func currentImportedCursorSecret() async -> String? {
@@ -43,7 +71,26 @@ extension CursorProvider {
         return secret
     }
 
-    func waitForImportedCursorCredentials(timeout: TimeInterval, lastError initialError: Error?) async throws -> String {
+    func cursorImportedSecret(
+        _ secret: String,
+        isAcceptableComparedTo initialCredentials: CursorCredentials?,
+        allowExistingCredentials: Bool
+    ) -> Bool {
+        guard let latestCredentials = try? parseCredentials(secret) else {
+            return false
+        }
+        guard !allowExistingCredentials, let initialCredentials else {
+            return true
+        }
+        return !cursorCredentialsRepresentSameAccount(initialCredentials, latestCredentials)
+    }
+
+    func waitForImportedCursorCredentials(
+        timeout: TimeInterval,
+        lastError initialError: Error?,
+        initialCredentials: CursorCredentials?,
+        allowExistingCredentials: Bool
+    ) async throws -> String {
         let deadline = Date().addingTimeInterval(timeout)
         var lastError = initialError
 
@@ -55,7 +102,11 @@ extension CursorProvider {
             do {
                 let latestSecret = try await importCurrentCredentials()
                 if !latestSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   (try? parseCredentials(latestSecret)) != nil {
+                   cursorImportedSecret(
+                       latestSecret,
+                       isAcceptableComparedTo: initialCredentials,
+                       allowExistingCredentials: allowExistingCredentials
+                   ) {
                     return latestSecret
                 }
             } catch {
