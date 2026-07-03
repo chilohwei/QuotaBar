@@ -1,12 +1,17 @@
 import Foundation
 
 extension CursorProvider {
-    func readCursorStateValues(keys: [String], statePath: String) throws -> [String: String] {
-        let immutableURI = sqliteImmutableURI(for: statePath)
+    func readCursorStateValues(
+        keys: [String],
+        requiredKeys: Set<String> = [],
+        statePath: String
+    ) throws -> [String: String] {
+        let readOnlyURI = sqliteReadOnlyURI(for: statePath)
         if let directValues = try? queryCursorStateDatabase(
-            databasePath: immutableURI,
+            databasePath: readOnlyURI,
             keys: keys
-        ), !directValues.isEmpty {
+        ), !directValues.isEmpty,
+           requiredKeys.allSatisfy({ directValues[$0]?.isEmpty == false }) {
             return directValues
         }
 
@@ -114,8 +119,8 @@ extension CursorProvider {
         "'\(value.replacingOccurrences(of: "'", with: "''"))'"
     }
 
-    func sqliteImmutableURI(for path: String) -> String {
-        URL(fileURLWithPath: fileService.expand(path: path)).absoluteString + "?mode=ro&immutable=1"
+    func sqliteReadOnlyURI(for path: String) -> String {
+        URL(fileURLWithPath: fileService.expand(path: path)).absoluteString + "?mode=ro"
     }
 
     func makeCursorStateSnapshot(statePath: String) throws -> CursorStateSnapshot {

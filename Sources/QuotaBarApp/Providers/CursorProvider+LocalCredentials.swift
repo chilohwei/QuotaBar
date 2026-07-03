@@ -37,6 +37,7 @@ extension CursorProvider {
                 "cursorAuth/stripeCurrentPeriodEnd",
                 "cursorAuth/subscriptionCurrentPeriodEnd"
             ],
+            requiredKeys: ["cursorAuth/accessToken"],
             statePath: statePath
         )
         let accessToken = values["cursorAuth/accessToken"]

@@ -8,15 +8,6 @@ extension CursorProvider {
         return try JSONDecoder().decode(CursorCredentials.self, from: data)
     }
 
-    func cursorCredentialsChanged(from old: CursorCredentials, to new: CursorCredentials) -> Bool {
-        if old.accessToken != new.accessToken {
-            return true
-        }
-        let oldEmail = old.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let newEmail = new.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        return !oldEmail.isEmpty && !newEmail.isEmpty && oldEmail != newEmail
-    }
-
     func cursorCredentialsRepresentSameAccount(_ lhs: CursorCredentials, _ rhs: CursorCredentials) -> Bool {
         let lhsEmail = cursorAccountEmail(from: lhs) ?? ""
         let rhsEmail = cursorAccountEmail(from: rhs) ?? ""

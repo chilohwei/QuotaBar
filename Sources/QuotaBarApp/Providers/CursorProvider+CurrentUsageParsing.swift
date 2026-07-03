@@ -51,6 +51,7 @@ extension CursorProvider {
         ) ?? credentials.subscriptionPeriodEnd
         let subscriptionStatus = firstString(in: payload, keys: ["subscriptionStatus", "subscription_status", "status", "stripeSubscriptionStatus"])
             ?? credentials.subscriptionStatus
+        let accountIdentifier = cursorAccountIdentifier(from: payload, credentials: credentials)
 
         let totalPercentUsed = firstDouble(in: payload, keys: ["totalPercentUsed", "total_percent_used"])
         let autoPercentUsed = firstDouble(in: payload, keys: ["autoPercentUsed", "auto_percent_used"])
@@ -157,7 +158,7 @@ extension CursorProvider {
            ) || quotaBlocked == true {
             return QuotaSnapshot(
                 source: "Cursor",
-                accountIdentifier: cursorAccountEmail(from: credentials),
+                accountIdentifier: accountIdentifier,
                 planName: planName,
                 primary: nil,
                 secondary: nil,
@@ -181,7 +182,7 @@ extension CursorProvider {
 
         return QuotaSnapshot(
             source: "Cursor",
-            accountIdentifier: cursorAccountEmail(from: credentials),
+            accountIdentifier: accountIdentifier,
             planName: planName,
             primary: primary,
             secondary: secondary,
@@ -197,5 +198,20 @@ extension CursorProvider {
             availabilityStatus: quotaBlocked == true ? .quotaExhausted : nil,
             note: note
         )
+    }
+
+    func cursorAccountIdentifier(from payload: Any, credentials: CursorCredentials) -> String? {
+        firstString(
+            in: payload,
+            keys: [
+                "email",
+                "userEmail",
+                "user_email",
+                "accountEmail",
+                "account_email",
+                "primaryEmail",
+                "primary_email"
+            ]
+        ).flatMap { emailAddress(in: $0) } ?? cursorAccountEmail(from: credentials)
     }
 }

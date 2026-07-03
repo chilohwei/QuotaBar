@@ -204,6 +204,30 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.subscriptionWillRenew == true)
     }
 
+    @Test("Cursor usage payload email names account when token has no email")
+    func cursorUsagePayloadEmailNamesAccount() throws {
+        let payload = try jsonObject("""
+        {
+          "user": {
+            "userEmail": "CURSOR-API@example.com"
+          },
+          "membershipType": "pro",
+          "planUsage": {
+            "used": 1200,
+            "limit": 10000
+          }
+        }
+        """)
+
+        let snapshot = try CursorProvider().parseCurrentPeriodUsageForTesting(
+            payload,
+            email: nil
+        )
+
+        #expect(snapshot.accountIdentifier == "cursor-api@example.com")
+        #expect(snapshot.planName == "Pro")
+    }
+
     @Test("Cursor callback-shaped usage payload maps labeled rows")
     func cursorCallbackUsageRowsPayload() throws {
         let payload = try jsonObject("""

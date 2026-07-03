@@ -13,24 +13,39 @@ extension CursorProvider {
     }
 
     func authenticateViaBrowser() async throws -> String {
-        let initialSecret = try? readCursorAgentCredentials()
-            ?? readLocalCursorCredentials()
-        let initialCredentials = initialSecret.flatMap { try? parseCredentials($0) }
+        if let existingSecret = await currentImportedCursorSecret() {
+            return existingSecret
+        }
 
         if let agentURL = cursorAgentExecutableURL() {
-            try await runCursorAgentLogin(agentURL: agentURL, timeout: 240)
-            let latestSecret = try readCursorAgentCredentials()
-            guard let latestSecret,
-                  (try? parseCredentials(latestSecret)) != nil else {
+            do {
+                try await runCursorAgentLogin(agentURL: agentURL, timeout: 240)
+                if let latestSecret = await currentImportedCursorSecret() {
+                    return latestSecret
+                }
                 throw ProviderError.unsupported("Cursor Agent 登录完成，但未读取到本地凭据")
+            } catch {
+                try? openCursorLoginPage()
+                return try await waitForImportedCursorCredentials(timeout: 240, lastError: error)
             }
-            return latestSecret
         }
 
         try openCursorLoginPage()
-        let timeout: TimeInterval = 240
+        return try await waitForImportedCursorCredentials(timeout: 240, lastError: nil)
+    }
+
+    func currentImportedCursorSecret() async -> String? {
+        guard let secret = try? await importCurrentCredentials(),
+              !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (try? parseCredentials(secret)) != nil else {
+            return nil
+        }
+        return secret
+    }
+
+    func waitForImportedCursorCredentials(timeout: TimeInterval, lastError initialError: Error?) async throws -> String {
         let deadline = Date().addingTimeInterval(timeout)
-        var lastError: Error?
+        var lastError = initialError
 
         while Date() < deadline {
             if Task.isCancelled {
@@ -38,22 +53,14 @@ extension CursorProvider {
             }
 
             do {
-                let latestSecret = try readLocalCursorCredentials()
-                guard let latestCredentials = try? parseCredentials(latestSecret) else {
-                    return latestSecret
-                }
-
-                if let initialCredentials {
-                    if cursorCredentialsChanged(from: initialCredentials, to: latestCredentials) {
-                        return latestSecret
-                    }
-                } else {
+                let latestSecret = try await importCurrentCredentials()
+                if !latestSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   (try? parseCredentials(latestSecret)) != nil {
                     return latestSecret
                 }
             } catch {
                 lastError = error
             }
-
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
