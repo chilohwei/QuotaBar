@@ -104,9 +104,22 @@ struct AccountCardView: View {
             }
         }
 
-        // Plan name is descriptive metadata, not a status, so it stays neutral —
-        // only quota health (green/amber/red) and the active state (blue) carry hue.
-        var tint: Color { Branding.inkMuted }
+        var tint: Color {
+            switch self {
+            case .free:
+                return Branding.inkMuted
+            case .apiKey, .plus, .team:
+                return Branding.accentBlueDark
+            case .pro, .claudeFirstParty:
+                return Branding.success
+            case .proPlus, .ultra, .max, .unlimited, .claudeProvider:
+                return Branding.warning
+            case .enterprise:
+                return Branding.inkStrong
+            case .unknown:
+                return Branding.accentBlueDark
+            }
+        }
 
         var isPaid: Bool {
             switch self {
@@ -120,22 +133,44 @@ struct AccountCardView: View {
         }
     }
 
-    private var planSummaryBadge: (text: String, tint: Color)? {
+    private struct MetadataItem {
+        let text: String
+        let tint: Color
+        let weight: Font.Weight
+    }
+
+    private var planSummaryItem: MetadataItem? {
         guard let rawPlan = quota?.planName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !rawPlan.isEmpty else {
             return nil
         }
 
         let type = subscriptionType(from: rawPlan, tool: account.tool)
-        var parts = [type.label]
+        return MetadataItem(
+            text: type.label,
+            tint: type.tint,
+            weight: .medium
+        )
+    }
 
-        if type.isPaid,
-           account.tool != .claudeCode,
-           let cycle = actualBillingCycle(from: rawPlan.lowercased()) {
-            parts.append(text.billingCycle(cycle))
+    private var billingCycleItem: MetadataItem? {
+        guard let rawPlan = quota?.planName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawPlan.isEmpty else {
+            return nil
         }
 
-        return (parts.joined(separator: " · "), type.tint)
+        let type = subscriptionType(from: rawPlan, tool: account.tool)
+        guard type.isPaid,
+              account.tool != .claudeCode,
+              let cycle = actualBillingCycle(from: rawPlan.lowercased()) else {
+            return nil
+        }
+
+        return MetadataItem(
+            text: text.billingCycle(cycle),
+            tint: Branding.inkSubtle,
+            weight: .light
+        )
     }
 
     private func subscriptionType(from rawPlan: String, tool: ToolKind) -> SubscriptionType {
@@ -344,7 +379,12 @@ struct AccountCardView: View {
     }
 
     private var shouldRevealActions: Bool {
-        isActive || isHovering
+        isHovering
+    }
+
+    private var actionZoneOpacity: Double {
+        if isHovering { return 1 }
+        return 0
     }
 
     // Trailing space the header reserves so the account name never collides with
@@ -359,37 +399,40 @@ struct AccountCardView: View {
         }
     }
 
-    private var metadataItems: [(text: String, tint: Color, weight: Font.Weight)] {
-        var items: [(text: String, tint: Color, weight: Font.Weight)] = []
+    private var metadataItems: [MetadataItem] {
+        var items: [MetadataItem] = []
 
-        if isActive {
-            items.append((text.string(.currentBadge), Branding.accentBlueDark, .semibold))
+        if let planSummaryItem {
+            items.append(planSummaryItem)
         }
 
-        // Descriptive plan info reads as secondary text, not an alert.
-        if let planSummaryBadge {
-            items.append((planSummaryBadge.text, planSummaryBadge.tint, .medium))
+        if let subscriptionDateText {
+            items.append(MetadataItem(text: subscriptionDateText, tint: Branding.inkSubtle, weight: .light))
+        }
+
+        if isActive {
+            items.append(MetadataItem(text: text.string(.currentBadge), tint: Branding.accentBlueDark, weight: .semibold))
+        }
+
+        if let billingCycleItem {
+            items.append(billingCycleItem)
         }
 
         if let quota,
            let freshnessBadge = text.quotaFreshnessBadge(quota) {
-            items.append((freshnessBadge, Branding.inkSubtle, .light))
+            items.append(MetadataItem(text: freshnessBadge, tint: Branding.inkSubtle, weight: .light))
         }
 
         if isRecommended, !isActive {
-            items.append((recommendationReason ?? text.string(.recommendedReason), Branding.success, .semibold))
+            items.append(MetadataItem(text: recommendationReason ?? text.string(.recommendedReason), tint: Branding.success, weight: .semibold))
         }
 
         if shouldShowStatusBadge {
-            items.append((status.title(text), status.tint, .semibold))
+            items.append(MetadataItem(text: status.title(text), tint: status.tint, weight: .semibold))
         }
 
         if let refreshBadge {
-            items.append((refreshBadge.text, refreshBadge.tint, .semibold))
-        }
-
-        if let subscriptionDateText {
-            items.append((subscriptionDateText, Branding.inkSubtle, .light))
+            items.append(MetadataItem(text: refreshBadge.text, tint: refreshBadge.tint, weight: .semibold))
         }
 
         return items
@@ -493,12 +536,12 @@ struct AccountCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .stroke(cardStroke, lineWidth: isActive ? 1 : 0.75)
+                .stroke(cardStroke, lineWidth: 0.75)
         )
         .overlay(alignment: .topTrailing) {
             actionZone
                 .frame(width: actionZoneWidth, height: 24, alignment: .trailing)
-                .opacity(shouldRevealActions ? 1 : 0)
+                .opacity(actionZoneOpacity)
                 .allowsHitTesting(shouldRevealActions)
                 .accessibilityHidden(!shouldRevealActions)
                 .padding(.top, verticalPadding)
@@ -585,12 +628,6 @@ struct AccountCardView: View {
                     .help(shouldShowFullNameHelp ? account.name : "")
                     .layoutPriority(1)
 
-                if isRecommended, !isActive {
-                    InlineMetadataLabel(text: text.string(.recommended), tint: Branding.success, weight: .semibold)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .layoutPriority(2)
-                }
-
                 Spacer(minLength: 8)
             }
 
@@ -636,8 +673,8 @@ struct AccountCardView: View {
 
             CardTextActionButton(
                 title: text.string(.refresh),
-                tint: Branding.actionRefresh,
-                softTint: Branding.actionRefreshSoft,
+                tint: Branding.inkMuted,
+                softTint: Branding.chipSurface,
                 isEnabled: !isRefreshing,
                 action: onRefresh
             )
@@ -759,13 +796,13 @@ private struct CardTextActionButton: View {
 
     @State private var isHovering = false
 
-    // Keep the semantic tint visible at rest; hover adds only a soft affordance.
+    // Keep secondary card actions quiet; hover adds only a soft affordance.
     private var textColor: Color {
         if !isEnabled {
             return Branding.inkSubtle.opacity(0.5)
         }
         if !isHovering {
-            return tint.opacity(0.68)
+            return tint.opacity(0.56)
         }
         return tint
     }
@@ -778,7 +815,7 @@ private struct CardTextActionButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 11, weight: .regular))
+                .font(.system(size: 10.8, weight: .regular))
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.horizontal, 8)

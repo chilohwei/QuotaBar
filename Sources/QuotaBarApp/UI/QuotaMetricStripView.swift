@@ -60,12 +60,12 @@ private struct CompactQuotaMetricTile: View {
         guard state.isKnown else { return Branding.inkSubtle }
         if state.ratio <= 0.001 { return Branding.danger }
         if state.ratio <= 0.20 { return Branding.warning }
-        return Branding.success
+        return Branding.quotaFill
     }
 
     private var percentTextColor: Color {
         guard state.isKnown else { return Branding.inkSubtle }
-        return tint
+        return Branding.inkStrong
     }
 
     var body: some View {
@@ -98,7 +98,7 @@ private struct CompactQuotaMetricTile: View {
 
             Text(detailText(resolved: resolved))
                 .font(.system(size: 10, weight: .light))
-                .foregroundStyle(Branding.inkSubtle.opacity(0.78))
+                .foregroundStyle(Branding.inkSubtle.opacity(0.90))
                 .lineLimit(1)
                 .frame(minHeight: 13, alignment: .leading)
         }
@@ -132,16 +132,9 @@ private struct RatioBar: View {
                 Capsule()
                     .fill(tint)
                     .frame(width: max(proxy.size.width * value, value > 0 ? 7 : 0))
-
-                // Warning threshold marker at 20%, where the bar turns amber.
-                Rectangle()
-                    .fill(Branding.pageBackground.opacity(0.85))
-                    .frame(width: 1, height: 6)
-                    .offset(x: proxy.size.width * RatioBar.warningThreshold)
+                    .animation(.easeOut(duration: 0.55), value: value)
             }
         }
-        .frame(height: 6)
+        .frame(height: 7)
     }
-
-    static let warningThreshold: Double = 0.20
 }

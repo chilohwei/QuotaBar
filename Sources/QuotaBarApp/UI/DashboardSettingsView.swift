@@ -27,7 +27,7 @@ struct DashboardSettingsView: View {
         .padding(.top, 8)
         .padding(.horizontal, 18)
         .frame(width: DashboardLayout.contentWidth, height: preferredPanelHeight, alignment: .top)
-        .background(Branding.pageBackground)
+        .background(DashboardPanelBackground())
     }
 
     private var header: some View {
@@ -62,14 +62,8 @@ struct DashboardSettingsView: View {
     }
 
     private var settingsPanel: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            settingsSection(title: text.string(.language)) {
-                languageSegmentedControl
-            }
-
-            settingsSection(title: text.string(.settingsRecommendation)) {
-                recommendationStrategyControl
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            topSettingsGroup
 
             settingsSection(title: text.string(.settingsMenuBar)) {
                 Text(text.string(.menuBarToolsHint))
@@ -114,6 +108,52 @@ struct DashboardSettingsView: View {
         .padding(.bottom, 12)
     }
 
+    private var topSettingsGroup: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            settingsControlBlock(title: text.string(.language)) {
+                languageSegmentedControl
+            }
+
+            settingsDivider
+
+            settingsControlBlock(title: text.string(.recommendationStrategy)) {
+                recommendationStrategySegmentedControl
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
+                .fill(Branding.controlSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
+                .stroke(Branding.controlStroke, lineWidth: 1)
+        )
+    }
+
+    private func settingsControlBlock<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.system(size: 11.2, weight: .semibold))
+                .foregroundStyle(Branding.inkMuted)
+                .padding(.leading, 2)
+
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var settingsDivider: some View {
+        Rectangle()
+            .fill(Branding.controlStroke.opacity(0.76))
+            .frame(height: 0.75)
+            .padding(.vertical, 10)
+    }
+
     private var languageSegmentedControl: some View {
         HStack(spacing: 4) {
             ForEach(AppLanguage.allCases) { language in
@@ -151,48 +191,41 @@ struct DashboardSettingsView: View {
         .animation(settingsPopoverAnimation, value: appState.language)
     }
 
-    private var recommendationStrategyControl: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(text.string(.recommendationStrategy))
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(Branding.inkMuted)
-                .padding(.leading, 2)
-
-            HStack(spacing: 4) {
-                ForEach(AccountRecommendationStrategy.allCases) { strategy in
-                    Button {
-                        withAnimation(settingsPopoverAnimation) {
-                            appState.setRecommendationStrategy(strategy)
-                        }
-                    } label: {
-                        Text(text.recommendationStrategyTitle(strategy))
-                            .font(.system(size: 11.2, weight: appState.recommendationStrategy == strategy ? .semibold : .medium))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.86)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 29)
-                            .foregroundStyle(appState.recommendationStrategy == strategy ? Branding.accentBlueDark : Branding.inkMuted)
-                            .background(
-                                RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
-                                    .fill(appState.recommendationStrategy == strategy ? Branding.menuItemSelectedSurface : Color.clear)
-                            )
+    private var recommendationStrategySegmentedControl: some View {
+        HStack(spacing: 4) {
+            ForEach(AccountRecommendationStrategy.allCases) { strategy in
+                Button {
+                    withAnimation(settingsPopoverAnimation) {
+                        appState.setRecommendationStrategy(strategy)
                     }
-                    .buttonStyle(.quotaInteractive())
-                    .help(text.recommendationStrategyTitle(strategy))
-                    .accessibilityLabel(text.recommendationStrategyTitle(strategy))
+                } label: {
+                    Text(text.recommendationStrategyTitle(strategy))
+                        .font(.system(size: 11.2, weight: appState.recommendationStrategy == strategy ? .semibold : .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.86)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 29)
+                        .foregroundStyle(appState.recommendationStrategy == strategy ? Branding.accentBlueDark : Branding.inkMuted)
+                        .background(
+                            RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
+                                .fill(appState.recommendationStrategy == strategy ? Branding.menuItemSelectedSurface : Color.clear)
+                        )
                 }
+                .buttonStyle(.quotaInteractive())
+                .help(text.recommendationStrategyTitle(strategy))
+                .accessibilityLabel(text.recommendationStrategyTitle(strategy))
             }
-            .padding(3)
-            .background(
-                RoundedRectangle(cornerRadius: Branding.radiusSegment, style: .continuous)
-                    .fill(Branding.controlSurface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Branding.radiusSegment, style: .continuous)
-                    .stroke(Branding.controlStroke, lineWidth: 1)
-            )
-            .animation(settingsPopoverAnimation, value: appState.recommendationStrategy)
         }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: Branding.radiusSegment, style: .continuous)
+                .fill(Branding.controlSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Branding.radiusSegment, style: .continuous)
+                .stroke(Branding.controlStroke, lineWidth: 1)
+        )
+        .animation(settingsPopoverAnimation, value: appState.recommendationStrategy)
     }
 
     private func settingsSection<Content: View>(

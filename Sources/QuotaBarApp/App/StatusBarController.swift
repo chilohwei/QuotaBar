@@ -56,6 +56,11 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 Task { @MainActor in
                     self?.installAvailableUpdateFromDashboard()
                 }
+            },
+            ignoreAvailableUpdate: { [weak self] in
+                Task { @MainActor in
+                    self?.ignoreAvailableUpdateFromDashboard()
+                }
             }
         )
         appState.registerLaunchAtLoginActions(
@@ -116,12 +121,12 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         let host = NSHostingController(
             rootView: DashboardView(appState: appState)
                 .frame(width: DashboardLayout.panelWidth, height: DashboardLayout.preferredPanelHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: DashboardLayout.panelCornerRadius, style: .continuous))
         )
         host.view.frame = NSRect(origin: .zero, size: DashboardLayout.panelSize)
         host.preferredContentSize = DashboardLayout.panelSize
         host.view.wantsLayer = true
-        host.view.layer?.cornerRadius = 12
+        host.view.layer?.cornerRadius = DashboardLayout.panelCornerRadius
         host.view.layer?.cornerCurve = .continuous
         host.view.layer?.masksToBounds = true
 
@@ -393,10 +398,16 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         )
         alert.alertStyle = .informational
         alert.addButton(withTitle: appState.text.string(.downloadAndInstall))
+        alert.addButton(withTitle: appState.text.string(.ignore))
         alert.addButton(withTitle: appState.text.string(.cancel))
 
-        if alert.runModal() == .alertFirstButtonReturn {
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
             performUpdateInstall(release)
+        case .alertSecondButtonReturn:
+            ignoreUpdate(release)
+        default:
+            break
         }
     }
 
@@ -442,8 +453,13 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                             self.availableRelease = nil
                             self.appState.updateBannerState = .idle
                         case .updateAvailable(let release):
-                            self.availableRelease = release
-                            self.appState.updateBannerState = .available(version: release.version)
+                            if AppPreferencesStore.isUpdateVersionIgnored(release.version) {
+                                self.availableRelease = nil
+                                self.appState.updateBannerState = .idle
+                            } else {
+                                self.availableRelease = release
+                                self.appState.updateBannerState = .available(version: release.version)
+                            }
                         }
                     }
                 }
@@ -471,6 +487,21 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         } else {
             performUpdateCheck(showFeedback: true)
         }
+    }
+
+    private func ignoreAvailableUpdateFromDashboard() {
+        guard let release = availableRelease else {
+            appState.updateBannerState = .idle
+            return
+        }
+        ignoreUpdate(release)
+    }
+
+    private func ignoreUpdate(_ release: UpdateRelease) {
+        AppPreferencesStore.setIgnoredUpdateVersion(release.version)
+        availableRelease = nil
+        appState.updateBannerState = .idle
+        AppLog.update.info("Ignored update version \(release.version, privacy: .public)")
     }
 
     private func performUpdateInstall(_ release: UpdateRelease) {

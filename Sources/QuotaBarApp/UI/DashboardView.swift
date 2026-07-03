@@ -1,21 +1,33 @@
 import AppKit
 import SwiftUI
 
+struct DashboardPanelBackground: View {
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.regularMaterial)
+            Rectangle()
+                .fill(Branding.pageBackground.opacity(0.84))
+        }
+    }
+}
+
 enum DashboardLayout {
-    static let contentWidth: CGFloat = 430
+    static let contentWidth: CGFloat = 440
     static let sidebarWidth: CGFloat = 54
     static let panelWidth: CGFloat = contentWidth
-    static let fixedPanelHeight: CGFloat = 620
+    static let fixedPanelHeight: CGFloat = 580
     static let minimumUsablePanelHeight: CGFloat = 360
     static let accountCardHeight: CGFloat = 144
     static let accountCardSpacing: CGFloat = 10
     static let maxVisibleAccountCards = 3
-    static let headerHeight: CGFloat = 64
-    static let stackSpacing: CGFloat = 10
-    static let headerListSpacing: CGFloat = 12
-    static let listFooterSpacing: CGFloat = 8
-    static let bottomReserve: CGFloat = 12
+    static let headerHeight: CGFloat = 60
+    static let stackSpacing: CGFloat = 8
+    static let headerListSpacing: CGFloat = 10
+    static let listFooterSpacing: CGFloat = 6
+    static let bottomReserve: CGFloat = 8
     static let updateNoticeHeight: CGFloat = 36
+    static let panelCornerRadius: CGFloat = 10
 
     static var maxAccountListHeight: CGFloat {
         CGFloat(maxVisibleAccountCards) * accountCardHeight
@@ -121,7 +133,7 @@ struct DashboardView: View {
     var body: some View {
         rightPane
         .frame(width: DashboardLayout.panelWidth, height: preferredPanelHeight, alignment: .top)
-        .background(Branding.pageBackground)
+        .background(DashboardPanelBackground())
         .foregroundStyle(Branding.ink)
         .alert(text.string(.restartRequiredTitle), isPresented: restartRequiredAlertBinding) {
             Button(text.string(.ok)) {
@@ -312,18 +324,18 @@ struct DashboardView: View {
             .frame(height: 30)
             .fixedSize(horizontal: true, vertical: false)
             .background(
-                Capsule(style: .continuous)
+                RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                     .fill(Branding.controlSurface)
             )
             .overlay(
-                Capsule(style: .continuous)
+                RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                     .stroke(
                         isToolMenuPresented ? Branding.accentBlue.opacity(0.35) : Branding.separatorDot,
                         lineWidth: isToolMenuPresented ? 1 : 0.75
                     )
             )
             .shadow(color: Branding.shadowPopover.opacity(0.6), radius: 2.5, y: 1)
-            .contentShape(Capsule(style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous))
             .animation(settingsPopoverAnimation, value: isToolMenuPresented)
         }
         .buttonStyle(.quotaInteractive())
@@ -493,11 +505,11 @@ struct DashboardView: View {
                 .frame(width: 80, height: 30)
                 .foregroundStyle(appState.isAddingAccount ? Branding.warning : Branding.accentBlueDark)
                 .background(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .fill(appState.isAddingAccount ? Branding.warningSoft : Branding.accentBlueSoft)
                 )
                 .overlay(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .stroke(
                             appState.isAddingAccount
                                 ? Branding.warning.opacity(0.12)
@@ -529,17 +541,17 @@ struct DashboardView: View {
                 .opacity(isEnabled || isBusy ? 1 : 0.58)
                 .frame(width: 32, height: 30)
                 .background(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .fill(isBusy ? Branding.accentBlueSoft : Branding.controlSurface)
                 )
                 .overlay(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .stroke(
                             isBusy ? Branding.accentBlue.opacity(0.12) : Branding.controlStroke,
                             lineWidth: 0.75
                         )
                 )
-                .contentShape(Capsule(style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous))
         }
         .buttonStyle(.quotaInteractive(isEnabled: isEnabled || isBusy))
         .disabled(!isEnabled)
@@ -657,7 +669,7 @@ struct DashboardView: View {
                 HStack(spacing: 5) {
                     Text(text.string(.show))
                         .font(.system(size: 11, weight: .light))
-                        .foregroundStyle(Branding.inkSubtle.opacity(0.78))
+                        .foregroundStyle(Branding.inkSubtle.opacity(0.90))
                         .lineLimit(1)
 
                     Circle()
@@ -677,24 +689,24 @@ struct DashboardView: View {
 
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .regular))
-                        .foregroundStyle(Branding.inkSubtle.opacity(0.56))
+                        .foregroundStyle(Branding.inkSubtle.opacity(0.68))
                         .rotationEffect(.degrees(isFilterMenuPresented ? 180 : 0))
                 }
                 .padding(.leading, 9)
                 .padding(.trailing, 8)
                 .frame(height: 26)
                 .background(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .fill(Branding.controlSurface)
                 )
                 .overlay(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .stroke(
                             isFilterMenuPresented ? Branding.accentBlue.opacity(0.10) : Branding.controlStroke.opacity(0.45),
                             lineWidth: 0.75
                         )
                 )
-                .contentShape(Capsule(style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous))
                 .animation(settingsPopoverAnimation, value: isFilterMenuPresented)
             }
             .buttonStyle(.quotaInteractive())
@@ -733,19 +745,24 @@ struct DashboardView: View {
             } label: {
                 Text(text.string(.quit))
                     .font(.system(size: 11.2, weight: .light))
-                .foregroundStyle(Branding.inkSubtle.opacity(0.68))
+                .foregroundStyle(Branding.inkSubtle.opacity(0.82))
                 .padding(.horizontal, 8)
                 .frame(height: 26)
-                .contentShape(Capsule(style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous))
             }
             .buttonStyle(.quotaInteractive())
             .help(text.string(.quit))
             .accessibilityLabel(text.string(.quit))
         }
         .padding(.horizontal, 18)
-        .frame(height: 46)
+        .frame(height: 42)
         .frame(maxWidth: .infinity)
-        .background(Branding.pageBackground)
+        .background(Branding.pageBackground.opacity(0.94))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Branding.controlStroke.opacity(0.55))
+                .frame(height: 0.75)
+        }
     }
 
     private var settingsCover: some View {
@@ -774,50 +791,69 @@ struct DashboardView: View {
     }
 
     private var updateNoticeBar: some View {
-        Button {
-            appState.installAvailableUpdateFromDashboard()
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: updateNoticeIconName)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .frame(width: 16)
+        HStack(spacing: 10) {
+            Image(systemName: updateNoticeIconName)
+                .font(.system(size: 12.5, weight: .semibold))
+                .frame(width: 16)
 
-                Text(updateNoticeTitle)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .monospacedDigit()
+            Text(updateNoticeTitle)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .monospacedDigit()
 
-                Spacer(minLength: 8)
+            Spacer(minLength: 8)
 
-                if let action = updateNoticeActionLabel {
-                    Text(action)
+            if isUpdateNoticeEnabled {
+                Button {
+                    appState.ignoreAvailableUpdateFromDashboard()
+                } label: {
+                    Text(text.string(.ignore))
+                        .font(.system(size: 11.2, weight: .medium))
+                        .lineLimit(1)
+                        .padding(.horizontal, 9)
+                        .frame(height: 23)
+                        .foregroundStyle(Branding.accentBlueDark.opacity(0.72))
+                        .background(
+                            RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
+                                .fill(Branding.controlSurface.opacity(0.76))
+                        )
+                }
+                .buttonStyle(.quotaInteractive())
+                .help(text.string(.ignore))
+                .accessibilityLabel(text.string(.ignore))
+
+                Button {
+                    appState.installAvailableUpdateFromDashboard()
+                } label: {
+                    Text(text.string(.update))
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
                         .padding(.horizontal, 10)
                         .frame(height: 23)
                         .foregroundStyle(Branding.primaryActionText)
                         .background(
-                            Capsule(style: .continuous)
+                            RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
                                 .fill(Branding.accentBlue)
                         )
                 }
+                .buttonStyle(.quotaInteractive())
+                .help(text.string(.update))
+                .accessibilityLabel(text.string(.update))
             }
-            .padding(.leading, 12)
-            .padding(.trailing, updateNoticeActionLabel == nil ? 12 : 6)
-            .frame(height: 36)
-            .frame(maxWidth: .infinity)
-            .foregroundStyle(updateNoticeTint)
-            .background(
-                RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
-                    .fill(updateNoticeBackground)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
-                    .stroke(updateNoticeTint.opacity(0.14), lineWidth: 1)
-            )
         }
-        .buttonStyle(.quotaInteractive(isEnabled: isUpdateNoticeEnabled))
-        .disabled(!isUpdateNoticeEnabled)
+        .padding(.leading, 12)
+        .padding(.trailing, isUpdateNoticeEnabled ? 8 : 12)
+        .frame(height: 36)
+        .frame(maxWidth: .infinity)
+        .foregroundStyle(updateNoticeTint)
+        .background(
+            RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
+                .fill(updateNoticeBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Branding.radiusControl, style: .continuous)
+                .stroke(updateNoticeTint.opacity(0.14), lineWidth: 1)
+        )
         .help(updateNoticeTitle)
         .accessibilityLabel(updateNoticeTitle)
         .opacity(isUpdateNoticeEnabled ? 1 : 0.94)
@@ -847,10 +883,6 @@ struct DashboardView: View {
 
     private var updateNoticeTitle: String {
         text.updateNoticeTitle(appState.updateBannerState)
-    }
-
-    private var updateNoticeActionLabel: String? {
-        text.updateNoticeActionLabel(appState.updateBannerState)
     }
 
     private var updateNoticeTint: Color {
@@ -1013,11 +1045,11 @@ struct DashboardView: View {
                 .frame(height: 32)
                 .foregroundStyle(appState.isAddingAccount ? Branding.warning : Branding.accentBlueDark)
                 .background(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .fill(appState.isAddingAccount ? Branding.warningSoft : Branding.accentBlueSoft)
                 )
                 .overlay(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
                         .stroke(
                             appState.isAddingAccount
                                 ? Branding.warning.opacity(0.12)

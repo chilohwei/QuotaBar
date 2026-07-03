@@ -28,6 +28,7 @@ final class AppState: ObservableObject {
     private let refreshIntervalPolicy = RefreshIntervalPolicy()
     private var checkForUpdatesAction: (() -> Void)?
     private var installAvailableUpdateAction: (() -> Void)?
+    private var ignoreAvailableUpdateAction: (() -> Void)?
     private var launchAtLoginEnabledProvider: (() -> Bool)?
     private var setLaunchAtLoginEnabledAction: ((Bool) -> Void)?
 
@@ -332,10 +333,12 @@ final class AppState: ObservableObject {
 
     func registerUpdateActions(
         checkForUpdates: @escaping () -> Void,
-        installAvailableUpdate: @escaping () -> Void
+        installAvailableUpdate: @escaping () -> Void,
+        ignoreAvailableUpdate: @escaping () -> Void
     ) {
         checkForUpdatesAction = checkForUpdates
         installAvailableUpdateAction = installAvailableUpdate
+        ignoreAvailableUpdateAction = ignoreAvailableUpdate
     }
 
     func checkForUpdatesFromDashboard() {
@@ -344,6 +347,10 @@ final class AppState: ObservableObject {
 
     func installAvailableUpdateFromDashboard() {
         installAvailableUpdateAction?()
+    }
+
+    func ignoreAvailableUpdateFromDashboard() {
+        ignoreAvailableUpdateAction?()
     }
 
     func registerLaunchAtLoginActions(

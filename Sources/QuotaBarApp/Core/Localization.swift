@@ -73,6 +73,7 @@ enum AppString: String {
     case emptyAvailableAccountsDescription
     case error
     case exhausted
+    case ignore
     case installingUpdate
     case language
     case launchAtLogin
@@ -339,11 +340,6 @@ struct AppText {
         case .idle:
             return ""
         }
-    }
-
-    func updateNoticeActionLabel(_ state: AppUpdateBannerState) -> String? {
-        guard case .available = state else { return nil }
-        return string(.update)
     }
 
     func launchAtLoginFailedMessage(_ error: String) -> String {
@@ -982,7 +978,7 @@ struct AppText {
             .checkForUpdates: "检查更新",
             .checkingForUpdates: "正在检查更新...",
             .current: "当前使用",
-            .currentBadge: "当前",
+            .currentBadge: "当前使用",
             .delete: "删除",
             .deleteLocalOnly: "仅删除本地记录，不影响线上账号。",
             .deletePromptTitle: "删除账号？",
@@ -992,6 +988,7 @@ struct AppText {
             .emptyAvailableAccountsDescription: "切换到全部账号查看等待同步、无额度或错误状态的账号。",
             .error: "需处理",
             .exhausted: "不可用",
+            .ignore: "忽略",
             .installingUpdate: "正在安装更新...",
             .language: "语言",
             .launchAtLogin: "开机自启",
@@ -1042,7 +1039,7 @@ struct AppText {
             .checkForUpdates: "檢查更新",
             .checkingForUpdates: "正在檢查更新...",
             .current: "目前使用",
-            .currentBadge: "目前",
+            .currentBadge: "目前使用",
             .delete: "刪除",
             .deleteLocalOnly: "僅刪除本機記錄，不影響線上帳號。",
             .deletePromptTitle: "刪除帳號？",
@@ -1052,6 +1049,7 @@ struct AppText {
             .emptyAvailableAccountsDescription: "切換到全部帳號查看等待同步、無額度或錯誤狀態的帳號。",
             .error: "需處理",
             .exhausted: "不可用",
+            .ignore: "忽略",
             .installingUpdate: "正在安裝更新...",
             .language: "語言",
             .launchAtLogin: "開機自啟",
@@ -1112,6 +1110,7 @@ struct AppText {
             .emptyAvailableAccountsDescription: "Switch to All to view accounts waiting for sync, out of quota, or in an error state.",
             .error: "Needs action",
             .exhausted: "Unavailable",
+            .ignore: "Ignore",
             .installingUpdate: "Installing update...",
             .language: "Language",
             .launchAtLogin: "Launch at Login",
