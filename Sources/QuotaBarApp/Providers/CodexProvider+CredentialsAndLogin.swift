@@ -77,7 +77,7 @@ extension CodexProvider {
         try fileService.createDirectoryIfNeeded(at: scratchHome.path)
 
         guard let codexExecutable = findCodexExecutable() else {
-            throw ProviderError.unsupported("未找到 Codex CLI。请先安装 Codex，或确认 codex 命令可用。")
+            throw ProviderError.cliMissing(tool: .codex, message: "未找到 Codex CLI。请先安装 Codex，或确认 codex 命令可用。")
         }
 
         defer {
@@ -102,7 +102,7 @@ extension CodexProvider {
         let message = failures.isEmpty
             ? "Codex 登录未完成，请重试"
             : "Codex 登录失败：\(failures.joined(separator: "；"))"
-        throw ProviderError.unsupported(message)
+        throw ProviderError.loginIncomplete(tool: .codex, message: message)
     }
 
     func codexLoginAttempts() -> [CodexLoginAttempt] {
@@ -140,6 +140,13 @@ extension CodexProvider {
         codexExecutable: URL,
         scratchHome: URL
     ) async throws -> String {
+        await MainActor.run {
+            LoginFlowProgress.shared.begin(
+                method: attempt.opensDevicePrompt ? .deviceCode : .browser,
+                timeout: attempt.timeout
+            )
+        }
+
         let process = Process()
         process.executableURL = codexExecutable
         process.arguments = attempt.arguments
@@ -161,12 +168,18 @@ extension CodexProvider {
             let chunk = String(data: data, encoding: .utf8) ?? ""
             loginOutput.append(chunk)
             if let url = loginURLScanner.append(data) {
-                DispatchQueue.main.async {
+                Task { @MainActor in
                     NSWorkspace.shared.open(url)
+                    LoginFlowProgress.shared.setReopenAction {
+                        NSWorkspace.shared.open(url)
+                    }
                 }
             }
             if let prompt = devicePromptScanner?.append(data) {
-                DispatchQueue.main.async {
+                Task { @MainActor in
+                    LoginFlowProgress.shared.setReopenAction {
+                        NSWorkspace.shared.open(prompt.url)
+                    }
                     Self.presentDeviceAuthPrompt(prompt)
                 }
             }
@@ -176,7 +189,7 @@ extension CodexProvider {
             try process.run()
         } catch {
             outputPipe.fileHandleForReading.readabilityHandler = nil
-            throw ProviderError.unsupported("未找到 codex 命令，请先安装 Codex CLI")
+            throw ProviderError.cliMissing(tool: .codex, message: "未找到 codex 命令，请先安装 Codex CLI")
         }
         defer {
             outputPipe.fileHandleForReading.readabilityHandler = nil
@@ -210,7 +223,7 @@ extension CodexProvider {
         }
 
         if process.isRunning {
-            throw ProviderError.unsupported(attempt.opensDevicePrompt ? "Codex 设备码登录超时，请重试" : "Codex 浏览器登录超时，请重试")
+            throw ProviderError.loginIncomplete(tool: .codex, message: attempt.opensDevicePrompt ? "Codex 设备码登录超时，请重试" : "Codex 浏览器登录超时，请重试")
         }
 
         if process.terminationStatus == 0 {
@@ -229,9 +242,9 @@ extension CodexProvider {
         let output = loginOutput.snapshot()
         if process.terminationStatus != 0 {
             if output.isEmpty {
-                throw ProviderError.unsupported("Codex 登录未完成，请在浏览器完成授权后重试")
+                throw ProviderError.loginIncomplete(tool: .codex, message: "Codex 登录未完成，请在浏览器完成授权后重试")
             }
-            throw ProviderError.unsupported("Codex 登录失败：\(output)")
+            throw ProviderError.loginIncomplete(tool: .codex, message: "Codex 登录失败：\(output)")
         }
 
         throw ProviderError.missingFile(path: scratchAuthPath)

@@ -198,13 +198,38 @@ extension AppText {
     }
 
     private func claudeStaleLiveDataText(minutes: Int) -> String {
+        let age = Self.humanizedAge(minutes: minutes, language: language)
         switch language {
         case .english:
-            return "Showing quota from about \(minutes) min ago. It will update automatically."
+            return "Showing quota from about \(age) ago. It will update automatically."
         case .simplifiedChinese:
-            return QuotaNoteCatalog.claudeStaleLiveData(minutes: minutes)
+            return "显示约 \(age)前的额度，稍后会自动更新。"
         case .traditionalChinese:
-            return "顯示約 \(minutes) 分鐘前的額度，稍後會自動更新。"
+            return "顯示約 \(age)前的額度，稍後會自動更新。"
+        }
+    }
+
+    /// "480 分钟" reads poorly — convert to hours/days once past an hour.
+    static func humanizedAge(minutes: Int, language: AppLanguage) -> String {
+        if minutes >= 24 * 60 {
+            let days = minutes / (24 * 60)
+            switch language {
+            case .english: return "\(days) day\(days == 1 ? "" : "s")"
+            case .simplifiedChinese, .traditionalChinese: return "\(days) 天"
+            }
+        }
+        if minutes >= 60 {
+            let hours = minutes / 60
+            switch language {
+            case .english: return "\(hours) hour\(hours == 1 ? "" : "s")"
+            case .simplifiedChinese: return "\(hours) 小时"
+            case .traditionalChinese: return "\(hours) 小時"
+            }
+        }
+        switch language {
+        case .english: return "\(minutes) min"
+        case .simplifiedChinese: return "\(minutes) 分钟"
+        case .traditionalChinese: return "\(minutes) 分鐘"
         }
     }
 }

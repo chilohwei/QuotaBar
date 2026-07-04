@@ -3,7 +3,7 @@ import Foundation
 extension ClaudeCodeProvider {
     func readClaudeCodeCredentials() async throws -> ClaudeCodeCredentials {
         guard let executable = claudeExecutableURL() else {
-            throw ProviderError.unsupported("未找到 Claude Code CLI。请先安装 claude，或确认 claude 命令可用。")
+            throw ProviderError.cliMissing(tool: .claudeCode, message: "未找到 Claude Code CLI。请先安装 claude，或确认 claude 命令可用。")
         }
         let output = try await runProcess(executable: executable, arguments: ["auth", "status"], timeout: 10)
         guard let data = output.data(using: .utf8),
@@ -39,7 +39,7 @@ extension ClaudeCodeProvider {
 
     func runClaudeAuthLogin(timeout: TimeInterval) async throws {
         guard let executable = claudeExecutableURL() else {
-            throw ProviderError.unsupported("未找到 Claude Code CLI。请先安装 claude，或确认 claude 命令可用。")
+            throw ProviderError.cliMissing(tool: .claudeCode, message: "未找到 Claude Code CLI。请先安装 claude，或确认 claude 命令可用。")
         }
         _ = try await runProcess(
             executable: executable,

@@ -5,9 +5,31 @@ enum AppPreferencesStore {
     private static let recommendationStrategyKey = "QuotaBar.RecommendationStrategy"
     private static let menuBarVisibleToolsKey = "QuotaBar.MenuBarVisibleTools"
     private static let ignoredUpdateVersionKey = "QuotaBar.IgnoredUpdateVersion"
+    private static let quotaNotificationsEnabledKey = "QuotaBar.QuotaNotificationsEnabled"
+    private static let quotaNotificationThresholdKey = "QuotaBar.QuotaNotificationThreshold"
+
+    static let quotaNotificationThresholdOptions: [Double] = [0.10, 0.20, 0.30]
 
     static var refreshOnOpenEnabled: Bool {
         bool(forKey: refreshOnOpenKey, defaultValue: true)
+    }
+
+    static var quotaNotificationsEnabled: Bool {
+        bool(forKey: quotaNotificationsEnabledKey, defaultValue: false)
+    }
+
+    static func setQuotaNotificationsEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: quotaNotificationsEnabledKey)
+    }
+
+    static var quotaNotificationThreshold: Double {
+        let stored = UserDefaults.standard.double(forKey: quotaNotificationThresholdKey)
+        guard quotaNotificationThresholdOptions.contains(stored) else { return 0.20 }
+        return stored
+    }
+
+    static func setQuotaNotificationThreshold(_ threshold: Double) {
+        UserDefaults.standard.set(threshold, forKey: quotaNotificationThresholdKey)
     }
 
     static var menuBarVisibleTools: Set<ToolKind> {

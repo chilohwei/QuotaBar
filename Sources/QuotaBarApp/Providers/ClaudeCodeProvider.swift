@@ -20,6 +20,9 @@ struct ClaudeCodeProvider: Provider {
     // When the OAuth fallback path is temporarily unavailable, the last live snapshot may be shown
     // up to this old, clearly labeled with its age.
     static let liveUsageStaleMax: TimeInterval = 30 * 60
+    // Cached OAuth data older than this no longer fills gaps in the statusLine snapshot;
+    // day-old numbers presented next to live ones mislead more than they inform.
+    static let historicalFillMaxAge: TimeInterval = 24 * 60 * 60
     // After a token refresh fails, wait this long before trying again, so a throttled auth endpoint
     // is given room to recover instead of being hammered on every poll cycle. This is the *base*
     // cooldown: consecutive failures escalate it (5 → 10 → 20 → 30 min) up to `tokenRefreshCooldownMax`,
@@ -27,6 +30,11 @@ struct ClaudeCodeProvider: Provider {
     // only sustains the rate limit (see anthropics/claude-code#30930).
     static let tokenRefreshCooldown: TimeInterval = 5 * 60
     static let tokenRefreshCooldownMax: TimeInterval = 30 * 60
+    // How many consecutive failed refreshes before a *background* poll escalates to the
+    // "sign in again" prompt: the first failure retries silently (~5 min), the second prompts.
+    // User-facing refreshes (panel open, manual) prompt on the first failure — someone who is
+    // actively looking at stale data should be told immediately how to fix it.
+    static let backgroundRefreshAttemptsBeforeReloginHint = 2
     static let rateLimitTranscriptLookback: TimeInterval = 24 * 60 * 60
     static let recentTranscriptFileLimit = 16
     static let transcriptTailByteLimit: UInt64 = 512 * 1024

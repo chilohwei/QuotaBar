@@ -4,7 +4,7 @@ extension ClaudeCodeProvider {
     func importCurrentCredentials() async throws -> String {
         let credentials = try await readClaudeCodeCredentials()
         guard credentials.loggedIn else {
-            throw ProviderError.unsupported(claudeLoginRequiredMessage)
+            throw ProviderError.loginRequired(tool: .claudeCode, message: claudeLoginRequiredMessage)
         }
         return try encodeCredentials(credentials)
     }
@@ -12,10 +12,13 @@ extension ClaudeCodeProvider {
     func authenticateViaBrowser() async throws -> String {
         do {
             let previous = try? await readClaudeCodeCredentials()
+            await MainActor.run {
+                LoginFlowProgress.shared.begin(method: .browser, timeout: 300)
+            }
             try await runClaudeAuthLogin(timeout: 300)
             let credentials = try await readClaudeCodeCredentials()
             guard credentials.loggedIn else {
-                throw ProviderError.unsupported(claudeLoginRequiredMessage)
+                throw ProviderError.loginRequired(tool: .claudeCode, message: claudeLoginRequiredMessage)
             }
             if shouldClearStatusLineSnapshot(previous: previous, next: credentials) {
                 try? fileService.removeItemIfExists(at: AppPaths.claudeCodeStatusFile.path)
@@ -26,7 +29,7 @@ extension ClaudeCodeProvider {
             if case ProviderError.unsupported = error {
                 throw error
             }
-            throw ProviderError.unsupported(claudeLoginRequiredMessage)
+            throw ProviderError.loginRequired(tool: .claudeCode, message: claudeLoginRequiredMessage)
         }
     }
 
@@ -83,7 +86,10 @@ extension ClaudeCodeProvider {
         let statusLineLoad = try? loadStatusLineSnapshot()
         let rateLimitEvent = loadActiveRateLimitEvent(status: statusLineLoad?.status, now: now)
         let cachedOAuthSnapshot = loadCachedOAuthUsage(credentials: credentials)
-            .flatMap(historicalLiveFallback)
+            .flatMap { cached -> QuotaSnapshot? in
+                guard now.timeIntervalSince(cached.cachedAt) <= Self.historicalFillMaxAge else { return nil }
+                return historicalLiveFallback(cached)
+            }
         let statusLineStatus = shouldUseStatusLineSnapshot(statusLineLoad?.status, settingsJSON: credentials.claudeSettingsJSON)
             ? statusLineLoad?.status
             : nil

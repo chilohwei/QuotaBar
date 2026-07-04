@@ -12,6 +12,8 @@ struct AccountCardView: View {
     let errorMessage: String?
     let errorRequiresUserAction: Bool
     let canActivate: Bool
+    var isHighlighted = false
+    var isKeyboardFocused = false
     let refreshCycleID: Int
     let onActivate: () -> Void
     let onRefresh: () -> Void
@@ -34,16 +36,12 @@ struct AccountCardView: View {
         return trimmed.isEmpty ? "\(account.tool.displayName) Account" : trimmed
     }
 
-    private var compactedDisplayName: String {
+    private var displayName: String {
         compactDisplayName(resolvedAccountName)
     }
 
-    private var displayName: String {
-        return compactedDisplayName
-    }
-
     private var shouldShowFullNameHelp: Bool {
-        compactedDisplayName != resolvedAccountName
+        displayName != resolvedAccountName
     }
 
     private func compactDisplayName(_ value: String) -> String {
@@ -238,48 +236,12 @@ struct AccountCardView: View {
         }
     }
 
-    private var remainingRatio: Double? {
-        quotaLimitingMetrics.compactMap(\.ratio).min()
-    }
-
-    private var remainingRatios: [Double] {
-        quotaLimitingMetrics.compactMap(\.ratio)
-    }
-
     private var metrics: [QuotaDisplayMetric] {
         quota?.orderedMetrics ?? []
     }
 
     private var visibleMetrics: [QuotaDisplayMetric] {
         Array(metrics.prefix(3))
-    }
-
-    private var quotaLimitingMetrics: [QuotaDisplayMetric] {
-        guard account.tool == .claudeCode else { return metrics }
-        var items: [QuotaDisplayMetric] = []
-        if let primary = quota?.primary {
-            items.append(.window(primary))
-        }
-        if let secondary = quota?.secondary {
-            items.append(.window(secondary))
-        }
-        if let remaining = quota?.creditsRemaining,
-           let total = quota?.creditsTotal,
-           total > 0 {
-            items.append(.credits(remaining: remaining, total: total, periodEnd: quota?.periodEnd))
-        }
-        return items
-    }
-
-    private var hasAnyQuotaRemaining: Bool {
-        if remainingRatios.contains(where: { $0 > 0.001 }) {
-            return true
-        }
-        return false
-    }
-
-    private var hasExhaustedQuotaWindow: Bool {
-        remainingRatios.contains { $0 <= 0.001 }
     }
 
     private var isInitialLoadingWithoutQuota: Bool {
@@ -304,42 +266,14 @@ struct AccountCardView: View {
     }
 
     private var status: AccountVisualStatus {
-        if errorMessage != nil, quota == nil {
-            return errorRequiresUserAction ? .error : .pending
-        }
-        if isRefreshing || loadState == .refreshing || loadState == .loadingInitial { return .refreshing }
-        guard let quota else { return .pending }
-        if isStaleQuota(quota) { return .stale }
-        switch quota.effectiveAvailabilityStatus {
-        case .quotaExhausted:
-            return .exhausted
-        case .sessionRateLimited, .authRateLimited, .serviceUnavailable:
-            return .warning
-        case .normal:
-            break
-        }
-        if metrics.isEmpty {
-            if account.tool == .claudeCode {
-                return .healthy
-            }
-            return .noQuota
-        }
-        if hasExhaustedQuotaWindow { return .exhausted }
-        if account.tool == .claudeCode, quotaLimitingMetrics.isEmpty, !metrics.isEmpty {
-            return .healthy
-        }
-        if hasAnyQuotaRemaining {
-            guard let remainingRatio else { return .healthy }
-            return remainingRatio <= 0.20 ? .warning : .healthy
-        }
-        guard let remainingRatio else { return .noQuota }
-        if remainingRatio <= 0.001 { return .exhausted }
-        if remainingRatio <= 0.20 { return .warning }
-        return .healthy
-    }
-
-    private func isStaleQuota(_ quota: QuotaSnapshot) -> Bool {
-        QuotaFreshness.isStale(quota)
+        AccountCardStatusPresenter.status(
+            tool: account.tool,
+            quota: quota,
+            loadState: loadState,
+            isRefreshing: isRefreshing,
+            errorMessage: errorMessage,
+            errorRequiresUserAction: errorRequiresUserAction
+        )
     }
 
     private var shouldShowStatusBadge: Bool {
@@ -373,18 +307,22 @@ struct AccountCardView: View {
     }
 
     private var cardStroke: Color {
+        if isHighlighted { return Branding.accentBlue.opacity(0.66) }
+        if isKeyboardFocused { return Branding.accentBlue.opacity(0.52) }
         if isActive { return Branding.borderSelected }
         if isHovering { return Branding.borderSelected.opacity(0.36) }
         return Branding.controlStroke.opacity(0.52)
     }
 
-    private var shouldRevealActions: Bool {
-        isHovering
+    private var cardStrokeWidth: CGFloat {
+        (isHighlighted || isKeyboardFocused) ? 1.5 : 0.75
     }
 
+    // Actions stay faintly visible so they are discoverable without hover;
+    // hover raises them to full strength.
     private var actionZoneOpacity: Double {
         if isHovering { return 1 }
-        return 0
+        return 0.55
     }
 
     // Trailing space the header reserves so the account name never collides with
@@ -453,12 +391,13 @@ struct AccountCardView: View {
     private var footerMessage: FooterContent? {
         if let errorMessage {
             if errorRequiresUserAction {
-                return FooterContent(display: errorMessage, tooltip: errorMessage, color: Branding.warning, icon: "exclamationmark.circle.fill", weight: .medium)
+                // The card shows only the actionable gist; the full how-to stays on hover.
+                return FooterContent(display: text.compactErrorSummary(errorMessage), tooltip: errorMessage, color: Branding.warning, icon: "exclamationmark.circle.fill", weight: .medium)
             }
             if quota != nil {
                 return nil
             }
-            return FooterContent(display: errorMessage, tooltip: errorMessage, color: Branding.warning, icon: nil, weight: .regular)
+            return FooterContent(display: text.compactErrorSummary(errorMessage), tooltip: errorMessage, color: Branding.warning, icon: nil, weight: .regular)
         }
         // No hard error: surface the snapshot's own status note as muted metadata.
         // Transient refresh/freshness notes are filtered out by AppText.
@@ -536,14 +475,12 @@ struct AccountCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .stroke(cardStroke, lineWidth: 0.75)
+                .stroke(cardStroke, lineWidth: cardStrokeWidth)
         )
         .overlay(alignment: .topTrailing) {
             actionZone
                 .frame(width: actionZoneWidth, height: 24, alignment: .trailing)
                 .opacity(actionZoneOpacity)
-                .allowsHitTesting(shouldRevealActions)
-                .accessibilityHidden(!shouldRevealActions)
                 .padding(.top, verticalPadding)
                 .padding(.trailing, 14)
         }
@@ -554,7 +491,8 @@ struct AccountCardView: View {
         )
         .onHover { isHovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isHovering)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: shouldRevealActions)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: isHighlighted)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isKeyboardFocused)
         .animation(reduceMotion ? nil : .quotaFluid, value: isActive)
         .contentShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
         .onTapGesture {
@@ -834,42 +772,6 @@ private struct CardTextActionButton: View {
         .onHover { isHovering = $0 }
         .animation(.easeOut(duration: 0.14), value: isHovering)
     }
-}
-
-private enum AccountVisualStatus {
-    case healthy
-    case refreshing
-    case pending
-    case noQuota
-    case stale
-    case warning
-    case exhausted
-    case error
-
-    func title(_ text: AppText) -> String {
-        switch self {
-        case .healthy: return text.string(.normal)
-        case .refreshing: return text.string(.refreshing)
-        case .pending: return text.string(.pendingRefresh)
-        case .noQuota: return text.string(.noQuota)
-        case .stale: return text.string(.staleData)
-        case .warning: return text.string(.nearLimit)
-        case .exhausted: return text.string(.exhausted)
-        case .error: return text.string(.error)
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .healthy: return Branding.success
-        case .refreshing: return Branding.accentBlue
-        case .pending, .noQuota: return Branding.inkMuted
-        case .stale: return Branding.inkMuted
-        case .warning: return Branding.warning
-        case .exhausted, .error: return Branding.danger
-        }
-    }
-
 }
 
 private struct InlineMetadataLabel: View {

@@ -100,6 +100,11 @@ extension ClaudeCodeProvider {
                 cacheKey: cacheKey,
                 intent: intent
             ) else {
+                // Automatic retries have run their course; QuotaBar cannot revive this
+                // token on its own, so escalate to an explicit re-login prompt.
+                if hasExhaustedTokenRefreshAttempts(cacheKey, intent: intent) {
+                    throw ProviderError.tokenExpired(tool: .claudeCode)
+                }
                 return staleLiveFallback(cached)
             }
             accessToken = refreshed
@@ -123,6 +128,9 @@ extension ClaudeCodeProvider {
                     cacheKey: cacheKey,
                     intent: intent
                 ) else {
+                    if hasExhaustedTokenRefreshAttempts(cacheKey, intent: intent) {
+                        throw ProviderError.tokenExpired(tool: .claudeCode)
+                    }
                     return staleLiveFallback(cached)
                 }
                 let payload = try await requestOAuthUsage(accessToken: refreshed)
@@ -141,6 +149,9 @@ extension ClaudeCodeProvider {
                     return fallback.replacing(availabilityStatus: .authRateLimited)
                 }
                 throw ProviderError.rateLimited(tool: .claudeCode, retryAfter: retryAfter)
+            } catch let error as ProviderError {
+                // tokenExpired and friends must reach the UI, not degrade into stale data.
+                throw error
             } catch {
                 return staleLiveFallback(cached)
             }
@@ -161,23 +172,27 @@ extension ClaudeCodeProvider {
     }
 
     /// The last real `/usage` value from the OAuth fallback path, labeled with its age while recent
-    /// enough to be meaningful.
+    /// enough to be meaningful. A cache whose windows have all reset carries no information.
     func staleLiveFallback(_ cached: CachedClaudeUsage?) -> QuotaSnapshot? {
         guard let cached,
-              Date().timeIntervalSince(cached.cachedAt) <= Self.liveUsageStaleMax else {
+              Date().timeIntervalSince(cached.cachedAt) <= Self.liveUsageStaleMax,
+              let fallback = historicalLiveFallback(cached),
+              !fallback.orderedMetrics.isEmpty else {
             return nil
         }
-        return historicalLiveFallback(cached)
+        return fallback
     }
 
     func historicalLiveFallback(_ cached: CachedClaudeUsage?) -> QuotaSnapshot? {
         guard let cached else { return nil }
         let minutes = max(1, Int(Date().timeIntervalSince(cached.cachedAt) / 60))
-        return cached.snapshot.replacing(
-            source: "Claude Code OAuth Cache",
-            updatedAt: cached.cachedAt,
-            note: QuotaNoteCatalog.claudeStaleLiveData(minutes: minutes)
-        )
+        return cached.snapshot
+            .removingExpiredWindows()
+            .replacing(
+                source: "Claude Code OAuth Cache",
+                updatedAt: cached.cachedAt,
+                note: QuotaNoteCatalog.claudeStaleLiveData(minutes: minutes)
+            )
     }
 
     func loadCachedOAuthUsage(credentials: ClaudeCodeCredentials) -> CachedClaudeUsage? {
@@ -205,12 +220,27 @@ extension ClaudeCodeProvider {
         } catch OAuthUsageFetchError.unauthorized {
             clearTokenRefreshBackoff(cacheKey)
             throw ProviderError.tokenExpired(tool: .claudeCode)
-        } catch OAuthUsageFetchError.rateLimited(_) {
-            setTokenRefreshBackoff(cacheKey)
-            return nil
         } catch {
+            let isFirstFailure = tokenRefreshBackoffState(cacheKey) == nil
             setTokenRefreshBackoff(cacheKey)
-            return nil
+            guard isFirstFailure else { return nil }
+
+            // The very first failure gets one immediate silent retry — transient throttles
+            // often clear at once, and waiting a full cooldown would leave the panel stale
+            // for no reason. If the retry also fails, the caller escalates to the
+            // re-login prompt right away instead of after another cooldown.
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            do {
+                let access = try await refreshAndPersistToken(refreshToken: refreshToken)
+                clearTokenRefreshBackoff(cacheKey)
+                return access
+            } catch OAuthUsageFetchError.unauthorized {
+                clearTokenRefreshBackoff(cacheKey)
+                throw ProviderError.tokenExpired(tool: .claudeCode)
+            } catch {
+                setTokenRefreshBackoff(cacheKey)
+                return nil
+            }
         }
     }
 
@@ -259,6 +289,14 @@ extension ClaudeCodeProvider {
                 refreshToken: (newRefresh?.isEmpty == false) ? newRefresh! : refreshToken,
                 expiresAt: expiresAt
             )
+        case 400:
+            // OAuth error responses use 400 for permanently dead grants (RFC 6749 §5.2).
+            // Treat those as unauthorized so the UI says "sign in again" instead of
+            // silently retrying a token that can never work.
+            if Self.isPermanentTokenRefreshFailure(body: data) {
+                throw OAuthUsageFetchError.unauthorized
+            }
+            throw OAuthUsageFetchError.httpStatus(http.statusCode)
         case 401, 403:
             throw OAuthUsageFetchError.unauthorized
         case 429:
@@ -266,6 +304,13 @@ extension ClaudeCodeProvider {
         default:
             throw OAuthUsageFetchError.httpStatus(http.statusCode)
         }
+    }
+
+    static func isPermanentTokenRefreshFailure(body: Data) -> Bool {
+        guard let text = String(data: body, encoding: .utf8)?.lowercased() else { return false }
+        return text.contains("invalid_grant")
+            || text.contains("invalid_request")
+            || text.contains("invalid refresh token")
     }
 
     @discardableResult
@@ -375,6 +420,26 @@ extension ClaudeCodeProvider {
 
     func tokenRefreshBlockedUntil(_ cacheKey: String?) -> Date? {
         tokenRefreshBackoffState(cacheKey)?.until
+    }
+
+    /// True once refresh retries have failed often enough for the given trigger that waiting
+    /// longer is pointless without a fresh sign-in.
+    func hasExhaustedTokenRefreshAttempts(_ cacheKey: String?, intent: RefreshIntent) -> Bool {
+        Self.shouldPromptRelogin(
+            attempts: tokenRefreshBackoffState(cacheKey)?.attempts ?? 0,
+            intent: intent
+        )
+    }
+
+    static func shouldPromptRelogin(attempts: Int, intent: RefreshIntent) -> Bool {
+        guard attempts >= 1 else { return false }
+        switch intent {
+        case .manual, .visible:
+            // The user is looking at (or explicitly asked for) fresh data right now.
+            return true
+        case .background:
+            return attempts >= backgroundRefreshAttemptsBeforeReloginHint
+        }
     }
 
     func setTokenRefreshBackoff(_ cacheKey: String?) {

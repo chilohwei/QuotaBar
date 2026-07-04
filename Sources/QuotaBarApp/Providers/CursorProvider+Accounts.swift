@@ -29,34 +29,17 @@ extension CursorProvider {
             return existingSecret
         }
 
-        if let agentURL = cursorAgentExecutableURL() {
-            do {
-                try await runCursorAgentLogin(agentURL: agentURL, timeout: 240)
-                if let latestSecret = await currentImportedCursorSecret() {
-                    if cursorImportedSecret(
-                        latestSecret,
-                        isAcceptableComparedTo: initialCredentials,
-                        allowExistingCredentials: allowExistingCredentials
-                    ) {
-                        return latestSecret
-                    }
-                }
-                throw ProviderError.unsupported("Cursor Agent 登录完成，但未读取到本地凭据")
-            } catch {
-                try? openCursorLoginPage()
-                return try await waitForImportedCursorCredentials(
-                    timeout: 240,
-                    lastError: error,
-                    initialCredentials: initialCredentials,
-                    allowExistingCredentials: allowExistingCredentials
-                )
+        let session = makeCursorOAuthLoginSession()
+        try openCursorOAuthLoginPage(session: session)
+        let timeout: TimeInterval = 240
+        await MainActor.run { [self] in
+            LoginFlowProgress.shared.begin(method: .browser, timeout: timeout) {
+                try? openCursorOAuthLoginPage(session: session)
             }
         }
-
-        try openCursorLoginPage()
-        return try await waitForImportedCursorCredentials(
-            timeout: 240,
-            lastError: nil,
+        return try await waitForCursorOAuthLogin(
+            session: session,
+            timeout: timeout,
             initialCredentials: initialCredentials,
             allowExistingCredentials: allowExistingCredentials
         )
@@ -85,41 +68,59 @@ extension CursorProvider {
         return !cursorCredentialsRepresentSameAccount(initialCredentials, latestCredentials)
     }
 
-    func waitForImportedCursorCredentials(
+    func waitForCursorOAuthLogin(
+        session: CursorOAuthLoginSession,
         timeout: TimeInterval,
-        lastError initialError: Error?,
         initialCredentials: CursorCredentials?,
         allowExistingCredentials: Bool
     ) async throws -> String {
         let deadline = Date().addingTimeInterval(timeout)
-        var lastError = initialError
+        var lastError: Error?
 
         while Date() < deadline {
-            if Task.isCancelled {
-                throw CancellationError()
-            }
+            try Task.checkCancellation()
 
             do {
-                let latestSecret = try await importCurrentCredentials()
-                if !latestSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   cursorImportedSecret(
-                       latestSecret,
-                       isAcceptableComparedTo: initialCredentials,
-                       allowExistingCredentials: allowExistingCredentials
-                   ) {
-                    return latestSecret
+                if var credentials = try await pollCursorOAuthCredentials(session: session) {
+                    if cursorAccountEmail(from: credentials) == nil,
+                       let email = await fetchCursorAccountEmail(accessToken: credentials.accessToken) {
+                        credentials = CursorCredentials(
+                            accessToken: credentials.accessToken,
+                            refreshToken: credentials.refreshToken,
+                            email: email,
+                            membershipType: credentials.membershipType,
+                            subscriptionStatus: credentials.subscriptionStatus,
+                            subscriptionPeriodEnd: credentials.subscriptionPeriodEnd,
+                            stateDatabasePath: credentials.stateDatabasePath,
+                            source: credentials.source
+                        )
+                    }
+                    return encodeCredentials(credentials)
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 lastError = error
             }
-            try await Task.sleep(nanoseconds: 1_000_000_000)
+
+            // The user may finish signing in from the Cursor IDE instead of the browser flow.
+            if let latestSecret = await currentImportedCursorSecret(),
+               cursorImportedSecret(
+                   latestSecret,
+                   isAcceptableComparedTo: initialCredentials,
+                   allowExistingCredentials: allowExistingCredentials
+               ) {
+                return latestSecret
+            }
+
+            try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
         if let localized = (lastError as? LocalizedError)?.errorDescription,
            !localized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ProviderError.unsupported("未检测到 Cursor 登录完成，请在浏览器和 Cursor 中完成登录后重试（\(localized)）")
+            throw ProviderError.loginIncomplete(tool: .cursor, message: "未检测到 Cursor 登录完成，请在浏览器完成授权后重试（\(localized)）")
         }
-        throw ProviderError.unsupported("未检测到新的 Cursor 登录凭据。请从 Cursor IDE 里触发登录，或安装 Cursor Agent 后重试")
+        throw ProviderError.loginIncomplete(tool: .cursor, message: "Cursor 浏览器登录超时，请在浏览器完成授权后重试")
     }
 
     func prepareAccount(_ account: Account, secret: String) async throws -> Account {
@@ -139,12 +140,6 @@ extension CursorProvider {
 
         let encoded = encodeCredentials(credentials)
         try writeManagedCredentialsSnapshot(encoded, for: account)
-
-        if let latest = try? parseCredentials(try readLocalCursorCredentials()),
-           !cursorCredentialsRepresentSameAccount(credentials, latest) {
-            // Cursor may keep stale auth in memory until restart; treat the write as successful.
-            return
-        }
     }
 
     func fetchQuota(secret: String) async throws -> QuotaSnapshot {
@@ -177,11 +172,16 @@ extension CursorProvider {
             if shouldUseCachedQuota(for: error),
                let cached = try? loadCachedQuotaSnapshot(cacheKey: cacheKey),
                Date().timeIntervalSince(cached.cachedAt) <= Self.fallbackQuotaCacheAge {
-                return cached.snapshot.replacing(
-                    source: "Cursor Cache",
-                    note: mergedNote(cached.snapshot.note, fallback: QuotaNoteCatalog.cursorLiveUnavailableCache),
-                    availabilityStatus: .serviceUnavailable
-                )
+                // Same rule as the other providers: drop windows whose reset has
+                // passed, and skip the cache entirely if nothing live remains.
+                let pruned = cached.snapshot.removingExpiredWindows()
+                if !pruned.orderedMetrics.isEmpty {
+                    return pruned.replacing(
+                        source: "Cursor Cache",
+                        note: mergedNote(pruned.note, fallback: QuotaNoteCatalog.cursorLiveUnavailableCache),
+                        availabilityStatus: .serviceUnavailable
+                    )
+                }
             }
 
             let legacyUsage = try await fetchLegacyUsage(accessToken: credentials.accessToken)

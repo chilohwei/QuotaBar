@@ -228,6 +228,52 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         secondaryPanelMetric?.title ?? "Weekly"
     }
 
+    /// Drops quota windows whose reset time has already passed: their counters have
+    /// rolled over server-side, so the recorded used/remaining values no longer
+    /// describe anything real. Exhaustion flags derived from a dropped window are
+    /// cleared along with it.
+    func removingExpiredWindows(now: Date = Date()) -> QuotaSnapshot {
+        func active(_ window: QuotaWindow?) -> QuotaWindow? {
+            guard let window else { return nil }
+            guard let resetAt = window.resetAt else { return window }
+            return resetAt.addingTimeInterval(QuotaFreshness.expiredResetGrace) < now ? nil : window
+        }
+
+        let activePrimary = active(primary)
+        let activeSecondary = active(secondary)
+        let activeTertiary = active(tertiary)
+        guard activePrimary != primary || activeSecondary != secondary || activeTertiary != tertiary else {
+            return self
+        }
+
+        let remainingWindowsExhausted = [activePrimary, activeSecondary, activeTertiary]
+            .compactMap { $0 }
+            .contains { $0.limit > 0 && $0.remaining / $0.limit <= 0.001 }
+        let prunedBlocked = remainingWindowsExhausted ? isQuotaBlocked : nil
+        let prunedAvailability = (availabilityStatus == .quotaExhausted && !remainingWindowsExhausted)
+            ? nil
+            : availabilityStatus
+
+        return QuotaSnapshot(
+            source: source,
+            accountIdentifier: accountIdentifier,
+            planName: planName,
+            primary: activePrimary,
+            secondary: activeSecondary,
+            tertiary: activeTertiary,
+            creditsRemaining: creditsRemaining,
+            creditsTotal: creditsTotal,
+            updatedAt: updatedAt,
+            periodEnd: periodEnd,
+            accountValidUntil: accountValidUntil,
+            subscriptionWillRenew: subscriptionWillRenew,
+            subscriptionStatus: subscriptionStatus,
+            isQuotaBlocked: prunedBlocked,
+            availabilityStatus: prunedAvailability,
+            note: note
+        )
+    }
+
     func replacing(
         source: String? = nil,
         updatedAt: Date? = nil,

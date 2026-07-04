@@ -2,7 +2,7 @@ import Foundation
 
 enum QuotaFreshness {
     static let staleWarningAge: TimeInterval = 10 * 60
-    private static let expiredResetGrace: TimeInterval = 60
+    static let expiredResetGrace: TimeInterval = 60
 
     static func isStale(
         _ snapshot: QuotaSnapshot,

@@ -140,11 +140,7 @@ extension CursorProvider {
 
     func quotaCacheKey(_ credentials: CursorCredentials) -> String {
         let raw = accountIdentity(from: encodeCredentials(credentials)) ?? String(credentials.accessToken.suffix(24))
-        return "cursor-" + Data(raw.utf8)
-            .base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        return "cursor-" + base64URLEncodedString(Data(raw.utf8))
     }
 
     func quotaCachePath(cacheKey: String) -> String {

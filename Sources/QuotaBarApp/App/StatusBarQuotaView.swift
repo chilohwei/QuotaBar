@@ -8,11 +8,18 @@ struct StatusBarQuotaEntry {
     let updatedAt: Date
     let availabilityStatus: QuotaAvailabilityStatus
     let lines: [StatusBarQuotaLine]
+    var alternativeAccountName: String?
+}
+
+enum StatusBarQuotaWarningLevel: Equatable {
+    case normal
+    case low
+    case exhausted
 }
 
 struct StatusBarQuotaLine {
     let text: String
-    let isZero: Bool
+    let level: StatusBarQuotaWarningLevel
 }
 
 @MainActor
@@ -138,6 +145,8 @@ private final class StatusBarQuotaItemView: NSView {
     private static let separatorWidth: CGFloat = 1
     private static let separatorLeading: CGFloat = 6
     private static let separatorTrailing: CGFloat = 6
+    private static let alternativeDotSize: CGFloat = 5
+    private static let alternativeDotSpacing: CGFloat = 3
 
     private let separatorView = NSView()
     private let toolLogoView: StatusBarToolLogoView
@@ -163,9 +172,14 @@ private final class StatusBarQuotaItemView: NSView {
         for line in item.lines {
             let label = NSTextField(labelWithString: line.text)
             label.font = Self.lineFont
-            label.textColor = line.isZero
-                ? .systemRed
-                : .labelColor
+            switch line.level {
+            case .exhausted:
+                label.textColor = .systemRed
+            case .low:
+                label.textColor = .systemOrange
+            case .normal:
+                label.textColor = .labelColor
+            }
             label.alignment = .left
             label.lineBreakMode = .byClipping
             label.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -191,9 +205,28 @@ private final class StatusBarQuotaItemView: NSView {
             toolLogoView.heightAnchor.constraint(equalToConstant: Self.toolIconSize),
 
             labelStack.leadingAnchor.constraint(equalTo: toolLogoView.trailingAnchor, constant: Self.iconTextSpacing),
-            labelStack.trailingAnchor.constraint(equalTo: trailingAnchor),
             labelStack.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
+
+        if item.alternativeAccountName != nil {
+            // A quiet green dot: this tool's active account is out of quota, but a
+            // recommended alternative is ready (details in the tooltip).
+            let dot = NSView()
+            dot.wantsLayer = true
+            dot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+            dot.layer?.cornerRadius = Self.alternativeDotSize / 2
+            dot.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(dot)
+            NSLayoutConstraint.activate([
+                dot.leadingAnchor.constraint(equalTo: labelStack.trailingAnchor, constant: Self.alternativeDotSpacing),
+                dot.trailingAnchor.constraint(equalTo: trailingAnchor),
+                dot.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -5),
+                dot.widthAnchor.constraint(equalToConstant: Self.alternativeDotSize),
+                dot.heightAnchor.constraint(equalToConstant: Self.alternativeDotSize)
+            ])
+        } else {
+            labelStack.trailingAnchor.constraint(equalTo: trailingAnchor).isActive = true
+        }
     }
 
     @available(*, unavailable)
@@ -212,6 +245,9 @@ private final class StatusBarQuotaItemView: NSView {
         let widest = item.lines
             .map { $0.text.size(withAttributes: [.font: lineFont]).width }
             .max() ?? 0
+        let dotReserve = item.alternativeAccountName != nil
+            ? alternativeDotSpacing + alternativeDotSize
+            : 0
         return ceil(
             separatorLeading
                 + separatorWidth
@@ -219,6 +255,7 @@ private final class StatusBarQuotaItemView: NSView {
                 + toolIconSize
                 + iconTextSpacing
                 + widest
+                + dotReserve
         )
     }
 }
@@ -332,19 +369,7 @@ enum StatusBarToolLogoImageCache {
 
     private static func rasterizedIcon(from image: NSImage, size: CGFloat, color: NSColor) -> NSImage {
         guard let tiff = image.tiffRepresentation,
-              let source = NSBitmapImageRep(data: tiff),
-              let output = NSBitmapImageRep(
-                bitmapDataPlanes: nil,
-                pixelsWide: source.pixelsWide,
-                pixelsHigh: source.pixelsHigh,
-                bitsPerSample: 8,
-                samplesPerPixel: 4,
-                hasAlpha: true,
-                isPlanar: false,
-                colorSpaceName: .deviceRGB,
-                bytesPerRow: 0,
-                bitsPerPixel: 0
-              ) else {
+              let source = NSBitmapImageRep(data: tiff) else {
             let fallback = image.copy() as? NSImage ?? image
             fallback.size = NSSize(width: size, height: size)
             fallback.isTemplate = true
@@ -352,24 +377,65 @@ enum StatusBarToolLogoImageCache {
         }
 
         let resolvedColor = color.usingColorSpace(.deviceRGB) ?? .white
-        let hasAlpha = source.hasAlpha
+
+        if source.hasAlpha {
+            // Fast path: keep the source alpha and recolor with one composite
+            // instead of visiting every pixel.
+            if let tinted = compositeTintedIcon(source: source, size: size, color: resolvedColor) {
+                return tinted
+            }
+        }
+
+        return perPixelLuminanceIcon(source: source, size: size, color: resolvedColor)
+            ?? {
+                let fallback = image.copy() as? NSImage ?? image
+                fallback.size = NSSize(width: size, height: size)
+                fallback.isTemplate = true
+                return fallback
+            }()
+    }
+
+    private static func compositeTintedIcon(source: NSBitmapImageRep, size: CGFloat, color: NSColor) -> NSImage? {
+        guard let output = makeOutputRep(width: source.pixelsWide, height: source.pixelsHigh),
+              let context = NSGraphicsContext(bitmapImageRep: output) else {
+            return nil
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        let rect = NSRect(x: 0, y: 0, width: source.pixelsWide, height: source.pixelsHigh)
+        source.draw(in: rect)
+        color.set()
+        rect.fill(using: .sourceAtop)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let rendered = NSImage(size: NSSize(width: size, height: size))
+        rendered.addRepresentation(output)
+        rendered.isTemplate = false
+        return rendered
+    }
+
+    private static func perPixelLuminanceIcon(source: NSBitmapImageRep, size: CGFloat, color: NSColor) -> NSImage? {
+        guard let output = makeOutputRep(width: source.pixelsWide, height: source.pixelsHigh) else {
+            return nil
+        }
+
         for y in 0 ..< source.pixelsHigh {
             for x in 0 ..< source.pixelsWide {
-                guard let color = source.colorAt(x: x, y: y),
-                      let rgb = color.usingColorSpace(.deviceRGB) else {
+                guard let pixel = source.colorAt(x: x, y: y),
+                      let rgb = pixel.usingColorSpace(.deviceRGB) else {
                     output.setColor(.clear, atX: x, y: y)
                     continue
                 }
 
-                let alpha = hasAlpha
-                    ? rgb.alphaComponent
-                    : alphaFromLuminance(red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent)
+                let alpha = alphaFromLuminance(red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent)
                 output.setColor(
                     NSColor(
-                        deviceRed: resolvedColor.redComponent,
-                        green: resolvedColor.greenComponent,
-                        blue: resolvedColor.blueComponent,
-                        alpha: alpha * resolvedColor.alphaComponent
+                        deviceRed: color.redComponent,
+                        green: color.greenComponent,
+                        blue: color.blueComponent,
+                        alpha: alpha * color.alphaComponent
                     ),
                     atX: x,
                     y: y
@@ -381,6 +447,21 @@ enum StatusBarToolLogoImageCache {
         rendered.addRepresentation(output)
         rendered.isTemplate = false
         return rendered
+    }
+
+    private static func makeOutputRep(width: Int, height: Int) -> NSBitmapImageRep? {
+        NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
     }
 
     private static func alphaFromLuminance(red: CGFloat, green: CGFloat, blue: CGFloat) -> CGFloat {

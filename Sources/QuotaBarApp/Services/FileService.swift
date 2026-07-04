@@ -9,12 +9,6 @@ struct FileService {
         FileManager.default.fileExists(atPath: expand(path: path))
     }
 
-    func directoryExists(at path: String) -> Bool {
-        var isDirectory = ObjCBool(false)
-        let exists = FileManager.default.fileExists(atPath: expand(path: path), isDirectory: &isDirectory)
-        return exists && isDirectory.boolValue
-    }
-
     func readText(at path: String) throws -> String {
         let expanded = expand(path: path)
         guard FileManager.default.fileExists(atPath: expanded) else {
@@ -81,21 +75,6 @@ struct FileService {
             maxBackups: maxBackups,
             backupPermissions: permissions
         )
-    }
-
-    func copyItemReplacing(from sourcePath: String, to targetPath: String) throws {
-        let sourceExpanded = expand(path: sourcePath)
-        let targetExpanded = expand(path: targetPath)
-
-        guard FileManager.default.fileExists(atPath: sourceExpanded) else {
-            throw ProviderError.missingFile(path: sourceExpanded)
-        }
-
-        try removeItemIfExists(at: targetExpanded)
-
-        let targetURL = URL(fileURLWithPath: targetExpanded)
-        try FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: URL(fileURLWithPath: sourceExpanded), to: targetURL)
     }
 
     func copyItemReplacingWithBackup(

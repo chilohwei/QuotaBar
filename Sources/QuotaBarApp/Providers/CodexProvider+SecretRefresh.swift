@@ -79,13 +79,13 @@ extension CodexProvider {
             let code = extractErrorCode(from: data)
             switch code?.lowercased() {
             case "refresh_token_reused":
-                throw ProviderError.unsupported("Codex refresh token 已被使用，请重新登录")
+                throw ProviderError.loginRequired(tool: .codex, message: "Codex refresh token 已被使用，请重新登录")
             case "refresh_token_invalidated":
-                throw ProviderError.unsupported("Codex refresh token 已失效，请重新登录")
+                throw ProviderError.loginRequired(tool: .codex, message: "Codex refresh token 已失效，请重新登录")
             case "invalid_grant", "invalid_request":
-                throw ProviderError.unsupported("Codex refresh token 无效，请重新登录")
+                throw ProviderError.loginRequired(tool: .codex, message: "Codex refresh token 无效，请重新登录")
             default:
-                throw ProviderError.unsupported("Codex refresh token 已过期，请重新登录")
+                throw ProviderError.loginRequired(tool: .codex, message: "Codex refresh token 已过期，请重新登录")
             }
         }
 

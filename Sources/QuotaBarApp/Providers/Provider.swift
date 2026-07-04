@@ -108,6 +108,9 @@ enum ProviderError: LocalizedError {
     case cacheCorrupted(tool: ToolKind)
     case noUsableCredential(tool: ToolKind)
     case rateLimited(tool: ToolKind, retryAfter: Date?)
+    case loginRequired(tool: ToolKind?, message: String)
+    case loginIncomplete(tool: ToolKind?, message: String)
+    case cliMissing(tool: ToolKind, message: String)
     case unsupported(String)
     case network(String)
 
@@ -129,10 +132,35 @@ enum ProviderError: LocalizedError {
             return "未找到 \(tool.displayName) 登录信息，请先登录"
         case .rateLimited(let tool, _):
             return "\(tool.displayName) 刷新暂时变慢，稍后自动重试"
+        case .loginRequired(_, let message),
+             .loginIncomplete(_, let message),
+             .cliMissing(_, let message):
+            return message
         case .unsupported(let message):
             return message
         case .network(let message):
             return message
+        }
+    }
+
+    // Semantic classification the UI can rely on instead of matching message keywords.
+    var requiresUserAction: Bool {
+        switch self {
+        case .missingFile,
+             .invalidCredentials,
+             .credentialParsingFailed,
+             .tokenExpired,
+             .tokenRefreshFailed,
+             .noUsableCredential,
+             .loginRequired,
+             .loginIncomplete,
+             .cliMissing:
+            return true
+        case .cacheCorrupted,
+             .rateLimited,
+             .unsupported,
+             .network:
+            return false
         }
     }
 }

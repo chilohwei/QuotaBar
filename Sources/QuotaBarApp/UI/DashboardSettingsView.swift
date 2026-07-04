@@ -87,6 +87,18 @@ struct DashboardSettingsView: View {
                 )
             }
 
+            settingsSection(title: text.string(.settingsNotifications)) {
+                settingsToggleRow(
+                    title: text.string(.quotaAlerts),
+                    iconName: "bell",
+                    isOn: quotaNotificationsBinding
+                )
+
+                if appState.isQuotaNotificationsEnabled {
+                    notificationThresholdRow
+                }
+            }
+
             settingsSection(title: text.string(.settingsApp)) {
                 settingsToggleRow(
                     title: text.string(.launchAtLogin),
@@ -412,6 +424,70 @@ struct DashboardSettingsView: View {
         } set: { enabled in
             appState.setRefreshOnOpenEnabled(enabled)
         }
+    }
+
+    private var quotaNotificationsBinding: Binding<Bool> {
+        Binding {
+            appState.isQuotaNotificationsEnabled
+        } set: { enabled in
+            withAnimation(settingsPopoverAnimation) {
+                appState.setQuotaNotificationsEnabled(enabled)
+            }
+        }
+    }
+
+    private var notificationThresholdRow: some View {
+        HStack(spacing: 8) {
+            settingsRowIcon("gauge.with.needle")
+
+            Text(text.string(.alertThreshold))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Branding.inkStrong)
+                .lineLimit(1)
+
+            Spacer(minLength: 8)
+
+            HStack(spacing: 3) {
+                ForEach(AppPreferencesStore.quotaNotificationThresholdOptions, id: \.self) { option in
+                    let isSelected = appState.quotaNotificationThreshold == option
+                    Button {
+                        withAnimation(settingsPopoverAnimation) {
+                            appState.setQuotaNotificationThreshold(option)
+                        }
+                    } label: {
+                        Text(text.alertThresholdLabel(option))
+                            .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .padding(.horizontal, 9)
+                            .frame(height: 24)
+                            .foregroundStyle(isSelected ? Branding.accentBlueDark : Branding.inkMuted)
+                            .background(
+                                RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
+                                    .fill(isSelected ? Branding.menuItemSelectedSurface : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.quotaInteractive())
+                    .help(text.alertThresholdLabel(option))
+                    .accessibilityLabel(text.alertThresholdLabel(option))
+                }
+            }
+            .padding(2)
+            .background(
+                RoundedRectangle(cornerRadius: Branding.radiusSegment, style: .continuous)
+                    .fill(Branding.controlSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Branding.radiusSegment, style: .continuous)
+                    .stroke(Branding.controlStroke, lineWidth: 1)
+            )
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 8)
+        .frame(height: 36)
+        .frame(maxWidth: .infinity)
+        .background(settingsRowBackground)
+        .animation(settingsPopoverAnimation, value: appState.quotaNotificationThreshold)
     }
 
     private var settingsUpdateActionTitle: String {

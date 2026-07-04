@@ -4,6 +4,7 @@ struct StatusBarQuotaInput {
     let tool: ToolKind
     let accountName: String
     let quota: QuotaSnapshot
+    var alternativeAccountName: String?
 }
 
 struct StatusBarQuotaPresenter {
@@ -23,7 +24,8 @@ struct StatusBarQuotaPresenter {
                 source: input.quota.source,
                 updatedAt: input.quota.updatedAt,
                 availabilityStatus: input.quota.effectiveAvailabilityStatus,
-                lines: lines
+                lines: lines,
+                alternativeAccountName: input.alternativeAccountName
             )
         }
     }
@@ -34,20 +36,35 @@ struct StatusBarQuotaPresenter {
         }
         return entries
             .map { entry in
-                text.statusBarTooltip(
+                var line = text.statusBarTooltip(
                     tool: entry.tool,
                     remainingPercent: entry.remainingPercent,
                     accountName: entry.accountName,
                     metadata: text.quotaSnapshotMeta(source: entry.source, updatedAt: entry.updatedAt),
                     availability: entry.availabilityStatus
                 )
+                if let alternative = entry.alternativeAccountName {
+                    line += "\n· " + text.alternativeAccountAvailable(alternative)
+                }
+                return line
             }
             .joined(separator: "\n")
     }
 
+    // Same thresholds as the dashboard cards: ≤20% is a warning, 0% is exhausted.
+    static let lowRemainingThresholdPercent = 20
+
     private static func quotaLine(for metric: QuotaDisplayMetric?) -> StatusBarQuotaLine? {
         guard let ratio = metric?.ratio else { return nil }
         let percent = Int((min(max(ratio, 0), 1) * 100).rounded())
-        return StatusBarQuotaLine(text: "\(percent)%", isZero: percent <= 0)
+        let level: StatusBarQuotaWarningLevel
+        if percent <= 0 {
+            level = .exhausted
+        } else if percent <= lowRemainingThresholdPercent {
+            level = .low
+        } else {
+            level = .normal
+        }
+        return StatusBarQuotaLine(text: "\(percent)%", level: level)
     }
 }

@@ -7,7 +7,7 @@ extension CursorProvider {
             .sorted(by: { $0.modifiedAt > $1.modifiedAt })
 
         guard !candidates.isEmpty else {
-            throw ProviderError.unsupported("未找到 Cursor 登录状态，请先打开 Cursor 并登录")
+            throw ProviderError.loginRequired(tool: .cursor, message: "未找到 Cursor 登录状态，请先打开 Cursor 并登录")
         }
 
         var lastError: Error?
@@ -19,12 +19,12 @@ extension CursorProvider {
             }
         }
 
-        throw lastError ?? ProviderError.unsupported("未找到 Cursor 登录 token，请先在 Cursor 中登录")
+        throw lastError ?? ProviderError.loginRequired(tool: .cursor, message: "未找到 Cursor 登录 token，请先在 Cursor 中登录")
     }
 
     func readLocalCursorCredentials(statePath: String) throws -> String {
         guard fileService.fileExists(at: statePath) else {
-            throw ProviderError.unsupported("未找到 Cursor 登录状态，请先打开 Cursor 并登录")
+            throw ProviderError.loginRequired(tool: .cursor, message: "未找到 Cursor 登录状态，请先打开 Cursor 并登录")
         }
 
         let values = try readCursorStateValues(
@@ -42,7 +42,7 @@ extension CursorProvider {
         )
         let accessToken = values["cursorAuth/accessToken"]
         guard let accessToken, !accessToken.isEmpty else {
-            throw ProviderError.unsupported("未找到 Cursor 登录 token，请先在 Cursor 中登录")
+            throw ProviderError.loginRequired(tool: .cursor, message: "未找到 Cursor 登录 token，请先在 Cursor 中登录")
         }
 
         let credentials = CursorCredentials(
@@ -73,7 +73,7 @@ extension CursorProvider {
         }
 
         guard let targetPath else {
-            throw ProviderError.unsupported("未找到 Cursor 登录状态，请先打开 Cursor 并登录一次")
+            throw ProviderError.loginRequired(tool: .cursor, message: "未找到 Cursor 登录状态，请先打开 Cursor 并登录一次")
         }
 
         let email = cursorAccountEmail(from: credentials)

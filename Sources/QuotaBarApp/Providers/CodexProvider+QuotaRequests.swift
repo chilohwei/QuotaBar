@@ -106,15 +106,20 @@ extension CodexProvider {
                let cacheKey,
                let cached = try? loadCachedQuotaSnapshot(cacheKey: cacheKey),
                Date().timeIntervalSince(cached.cachedAt) <= Self.fallbackQuotaCacheAge {
-                let note = mergedNote(
-                    cached.snapshot.note,
-                    fallback: QuotaNoteCatalog.codexLiveUnavailableCache
-                )
-                return cached.snapshot.replacing(
-                    source: "Codex OAuth Cache",
-                    note: note,
-                    availabilityStatus: .serviceUnavailable
-                )
+                // Windows that reset while we were offline no longer describe anything
+                // real; a cache with no live window left is not worth showing.
+                let pruned = cached.snapshot.removingExpiredWindows()
+                if !pruned.orderedMetrics.isEmpty {
+                    let note = mergedNote(
+                        pruned.note,
+                        fallback: QuotaNoteCatalog.codexLiveUnavailableCache
+                    )
+                    return pruned.replacing(
+                        source: "Codex OAuth Cache",
+                        note: note,
+                        availabilityStatus: .serviceUnavailable
+                    )
+                }
             }
             throw error
         }

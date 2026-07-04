@@ -27,7 +27,29 @@ struct StatusBarQuotaPresenterTests {
         #expect(entry.accountName == "Work")
         #expect(entry.remainingPercent == 0)
         #expect(entry.lines.map(\.text) == ["80%", "0%"])
-        #expect(entry.lines.map(\.isZero) == [false, true])
+        #expect(entry.lines.map(\.level) == [.normal, .exhausted])
+    }
+
+    @Test("warning levels match the dashboard thresholds")
+    func warningLevelsMatchDashboardThresholds() throws {
+        let entries = StatusBarQuotaPresenter.entries(for: [
+            StatusBarQuotaInput(
+                tool: .cursor,
+                accountName: "Low",
+                quota: QuotaSnapshot(
+                    source: "Fixture",
+                    primary: QuotaWindow(label: "Monthly", used: 85, limit: 100, resetAt: nil),
+                    secondary: QuotaWindow(label: "Weekly", used: 30, limit: 100, resetAt: nil),
+                    creditsRemaining: nil,
+                    creditsTotal: nil,
+                    updatedAt: Date(timeIntervalSince1970: 1),
+                    note: nil
+                )
+            )
+        ])
+
+        let entry = try #require(entries.first)
+        #expect(entry.lines.map(\.level) == [.low, .normal])
     }
 
     @Test("tooltip falls back when there are no visible entries")
