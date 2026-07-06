@@ -146,3 +146,27 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           bash scripts/sync_homebrew_tap.sh "$version"
+
+      # The tap is the user-facing source of truth; keep the in-repo cask aligned with it
+      # so the two can never drift apart (a stale in-repo checksum once shipped a mismatch).
+      - name: Commit cask update back to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp Casks/quotabar.rb /tmp/quotabar-cask.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -f -B main origin/main
+          cp /tmp/quotabar-cask.rb Casks/quotabar.rb
+          if git diff --quiet -- Casks/quotabar.rb; then
+            echo "Cask on main already matches the released asset."
+            exit 0
+          fi
+          git add Casks/quotabar.rb
+          git commit -m "Update cask for v${GITHUB_REF_NAME#v}"
+          git push origin main || {
+            git fetch origin main
+            git rebase origin/main
+            git push origin main
+          }
