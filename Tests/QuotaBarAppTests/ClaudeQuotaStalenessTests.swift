@@ -187,4 +187,63 @@ struct ClaudeQuotaStalenessTests {
         #expect(zh.localizedNote(note) == note)
     }
 
+    @Test("self-refresh waits out the grace window so an active CLI keeps first claim")
+    func selfRefreshGraceWindow() {
+        let now = Date()
+        let grace = ClaudeCodeProvider.selfRefreshGrace
+
+        func gate(expiredFor: TimeInterval?, blockedUntil: Date? = nil, intent: RefreshIntent = .background) -> Bool {
+            ClaudeCodeProvider.shouldAttemptSelfRefresh(
+                expiresAt: expiredFor.map { now.addingTimeInterval(-$0) },
+                blockedUntil: blockedUntil,
+                intent: intent,
+                now: now
+            )
+        }
+
+        // Still valid, freshly expired, or unknown expiry: the CLI may be mid-rotation — hands off.
+        #expect(!gate(expiredFor: -600))
+        #expect(!gate(expiredFor: 60))
+        #expect(!gate(expiredFor: grace - 1))
+        #expect(!gate(expiredFor: nil))
+
+        // Sat expired past the grace: no other maintainer exists, take over.
+        #expect(gate(expiredFor: grace))
+        #expect(gate(expiredFor: 6 * 3600))
+    }
+
+    @Test("self-refresh backoff blocks background retries but yields to manual refresh, never the grace")
+    func selfRefreshBackoff() {
+        let now = Date()
+        let expiredLongAgo: TimeInterval = 2 * ClaudeCodeProvider.selfRefreshGrace
+        let blocked = now.addingTimeInterval(600)
+
+        func gate(expiredFor: TimeInterval, blockedUntil: Date?, intent: RefreshIntent) -> Bool {
+            ClaudeCodeProvider.shouldAttemptSelfRefresh(
+                expiresAt: now.addingTimeInterval(-expiredFor),
+                blockedUntil: blockedUntil,
+                intent: intent,
+                now: now
+            )
+        }
+
+        #expect(!gate(expiredFor: expiredLongAgo, blockedUntil: blocked, intent: .background))
+        #expect(!gate(expiredFor: expiredLongAgo, blockedUntil: blocked, intent: .visible))
+        #expect(gate(expiredFor: expiredLongAgo, blockedUntil: blocked, intent: .manual))
+        // An elapsed block no longer gates.
+        #expect(gate(expiredFor: expiredLongAgo, blockedUntil: now.addingTimeInterval(-1), intent: .background))
+        // Manual bypasses the backoff but not the grace.
+        #expect(!gate(expiredFor: 60, blockedUntil: nil, intent: .manual))
+    }
+
+    @Test("dead grants are recognized from the OAuth error body")
+    func permanentRefreshFailureDetection() {
+        func body(_ text: String) -> Data { Data(text.utf8) }
+
+        #expect(ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body(#"{"error":"invalid_grant"}"#)))
+        #expect(ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body("Invalid refresh token")))
+        #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body(#"{"error":"temporarily_unavailable"}"#)))
+        #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: Data()))
+    }
+
 }

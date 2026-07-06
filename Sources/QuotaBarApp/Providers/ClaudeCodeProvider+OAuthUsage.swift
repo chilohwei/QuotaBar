@@ -65,14 +65,13 @@ extension ClaudeCodeProvider {
         )
     }
 
-    // QuotaBar deliberately NEVER calls the OAuth token-refresh endpoint. The refresh token is
-    // single-use and shared with Claude Code itself: consuming it here rotates the pair, which
-    // invalidates the copy Claude Code holds and logs the user out of Claude Code — and once
-    // Claude Code rotates, the copy QuotaBar holds is equally dead, producing endless "sign in
-    // again" prompts. That rotation ping-pong is what forced re-logins several times a day.
-    // Instead QuotaBar is a read-only passenger on the token Claude Code maintains; while that
-    // token has lapsed, cached data is shown with recovery guidance, and everything self-heals
-    // the next time Claude Code is used (it refreshes and persists a new token).
+    // While the keychain token is alive (or only just expired), QuotaBar is a read-only passenger
+    // on it: the refresh token is single-use and shared with Claude Code, and racing the CLI for
+    // the rotation is what once forced re-logins several times a day. But the CLI isn't always
+    // there to renew — GUI clients keep their own credential store and never touch this keychain
+    // item — so once the token has sat expired past a grace window, QuotaBar renews the pair
+    // itself and writes it back for both sides to ride (see ClaudeCodeProvider+TokenRefresh).
+    // Until that kicks in, cached data is shown with recovery guidance.
     func fetchOAuthUsageSnapshot(
         credentials: ClaudeCodeCredentials,
         intent: RefreshIntent
@@ -101,12 +100,16 @@ extension ClaudeCodeProvider {
             return cached.snapshot
         }
 
+        var activeToken = token
         if token.isHardExpired {
-            return expiredCredentialFallback(cached)
+            guard let renewed = await selfRefreshHardExpiredToken(matching: token, intent: intent) else {
+                return expiredCredentialFallback(cached)
+            }
+            activeToken = renewed
         }
 
         do {
-            let payload = try await requestOAuthUsage(accessToken: token.accessToken)
+            let payload = try await requestOAuthUsage(accessToken: activeToken.accessToken)
             let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
             if let cacheKey {
                 try? storeCachedUsage(snapshot, cacheKey: cacheKey)
@@ -117,7 +120,7 @@ extension ClaudeCodeProvider {
             // The token looked valid locally but the server rejected it — Claude Code most likely
             // rotated it moments ago. Re-read the keychain once and retry with the newer token.
             if let latest = parseOAuthToken(fromJSONText: try? readClaudeCodeKeychainCredentials()),
-               latest.accessToken != token.accessToken,
+               latest.accessToken != activeToken.accessToken,
                !latest.isHardExpired,
                let payload = try? await requestOAuthUsage(accessToken: latest.accessToken) {
                 let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)

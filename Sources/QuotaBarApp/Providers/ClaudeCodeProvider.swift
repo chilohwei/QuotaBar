@@ -5,7 +5,20 @@ struct ClaudeCodeProvider: Provider {
     let tool: ToolKind = .claudeCode
 
     static let oauthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    static let oauthTokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
+    static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     static let oauthUsageUserAgent = "claude-code/2.1.181"
+    // How long a hard-expired keychain token must sit untouched before QuotaBar renews it itself
+    // (see ClaudeCodeProvider+TokenRefresh). Any actively used CLI refreshes its token within
+    // seconds of the first API call past expiry, so a token still expired after this window has
+    // no other maintainer — GUI clients like the Claude desktop app keep their own credential
+    // store and never renew this keychain item.
+    static let selfRefreshGrace: TimeInterval = 10 * 60
+    // Floor between self-refresh attempts after a transient failure (network, 5xx, throttling).
+    static let selfRefreshRetryFloor: TimeInterval = 10 * 60
+    // Floor after the server declared the refresh token dead (invalid_grant): only a fresh
+    // Claude Code login can mint a new pair, so retrying sooner is pure noise.
+    static let selfRefreshDeadGrantRetryFloor: TimeInterval = 24 * 60 * 60
     // Floor between real `/usage` network calls per account. Bursty triggers (panel open, foreground,
     // statusLine change) within this window reuse the last live snapshot instead of re-hitting the
     // endpoint, which keeps QuotaBar from tripping the endpoint's own per-account rate limit.
