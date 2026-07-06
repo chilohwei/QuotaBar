@@ -71,6 +71,23 @@ struct PackageStructureTests {
         #expect(!AppText(language: .traditionalChinese).quotaSnapshotMeta(snapshot).contains("即時"))
     }
 
+    @Test("cache snapshots do not show freshness badges on account cards")
+    func cacheSnapshotsDoNotShowFreshnessBadgesOnAccountCards() {
+        let snapshot = QuotaSnapshot(
+            source: "Claude Code OAuth Cache",
+            primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSinceNow: -60 * 60),
+            note: nil
+        )
+
+        #expect(AppText(language: .simplifiedChinese).quotaFreshnessBadge(snapshot) == nil)
+        #expect(AppText(language: .traditionalChinese).quotaFreshnessBadge(snapshot) == nil)
+        #expect(AppText(language: .english).quotaFreshnessBadge(snapshot) == nil)
+    }
+
     @Test("user-facing errors are grouped and hide low-level details")
     func userFacingErrorsAreGroupedAndHideLowLevelDetails() {
         let text = AppText(language: .simplifiedChinese)

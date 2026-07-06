@@ -912,18 +912,19 @@ struct AppText {
 
     func quotaFreshnessBadge(_ snapshot: QuotaSnapshot) -> String? {
         let lowerSource = snapshot.source.lowercased()
-        let isCache = lowerSource.contains("cache")
+        guard !lowerSource.contains("cache") else { return nil }
+
         let isStale = QuotaFreshness.isStale(snapshot)
-        guard isCache || isStale else { return nil }
+        guard isStale else { return nil }
 
         let time = formatCompactDateTime(snapshot.updatedAt)
         switch language {
         case .english:
-            return isCache ? "Cache \(time)" : "Recent \(time)"
+            return "Recent \(time)"
         case .simplifiedChinese:
-            return isCache ? "缓存 \(time)" : "最近 \(time)"
+            return "最近 \(time)"
         case .traditionalChinese:
-            return isCache ? "快取 \(time)" : "最近 \(time)"
+            return "最近 \(time)"
         }
     }
 
