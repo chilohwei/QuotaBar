@@ -23,6 +23,8 @@ enum QuotaNoteCatalog {
         "Claude 暂时放慢了刷新频率，QuotaBar 会稍后自动重试。"
     static let claudeAwaitingSession =
         "还没有额度数据，在 Claude Code 里用一次后即可显示。"
+    static let claudeCredentialsAwaitingClaudeCode =
+        "登录凭据自动续期中，稍后会自动恢复实时数据。"
     static let claudeWindowStale =
         "显示最近一次可用额度，稍后会自动更新。"
     static let claudeApiKeyNoWindows =
@@ -88,6 +90,15 @@ extension AppText {
                 return raw
             case .traditionalChinese:
                 return "還沒有額度資料，在 Claude Code 裡用一次後即可顯示。"
+            }
+        case QuotaNoteCatalog.claudeCredentialsAwaitingClaudeCode:
+            switch language {
+            case .english:
+                return "Renewing Claude Code's sign-in automatically — live data resumes shortly."
+            case .simplifiedChinese:
+                return raw
+            case .traditionalChinese:
+                return "登入憑據自動續期中，稍後會自動恢復即時資料。"
             }
         case QuotaNoteCatalog.claudeWindowStale:
             switch language {

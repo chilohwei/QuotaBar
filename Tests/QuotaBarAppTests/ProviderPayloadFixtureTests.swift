@@ -831,31 +831,6 @@ struct ProviderPayloadFixtureTests {
         #expect(en.localizedNote("   ") == nil)
     }
 
-    @Test("Refresh cooldown escalates on consecutive 429s and caps at the max")
-    func refreshCooldownEscalatesAndCaps() {
-        // 5 → 10 → 20 → 30 min, then held at the cap so a throttled auth endpoint gets real room.
-        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 1) == 5 * 60)
-        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 2) == 10 * 60)
-        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 3) == 20 * 60)
-        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 4) == 30 * 60)
-        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 9) == ClaudeCodeProvider.tokenRefreshCooldownMax)
-        // Defensive: non-positive attempts fall back to the base cooldown, never a negative delay.
-        #expect(ClaudeCodeProvider.escalatedRefreshCooldown(attempts: 0) == 5 * 60)
-    }
-
-    @Test("Claude refresh intents respect token refresh cooldown")
-    func claudeRefreshIntentsRespectTokenRefreshCooldown() {
-        let now = Date(timeIntervalSince1970: 1_782_980_000)
-        let future = now.addingTimeInterval(10 * 60)
-        let past = now.addingTimeInterval(-1)
-
-        #expect(ClaudeCodeProvider.shouldBlockTokenRefresh(until: future, intent: .background, now: now))
-        #expect(ClaudeCodeProvider.shouldBlockTokenRefresh(until: future, intent: .visible, now: now))
-        #expect(!ClaudeCodeProvider.shouldBlockTokenRefresh(until: future, intent: .manual, now: now))
-        #expect(!ClaudeCodeProvider.shouldBlockTokenRefresh(until: past, intent: .visible, now: now))
-        #expect(!ClaudeCodeProvider.shouldBlockTokenRefresh(until: nil, intent: .manual, now: now))
-    }
-
     @Test("Claude statusLine is fallback when live usage is unavailable")
     func claudeStatusLineIsFallbackWhenLiveUsageUnavailable() {
         let provider = ClaudeCodeProvider()

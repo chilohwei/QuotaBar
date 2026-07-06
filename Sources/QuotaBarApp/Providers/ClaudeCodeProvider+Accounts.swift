@@ -42,6 +42,17 @@ extension ClaudeCodeProvider {
     func activate(account: Account, secret: String) async throws {
         let stored = try parseCredentials(secret)
         let previous = try? await readClaudeCodeCredentials()
+
+        // Claude Code owns the live credentials. When the installed account already matches the
+        // one being activated (every app launch re-applies the active selection), activation must
+        // NOT touch the keychain: the write is a delete + recreate with our stored snapshot, which
+        // races Claude Code's own token maintenance and can replace a fresh token with a stale
+        // copy — the root cause of "sign in again" loops and surprise Claude Code logouts.
+        if let previous, previous.loggedIn, claudeCredentialsRepresentSameAccount(previous, stored) {
+            try installQuotaBarStatusLine()
+            return
+        }
+
         var replacedCredentials = false
         if hasRestorableClaudeArtifacts(stored) {
             try restoreClaudeArtifacts(from: stored)

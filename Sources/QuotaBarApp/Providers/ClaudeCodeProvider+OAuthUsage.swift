@@ -23,12 +23,11 @@ extension ClaudeCodeProvider {
         let accessToken: String
         let refreshToken: String?
         let expiresAt: Date?
-    }
 
-    struct RefreshedOAuthToken {
-        let accessToken: String
-        let refreshToken: String
-        let expiresAt: Date?
+        var isHardExpired: Bool {
+            guard let expiresAt else { return false }
+            return expiresAt.timeIntervalSinceNow <= 0
+        }
     }
 
     struct CachedClaudeUsage: Codable {
@@ -39,27 +38,41 @@ extension ClaudeCodeProvider {
 
     func parseOAuthToken(from credentials: ClaudeCodeCredentials) -> ClaudeOAuthToken? {
         for source in [credentials.keychainCredentials, credentials.claudeCredentialsJSON] {
-            guard let text = source?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !text.isEmpty,
-                  let data = text.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let oauth = object["claudeAiOauth"] as? [String: Any] else {
-                continue
+            if let token = parseOAuthToken(fromJSONText: source) {
+                return token
             }
-            let access = ((oauth["accessToken"] as? String) ?? (oauth["access_token"] as? String))?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !access.isEmpty else { continue }
-            let refresh = ((oauth["refreshToken"] as? String) ?? (oauth["refresh_token"] as? String))?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return ClaudeOAuthToken(
-                accessToken: access,
-                refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
-                expiresAt: parseFlexibleDate(oauth["expiresAt"] ?? oauth["expires_at"])
-            )
         }
         return nil
     }
 
+    func parseOAuthToken(fromJSONText text: String?) -> ClaudeOAuthToken? {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty,
+              let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = object["claudeAiOauth"] as? [String: Any] else {
+            return nil
+        }
+        let access = ((oauth["accessToken"] as? String) ?? (oauth["access_token"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !access.isEmpty else { return nil }
+        let refresh = ((oauth["refreshToken"] as? String) ?? (oauth["refresh_token"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return ClaudeOAuthToken(
+            accessToken: access,
+            refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
+            expiresAt: parseFlexibleDate(oauth["expiresAt"] ?? oauth["expires_at"])
+        )
+    }
+
+    // QuotaBar deliberately NEVER calls the OAuth token-refresh endpoint. The refresh token is
+    // single-use and shared with Claude Code itself: consuming it here rotates the pair, which
+    // invalidates the copy Claude Code holds and logs the user out of Claude Code — and once
+    // Claude Code rotates, the copy QuotaBar holds is equally dead, producing endless "sign in
+    // again" prompts. That rotation ping-pong is what forced re-logins several times a day.
+    // Instead QuotaBar is a read-only passenger on the token Claude Code maintains; while that
+    // token has lapsed, cached data is shown with recovery guidance, and everything self-heals
+    // the next time Claude Code is used (it refreshes and persists a new token).
     func fetchOAuthUsageSnapshot(
         credentials: ClaudeCodeCredentials,
         intent: RefreshIntent
@@ -88,84 +101,42 @@ extension ClaudeCodeProvider {
             return cached.snapshot
         }
 
-        let isExpired = token.expiresAt.map { $0.timeIntervalSinceNow <= Self.oauthTokenExpiryMargin } ?? false
-        var accessToken = token.accessToken
-        var didRefresh = false
-        if isExpired {
-            // The token is dead; refreshing it is the only way to get live data. If the refresh is
-            // in cooldown (a recent attempt failed), don't call either endpoint — a dead token only
-            // yields 401s and hammering keeps the auth endpoint throttled. Show honest stale data.
-            guard let refreshed = try await refreshAccessTokenIfAllowed(
-                refreshToken: token.refreshToken,
-                cacheKey: cacheKey,
-                intent: intent
-            ) else {
-                // Automatic retries have run their course; QuotaBar cannot revive this
-                // token on its own, so escalate to an explicit re-login prompt.
-                if hasExhaustedTokenRefreshAttempts(cacheKey, intent: intent) {
-                    throw ProviderError.tokenExpired(tool: .claudeCode)
-                }
-                return staleLiveFallback(cached)
-            }
-            accessToken = refreshed
-            didRefresh = true
+        if token.isHardExpired {
+            return expiredCredentialFallback(cached)
         }
 
         do {
-            let payload = try await requestOAuthUsage(accessToken: accessToken)
+            let payload = try await requestOAuthUsage(accessToken: token.accessToken)
             let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
             if let cacheKey {
                 try? storeCachedUsage(snapshot, cacheKey: cacheKey)
                 clearUsageRateLimitMarker(cacheKey)
-                clearTokenRefreshBackoff(cacheKey)
             }
             return snapshot
-        } catch OAuthUsageFetchError.unauthorized where !didRefresh {
-            // Token looked locally valid but was rejected — refresh once (if allowed) and retry.
-            do {
-                guard let refreshed = try await refreshAccessTokenIfAllowed(
-                    refreshToken: token.refreshToken,
-                    cacheKey: cacheKey,
-                    intent: intent
-                ) else {
-                    if hasExhaustedTokenRefreshAttempts(cacheKey, intent: intent) {
-                        throw ProviderError.tokenExpired(tool: .claudeCode)
-                    }
-                    return staleLiveFallback(cached)
-                }
-                let payload = try await requestOAuthUsage(accessToken: refreshed)
+        } catch OAuthUsageFetchError.unauthorized {
+            // The token looked valid locally but the server rejected it — Claude Code most likely
+            // rotated it moments ago. Re-read the keychain once and retry with the newer token.
+            if let latest = parseOAuthToken(fromJSONText: try? readClaudeCodeKeychainCredentials()),
+               latest.accessToken != token.accessToken,
+               !latest.isHardExpired,
+               let payload = try? await requestOAuthUsage(accessToken: latest.accessToken) {
                 let snapshot = makeOAuthUsageSnapshot(payload: payload, credentials: credentials)
                 if let cacheKey {
                     try? storeCachedUsage(snapshot, cacheKey: cacheKey)
                     clearUsageRateLimitMarker(cacheKey)
-                    clearTokenRefreshBackoff(cacheKey)
                 }
                 return snapshot
-            } catch OAuthUsageFetchError.unauthorized {
-                throw ProviderError.tokenExpired(tool: .claudeCode)
-            } catch OAuthUsageFetchError.rateLimited(let retryAfter) {
-                setUsageRateLimitMarker(cacheKey)
-                if let fallback = staleLiveFallback(cached) {
-                    return fallback.replacing(availabilityStatus: .authRateLimited)
-                }
-                throw ProviderError.rateLimited(tool: .claudeCode, retryAfter: retryAfter)
-            } catch let error as ProviderError {
-                // tokenExpired and friends must reach the UI, not degrade into stale data.
-                throw error
-            } catch {
-                return staleLiveFallback(cached)
             }
-        } catch OAuthUsageFetchError.unauthorized {
-            throw ProviderError.tokenExpired(tool: .claudeCode)
+            return expiredCredentialFallback(cached)
         } catch OAuthUsageFetchError.rateLimited(let retryAfter) {
-            // `/usage` is throttling us — remember it so the panel can show actionable guidance.
+            // `/usage` is throttling us — remember it so the panel can explain the slower refreshes.
             setUsageRateLimitMarker(cacheKey)
             if let fallback = staleLiveFallback(cached) {
                 return fallback.replacing(availabilityStatus: .authRateLimited)
             }
             throw ProviderError.rateLimited(tool: .claudeCode, retryAfter: retryAfter)
         } catch {
-            // fall through to the stale-but-honest fallback below
+            // Transient network problem — fall through to the stale-but-honest fallback below.
         }
 
         return staleLiveFallback(cached)
@@ -195,152 +166,18 @@ extension ClaudeCodeProvider {
             )
     }
 
-    func loadCachedOAuthUsage(credentials: ClaudeCodeCredentials) -> CachedClaudeUsage? {
-        usageCacheKey(credentials).flatMap { try? loadCachedUsage(cacheKey: $0) }
-    }
-
-    /// Refreshes the access token unless a recent refresh failed and we're still in its cooldown.
-    /// On failure it sets a cooldown so the app stops hammering the auth endpoint every poll cycle
-    /// (which would otherwise sustain the very rate limit that's blocking recovery).
-    func refreshAccessTokenIfAllowed(
-        refreshToken: String?,
-        cacheKey: String?,
-        intent: RefreshIntent = .background
-    ) async throws -> String? {
-        if Self.shouldBlockTokenRefresh(
-            until: tokenRefreshBlockedUntil(cacheKey),
-            intent: intent
-        ) {
+    /// Cached usage shown while Claude Code's access token has lapsed, labeled with how it
+    /// recovers on its own (using Claude Code once mints a fresh token QuotaBar can ride).
+    func expiredCredentialFallback(_ cached: CachedClaudeUsage?) -> QuotaSnapshot? {
+        guard let fallback = historicalLiveFallback(cached),
+              !fallback.orderedMetrics.isEmpty else {
             return nil
         }
-        do {
-            let access = try await refreshAndPersistToken(refreshToken: refreshToken)
-            clearTokenRefreshBackoff(cacheKey)
-            return access
-        } catch OAuthUsageFetchError.unauthorized {
-            clearTokenRefreshBackoff(cacheKey)
-            throw ProviderError.tokenExpired(tool: .claudeCode)
-        } catch {
-            let isFirstFailure = tokenRefreshBackoffState(cacheKey) == nil
-            setTokenRefreshBackoff(cacheKey)
-            guard isFirstFailure else { return nil }
-
-            // The very first failure gets one immediate silent retry — transient throttles
-            // often clear at once, and waiting a full cooldown would leave the panel stale
-            // for no reason. If the retry also fails, the caller escalates to the
-            // re-login prompt right away instead of after another cooldown.
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            do {
-                let access = try await refreshAndPersistToken(refreshToken: refreshToken)
-                clearTokenRefreshBackoff(cacheKey)
-                return access
-            } catch OAuthUsageFetchError.unauthorized {
-                clearTokenRefreshBackoff(cacheKey)
-                throw ProviderError.tokenExpired(tool: .claudeCode)
-            } catch {
-                setTokenRefreshBackoff(cacheKey)
-                return nil
-            }
-        }
+        return fallback.replacing(note: QuotaNoteCatalog.claudeCredentialsAwaitingClaudeCode)
     }
 
-    static func shouldBlockTokenRefresh(
-        until: Date?,
-        intent: RefreshIntent,
-        now: Date = Date()
-    ) -> Bool {
-        guard intent != .manual else { return false }
-        guard let until else { return false }
-        return until > now
-    }
-
-    func requestTokenRefresh(refreshToken: String) async throws -> RefreshedOAuthToken {
-        var request = URLRequest(url: Self.oauthTokenURL)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.httpShouldHandleCookies = false
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(Self.oauthUsageUserAgent, forHTTPHeaderField: "User-Agent")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": Self.oauthClientID
-        ])
-
-        let (data, response) = try await Self.liveSession.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw OAuthUsageFetchError.invalidResponse
-        }
-        switch http.statusCode {
-        case 200:
-            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let access = (object["access_token"] as? String)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !access.isEmpty else {
-                throw OAuthUsageFetchError.invalidResponse
-            }
-            let newRefresh = (object["refresh_token"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let expiresAt = number(object["expires_in"]).map { Date().addingTimeInterval($0) }
-            return RefreshedOAuthToken(
-                accessToken: access,
-                refreshToken: (newRefresh?.isEmpty == false) ? newRefresh! : refreshToken,
-                expiresAt: expiresAt
-            )
-        case 400:
-            // OAuth error responses use 400 for permanently dead grants (RFC 6749 §5.2).
-            // Treat those as unauthorized so the UI says "sign in again" instead of
-            // silently retrying a token that can never work.
-            if Self.isPermanentTokenRefreshFailure(body: data) {
-                throw OAuthUsageFetchError.unauthorized
-            }
-            throw OAuthUsageFetchError.httpStatus(http.statusCode)
-        case 401, 403:
-            throw OAuthUsageFetchError.unauthorized
-        case 429:
-            throw OAuthUsageFetchError.rateLimited(retryAfter: QuotaHTTPClient.retryAfterDeadline(from: http))
-        default:
-            throw OAuthUsageFetchError.httpStatus(http.statusCode)
-        }
-    }
-
-    static func isPermanentTokenRefreshFailure(body: Data) -> Bool {
-        guard let text = String(data: body, encoding: .utf8)?.lowercased() else { return false }
-        return text.contains("invalid_grant")
-            || text.contains("invalid_request")
-            || text.contains("invalid refresh token")
-    }
-
-    @discardableResult
-    func refreshAndPersistToken(refreshToken: String?) async throws -> String {
-        guard let refreshToken, !refreshToken.isEmpty else {
-            throw OAuthUsageFetchError.unauthorized
-        }
-        let refreshed = try await requestTokenRefresh(refreshToken: refreshToken)
-        try? writeRefreshedOAuthToken(refreshed)
-        return refreshed.accessToken
-    }
-
-    /// Merges rotated tokens back into the keychain credentials, preserving every other field.
-    func writeRefreshedOAuthToken(_ token: RefreshedOAuthToken) throws {
-        guard let text = try readClaudeCodeKeychainCredentials()?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !text.isEmpty,
-              let data = text.data(using: .utf8),
-              var full = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var oauth = full["claudeAiOauth"] as? [String: Any] else {
-            return
-        }
-        oauth["accessToken"] = token.accessToken
-        oauth["refreshToken"] = token.refreshToken
-        if let expiresAt = token.expiresAt {
-            oauth["expiresAt"] = Int(expiresAt.timeIntervalSince1970 * 1000)
-        }
-        full["claudeAiOauth"] = oauth
-        let newData = try JSONSerialization.data(withJSONObject: full)
-        guard let newText = String(data: newData, encoding: .utf8) else { return }
-        try writeClaudeCodeKeychainCredentials(newText)
+    func loadCachedOAuthUsage(credentials: ClaudeCodeCredentials) -> CachedClaudeUsage? {
+        usageCacheKey(credentials).flatMap { try? loadCachedUsage(cacheKey: $0) }
     }
 
     func usageCacheKey(_ credentials: ClaudeCodeCredentials) -> String? {
@@ -380,86 +217,6 @@ extension ClaudeCodeProvider {
         )
     }
 
-    func tokenRefreshBackoffPath(_ cacheKey: String) -> String {
-        AppPaths.quotaCacheDirectory.appendingPathComponent("\(cacheKey)-refresh-backoff").path
-    }
-
-    struct TokenRefreshBackoff {
-        let attempts: Int
-        let until: Date
-    }
-
-    /// Cooldown for the Nth consecutive failed refresh: base × 2^(n-1), capped. Pure so the
-    /// escalation curve can be verified without touching the filesystem-backed backoff state.
-    static func escalatedRefreshCooldown(attempts: Int) -> TimeInterval {
-        min(
-            tokenRefreshCooldown * pow(2, Double(max(attempts, 1) - 1)),
-            tokenRefreshCooldownMax
-        )
-    }
-
-    /// Reads the persisted backoff. Understands the current JSON form `{"attempts":N,"until":epoch}`
-    /// and falls back to the legacy bare-epoch form so an old file still blocks correctly.
-    func tokenRefreshBackoffState(_ cacheKey: String?) -> TokenRefreshBackoff? {
-        guard let cacheKey,
-              let text = try? fileService.readText(at: tokenRefreshBackoffPath(cacheKey)) else {
-            return nil
-        }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let data = trimmed.data(using: .utf8),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let until = number(object["until"]) {
-            let attempts = number(object["attempts"]).map { Int($0) } ?? 1
-            return TokenRefreshBackoff(attempts: max(attempts, 1), until: Date(timeIntervalSince1970: until))
-        }
-        if let epoch = Double(trimmed) {
-            return TokenRefreshBackoff(attempts: 1, until: Date(timeIntervalSince1970: epoch))
-        }
-        return nil
-    }
-
-    func tokenRefreshBlockedUntil(_ cacheKey: String?) -> Date? {
-        tokenRefreshBackoffState(cacheKey)?.until
-    }
-
-    /// True once refresh retries have failed often enough for the given trigger that waiting
-    /// longer is pointless without a fresh sign-in.
-    func hasExhaustedTokenRefreshAttempts(_ cacheKey: String?, intent: RefreshIntent) -> Bool {
-        Self.shouldPromptRelogin(
-            attempts: tokenRefreshBackoffState(cacheKey)?.attempts ?? 0,
-            intent: intent
-        )
-    }
-
-    static func shouldPromptRelogin(attempts: Int, intent: RefreshIntent) -> Bool {
-        guard attempts >= 1 else { return false }
-        switch intent {
-        case .manual, .visible:
-            // The user is looking at (or explicitly asked for) fresh data right now.
-            return true
-        case .background:
-            return attempts >= backgroundRefreshAttemptsBeforeReloginHint
-        }
-    }
-
-    func setTokenRefreshBackoff(_ cacheKey: String?) {
-        guard let cacheKey else { return }
-        try? fileService.createDirectoryIfNeeded(at: AppPaths.quotaCacheDirectory.path)
-        // Escalate on consecutive failures: base × 2^(n-1), capped. A persistently rate-limited
-        // auth endpoint (HTTP 429 with a misleading `retry-after: 0`) needs progressively longer
-        // room to recover; a fixed short cooldown just keeps the limit alive. `clearTokenRefreshBackoff`
-        // resets the count after any successful refresh.
-        let attempts = (tokenRefreshBackoffState(cacheKey)?.attempts ?? 0) + 1
-        let until = Date().addingTimeInterval(Self.escalatedRefreshCooldown(attempts: attempts)).timeIntervalSince1970
-        let json = "{\"attempts\":\(attempts),\"until\":\(until)}"
-        try? fileService.writeText(json, to: tokenRefreshBackoffPath(cacheKey), permissions: 0o600)
-    }
-
-    func clearTokenRefreshBackoff(_ cacheKey: String?) {
-        guard let cacheKey else { return }
-        try? fileService.removeItemIfExists(at: tokenRefreshBackoffPath(cacheKey))
-    }
-
     func usageRateLimitMarkerPath(_ cacheKey: String) -> String {
         AppPaths.quotaCacheDirectory.appendingPathComponent("\(cacheKey)-usage-429").path
     }
@@ -480,14 +237,10 @@ extension ClaudeCodeProvider {
         try? fileService.removeItemIfExists(at: usageRateLimitMarkerPath(cacheKey))
     }
 
-    /// True when the OAuth fallback path is currently blocked by Anthropic rate limiting, either
-    /// because the token refresh is in an active 429 backoff or `/usage` recently returned 429.
-    /// Used to surface the actionable `usageRateLimitedNote` when the fallback cannot be refreshed.
+    /// True when `/usage` recently answered 429; used to slow polling and surface the
+    /// actionable `usageRateLimitedNote` while Anthropic is throttling us.
     func isAuthRateLimited(_ credentials: ClaudeCodeCredentials, now: Date = Date()) -> Bool {
         guard let cacheKey = usageCacheKey(credentials) else { return false }
-        if let until = tokenRefreshBlockedUntil(cacheKey), until > now {
-            return true
-        }
         if let text = try? fileService.readText(at: usageRateLimitMarkerPath(cacheKey)),
            let epoch = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
             return now.timeIntervalSince(Date(timeIntervalSince1970: epoch)) <= Self.usageRateLimitMarkerFreshness

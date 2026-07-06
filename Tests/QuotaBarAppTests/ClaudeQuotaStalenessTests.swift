@@ -130,34 +130,61 @@ struct ClaudeQuotaStalenessTests {
         #expect(zh.compactErrorSummary("刷新中") == "刷新中")
     }
 
-    @Test("re-login prompt is immediate for user-facing refreshes, delayed for background")
-    func reloginPromptThreshold() {
-        // No recorded failure yet: never prompt, regardless of trigger.
-        #expect(!ClaudeCodeProvider.shouldPromptRelogin(attempts: 0, intent: .manual))
-        #expect(!ClaudeCodeProvider.shouldPromptRelogin(attempts: 0, intent: .visible))
-        #expect(!ClaudeCodeProvider.shouldPromptRelogin(attempts: 0, intent: .background))
+    @Test("expired credentials serve cached data with recovery guidance, never a re-login nag")
+    func expiredCredentialFallbackGuidance() throws {
+        let provider = ClaudeCodeProvider()
+        let now = Date()
+        let cached = ClaudeCodeProvider.CachedClaudeUsage(
+            schemaVersion: 1,
+            cachedAt: now.addingTimeInterval(-3600),
+            snapshot: snapshot(
+                primary: QuotaWindow(label: "5h", used: 40, limit: 100, resetAt: now.addingTimeInterval(3600)),
+                updatedAt: now.addingTimeInterval(-3600)
+            )
+        )
 
-        // The user is actively looking: first failure already prompts.
-        #expect(ClaudeCodeProvider.shouldPromptRelogin(attempts: 1, intent: .manual))
-        #expect(ClaudeCodeProvider.shouldPromptRelogin(attempts: 1, intent: .visible))
+        let fallback = try #require(provider.expiredCredentialFallback(cached))
+        #expect(fallback.note == QuotaNoteCatalog.claudeCredentialsAwaitingClaudeCode)
+        #expect(fallback.source == "Claude Code OAuth Cache")
+        #expect(fallback.primary?.label == "5h")
 
-        // Background polls get one silent auto-retry before prompting.
-        #expect(!ClaudeCodeProvider.shouldPromptRelogin(attempts: 1, intent: .background))
-        #expect(ClaudeCodeProvider.shouldPromptRelogin(attempts: 2, intent: .background))
-        #expect(ClaudeCodeProvider.shouldPromptRelogin(attempts: 8, intent: .background))
+        // Nothing usable left in the cache: no snapshot at all rather than misleading zeros.
+        let allExpired = ClaudeCodeProvider.CachedClaudeUsage(
+            schemaVersion: 1,
+            cachedAt: now.addingTimeInterval(-3600),
+            snapshot: snapshot(
+                primary: QuotaWindow(label: "5h", used: 100, limit: 100, resetAt: now.addingTimeInterval(-90 * 60)),
+                updatedAt: now.addingTimeInterval(-3600)
+            )
+        )
+        #expect(provider.expiredCredentialFallback(allExpired) == nil)
+        #expect(provider.expiredCredentialFallback(nil) == nil)
     }
 
-    @Test("permanent token refresh failures are recognized from the OAuth error body")
-    func permanentRefreshFailureDetection() {
-        #expect(ClaudeCodeProvider.isPermanentTokenRefreshFailure(
-            body: Data(#"{"error":"invalid_grant","error_description":"Refresh token is invalid"}"#.utf8)
-        ))
-        #expect(ClaudeCodeProvider.isPermanentTokenRefreshFailure(
-            body: Data(#"{"error":{"type":"invalid_request_error","message":"Invalid refresh token provided"}}"#.utf8)
-        ))
-        #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(
-            body: Data(#"{"error":{"type":"rate_limit_error","message":"Rate limited."}}"#.utf8)
-        ))
-        #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: Data()))
+    @Test("hard expiry follows the stored expiresAt")
+    func tokenHardExpiry() {
+        func token(expiresIn: TimeInterval?) -> ClaudeCodeProvider.ClaudeOAuthToken {
+            ClaudeCodeProvider.ClaudeOAuthToken(
+                accessToken: "token",
+                refreshToken: nil,
+                expiresAt: expiresIn.map { Date().addingTimeInterval($0) }
+            )
+        }
+
+        #expect(!token(expiresIn: 600).isHardExpired)
+        #expect(token(expiresIn: -1).isHardExpired)
+        // Missing expiry metadata: assume usable and let the server be the judge.
+        #expect(!token(expiresIn: nil).isHardExpired)
     }
+
+    @Test("credential guidance note localizes and shows on the card")
+    func credentialGuidanceNoteLocalization() {
+        let note = QuotaNoteCatalog.claudeCredentialsAwaitingClaudeCode
+        let en = AppText(language: .english)
+        #expect(en.localizedNote(note)?.contains("live data resumes") == true)
+        #expect(en.shouldDisplayNoteOnCard(note))
+        let zh = AppText(language: .simplifiedChinese)
+        #expect(zh.localizedNote(note) == note)
+    }
+
 }
