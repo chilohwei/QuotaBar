@@ -43,6 +43,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private var pendingPanelPresentationTask: Task<Void, Never>?
     private var statusBarContentView: StatusBarQuotaContentView?
     private var isStatusTitleUpdateScheduled = false
+    private var isPresentingRestartPrompt = false
     private var cancellables = Set<AnyCancellable>()
 
     init(appState: AppState) {
@@ -170,6 +171,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 // Browser-based account authorization requires clicking outside the
                 // panel; keep it open so the user sees progress and the result.
                 guard !self.appState.isAddingAccount else { return }
+                // A restart sheet is attached to the panel — closing it would take the
+                // unanswered dialog down with it.
+                guard !self.isPresentingRestartPrompt else { return }
                 self.dashboardPanel.close()
             }
         }
@@ -232,6 +236,8 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         guard let button = statusItem.button else { return }
 
         if dashboardPanel.isVisible {
+            // An unanswered restart sheet is attached to the panel; leave both up.
+            guard !isPresentingRestartPrompt else { return }
             pendingPanelPresentationTask?.cancel()
             pendingPanelPresentationTask = nil
             dashboardPanel.close()
@@ -272,6 +278,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         guard notification.object as? NSWindow === dashboardPanel else { return }
+        // If the panel goes down with a sheet still attached, the sheet's completion never
+        // fires; clear the flag so outside-click closing isn't disabled forever.
+        isPresentingRestartPrompt = false
         appState.setDashboardVisible(false)
     }
 
@@ -441,10 +450,10 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     // Account switches take effect only after the tool re-reads its credentials; this dialog
-    // offers to do the restart right away instead of leaving a passive hint in the panel.
+    // offers to do the restart right away and is the only prompt (no notice bar alongside).
+    // With the dashboard open it attaches as a sheet — the panel floats at status-bar level,
+    // so a free-standing modal window would end up behind it.
     private func presentRestartPrompt(tool: ToolKind, message: String) {
-        NSApp.activate(ignoringOtherApps: true)
-
         let alert = NSAlert()
         alert.messageText = appState.text.string(.restartRequiredTitle)
         alert.informativeText = message
@@ -452,10 +461,21 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         alert.addButton(withTitle: appState.text.string(.restartNow))
         alert.addButton(withTitle: appState.text.string(.later))
 
-        if alert.runModal() == .alertFirstButtonReturn {
-            appState.restartRequiredToolNow()
+        if dashboardPanel.isVisible {
+            isPresentingRestartPrompt = true
+            alert.beginSheetModal(for: dashboardPanel) { [weak self] response in
+                guard let self else { return }
+                self.isPresentingRestartPrompt = false
+                if response == .alertFirstButtonReturn {
+                    self.appState.restartToolNow(tool)
+                }
+            }
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn {
+                appState.restartToolNow(tool)
+            }
         }
-        // "Later" keeps the panel's notice bar (with its own restart button) as the reminder.
     }
 
     private func restartToolApp(_ tool: ToolKind) {
