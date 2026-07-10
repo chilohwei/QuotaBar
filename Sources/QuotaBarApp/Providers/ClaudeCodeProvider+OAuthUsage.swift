@@ -23,6 +23,8 @@ extension ClaudeCodeProvider {
         let accessToken: String
         let refreshToken: String?
         let expiresAt: Date?
+        // Scopes granted to the stored pair; a refresh grant must ask for the same set.
+        var scopes: [String]? = nil
 
         var isHardExpired: Bool {
             guard let expiresAt else { return false }
@@ -58,10 +60,14 @@ extension ClaudeCodeProvider {
         guard !access.isEmpty else { return nil }
         let refresh = ((oauth["refreshToken"] as? String) ?? (oauth["refresh_token"] as? String))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let scopes = (oauth["scopes"] as? [String])?
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         return ClaudeOAuthToken(
             accessToken: access,
             refreshToken: (refresh?.isEmpty == false) ? refresh : nil,
-            expiresAt: parseFlexibleDate(oauth["expiresAt"] ?? oauth["expires_at"])
+            expiresAt: parseFlexibleDate(oauth["expiresAt"] ?? oauth["expires_at"]),
+            scopes: (scopes?.isEmpty == false) ? scopes : nil
         )
     }
 

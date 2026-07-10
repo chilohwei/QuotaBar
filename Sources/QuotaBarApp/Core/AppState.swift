@@ -57,6 +57,7 @@ final class AppState: ObservableObject {
     private var setLaunchAtLoginEnabledAction: ((Bool) -> Void)?
     private var closeDashboardAction: (() -> Void)?
     private var toolRestartAction: ((ToolKind) -> Void)?
+    private var restartPromptPresenter: ((ToolKind, String) -> Void)?
 
     var refreshTask: Task<Void, Never>?
     var dashboardRefreshTask: Task<Void, Never>?
@@ -447,8 +448,14 @@ final class AppState: ObservableObject {
                 try await provider.activate(account: account, secret: refreshedSecret)
                 activeAccountByTool[account.tool] = account.id
                 try await persistState()
-                restartRequiredMessage = text.restartRequiredMessage(accountName: account.name, tool: account.tool)
+                let message = text.restartRequiredMessage(accountName: account.name, tool: account.tool)
+                restartRequiredMessage = message
                 restartRequiredTool = account.tool
+                // Codex has no visible window of its own to hint from, so the restart offer is
+                // made as a dialog with a working "restart now" button.
+                if account.tool == .codex {
+                    restartPromptPresenter?(account.tool, message)
+                }
                 await refreshQuota(for: account, intent: .manual)
             } catch {
                 AppLog.account.error("Activate account failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
@@ -635,10 +642,15 @@ final class AppState: ObservableObject {
         toolRestartAction = action
     }
 
+    func registerRestartPromptPresenter(_ action: @escaping (ToolKind, String) -> Void) {
+        restartPromptPresenter = action
+    }
+
     var canRestartTool: Bool {
-        // Only Cursor is a GUI app we can meaningfully relaunch; Codex and Claude Code
-        // are CLI sessions the user restarts in their own terminal.
-        restartRequiredTool == .cursor && toolRestartAction != nil
+        // Cursor is relaunched as a GUI app; Codex processes (host apps and loose CLI
+        // sessions) are bounced by CodexRestartService. Claude Code remains a terminal
+        // session only the user can restart.
+        (restartRequiredTool == .cursor || restartRequiredTool == .codex) && toolRestartAction != nil
     }
 
     func restartRequiredToolNow() {
