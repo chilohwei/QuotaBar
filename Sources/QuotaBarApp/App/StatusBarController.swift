@@ -183,6 +183,13 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             self?.restartToolApp(tool)
         }
 
+        appState.registerRestartPromptPresenter { [weak self] tool, message in
+            // Deferred so the caller's task keeps running while the modal alert is up.
+            Task { @MainActor in
+                self?.presentRestartPrompt(tool: tool, message: message)
+            }
+        }
+
         appState.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -433,12 +440,39 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         appState.activateAccount(account)
     }
 
-    // Gracefully quits and relaunches the tool's GUI app (currently only Cursor).
+    // Account switches take effect only after the tool re-reads its credentials; this dialog
+    // offers to do the restart right away instead of leaving a passive hint in the panel.
+    private func presentRestartPrompt(tool: ToolKind, message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = appState.text.string(.restartRequiredTitle)
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: appState.text.string(.restartNow))
+        alert.addButton(withTitle: appState.text.string(.later))
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            appState.restartRequiredToolNow()
+        }
+        // "Later" keeps the panel's notice bar (with its own restart button) as the reminder.
+    }
+
+    private func restartToolApp(_ tool: ToolKind) {
+        switch tool {
+        case .cursor:
+            restartCursorApp()
+        case .codex:
+            CodexRestartService.restartCodex()
+        case .claudeCode:
+            break
+        }
+    }
+
+    // Gracefully quits and relaunches the Cursor GUI app.
     // `terminate()` lets the app prompt for unsaved work; relaunch happens only
     // after it actually exits, so a cancelled quit leaves everything untouched.
-    private func restartToolApp(_ tool: ToolKind) {
-        guard tool == .cursor else { return }
-
+    private func restartCursorApp() {
         let running = NSWorkspace.shared.runningApplications.first { app in
             app.bundleURL?.lastPathComponent == "Cursor.app" || app.localizedName == "Cursor"
         }

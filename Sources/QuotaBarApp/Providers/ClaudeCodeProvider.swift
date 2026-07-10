@@ -5,9 +5,20 @@ struct ClaudeCodeProvider: Provider {
     let tool: ToolKind = .claudeCode
 
     static let oauthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
-    static let oauthTokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
+    // Claude Code CLI ≥2.1.x rotates tokens against platform.claude.com; the old
+    // console.anthropic.com host now answers every refresh with HTTP 429.
+    static let oauthTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    static let oauthUsageUserAgent = "claude-code/2.1.181"
+    static let oauthUsageUserAgent = "claude-code/2.1.197"
+    // The CLI always sends the granted scopes with a refresh grant; a scopeless refresh is
+    // an anomaly the endpoint may reject. Used when the keychain entry carries no scope list.
+    static let oauthDefaultRefreshScopes = [
+        "user:profile",
+        "user:inference",
+        "user:sessions:claude_code",
+        "user:mcp_servers",
+        "user:file_upload"
+    ]
     // How long a hard-expired keychain token must sit untouched before QuotaBar renews it itself
     // (see ClaudeCodeProvider+TokenRefresh). Any actively used CLI refreshes its token within
     // seconds of the first API call past expiry, so a token still expired after this window has

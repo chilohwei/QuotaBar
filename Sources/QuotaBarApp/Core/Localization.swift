@@ -104,6 +104,8 @@ enum AppString: String {
     case reopenAuthPage
     case undo
     case restartNow
+    case restartRequiredTitle
+    case later
     case upToDateTitle
     case updateAvailableTitle
     case updateCheckFailedTitle
@@ -1190,6 +1192,8 @@ struct AppText {
             .reopenAuthPage: "重新打开授权页",
             .undo: "撤销",
             .restartNow: "立即重启",
+            .restartRequiredTitle: "需要重启",
+            .later: "稍后",
             .upToDateTitle: "已是最新版本",
             .updateAvailableTitle: "发现新版本",
             .updateCheckFailedTitle: "更新失败",
@@ -1254,6 +1258,8 @@ struct AppText {
             .reopenAuthPage: "重新開啟授權頁",
             .undo: "復原",
             .restartNow: "立即重啟",
+            .restartRequiredTitle: "需要重啟",
+            .later: "稍後",
             .upToDateTitle: "已是最新版本",
             .updateAvailableTitle: "發現新版本",
             .updateCheckFailedTitle: "更新失敗",
@@ -1318,6 +1324,8 @@ struct AppText {
             .reopenAuthPage: "Reopen sign-in page",
             .undo: "Undo",
             .restartNow: "Restart now",
+            .restartRequiredTitle: "Restart required",
+            .later: "Later",
             .upToDateTitle: "Up to Date",
             .updateAvailableTitle: "Update Available",
             .updateCheckFailedTitle: "Update Failed",
