@@ -449,12 +449,13 @@ final class AppState: ObservableObject {
                 activeAccountByTool[account.tool] = account.id
                 try await persistState()
                 let message = text.restartRequiredMessage(accountName: account.name, tool: account.tool)
-                restartRequiredMessage = message
-                restartRequiredTool = account.tool
-                // Codex has no visible window of its own to hint from, so the restart offer is
-                // made as a dialog with a working "restart now" button.
+                // Codex gets a dialog with a working "restart now" button as the only prompt —
+                // the panel's notice bar stays hidden so the two never show together.
                 if account.tool == .codex {
                     restartPromptPresenter?(account.tool, message)
+                } else {
+                    restartRequiredMessage = message
+                    restartRequiredTool = account.tool
                 }
                 await refreshQuota(for: account, intent: .manual)
             } catch {
@@ -647,16 +648,22 @@ final class AppState: ObservableObject {
     }
 
     var canRestartTool: Bool {
-        // Cursor is relaunched as a GUI app; Codex processes (host apps and loose CLI
-        // sessions) are bounced by CodexRestartService. Claude Code remains a terminal
-        // session only the user can restart.
-        (restartRequiredTool == .cursor || restartRequiredTool == .codex) && toolRestartAction != nil
+        // Only Cursor's restart is offered from the notice bar — Codex prompts via a dialog
+        // (see activateAccount) and Claude Code remains a terminal session only the user
+        // can restart.
+        restartRequiredTool == .cursor && toolRestartAction != nil
     }
 
     func restartRequiredToolNow() {
         guard let tool = restartRequiredTool, canRestartTool else { return }
         toolRestartAction?(tool)
         dismissRestartRequiredMessage()
+    }
+
+    /// Direct restart for dialog-driven prompts, which carry their own tool context instead
+    /// of going through the notice-bar state.
+    func restartToolNow(_ tool: ToolKind) {
+        toolRestartAction?(tool)
     }
 
     func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {
