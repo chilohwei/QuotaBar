@@ -306,9 +306,22 @@ extension CodexProvider {
             .map { String($0) }
             .map { URL(fileURLWithPath: $0).appendingPathComponent("codex") }
 
-        let explicitCandidates = [
+        let explicitCandidates = explicitCodexExecutableURLs(home: home)
+
+        for url in pathCandidates + explicitCandidates {
+            guard fileManager.isExecutableFile(atPath: url.path) else { continue }
+            return url
+        }
+
+        return nil
+    }
+
+    func explicitCodexExecutableURLs(home: String) -> [URL] {
+        [
             "/Applications/Codex.app/Contents/Resources/codex",
             "\(home)/Applications/Codex.app/Contents/Resources/codex",
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "\(home)/Applications/ChatGPT.app/Contents/Resources/codex",
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex",
             "\(home)/.local/bin/codex",
@@ -318,13 +331,6 @@ extension CodexProvider {
             "\(home)/.cargo/bin/codex",
             "\(home)/.volta/bin/codex"
         ].map(URL.init(fileURLWithPath:))
-
-        for url in pathCandidates + explicitCandidates {
-            guard fileManager.isExecutableFile(atPath: url.path) else { continue }
-            return url
-        }
-
-        return nil
     }
 
     func augmentedPath(from currentPath: String?) -> String {
