@@ -35,7 +35,7 @@ QuotaBar 是一款 macOS 菜单栏工具，帮助你集中查看 Codex、Cursor�
 1. 下载并打开 DMG 文件。
 2. 将 `QuotaBar.app` 拖入 `Applications`。
 3. 从“应用程序”文件夹启动 QuotaBar。
-4. QuotaBar 当前通过 Homebrew/GitHub Releases 分发，未使用 Developer ID 签名。如果 macOS 首次启动时拦截，请在 Finder 中右键点击 `QuotaBar.app`，选择“打开”。
+4. QuotaBar 的正式版本已使用 Developer ID 签名并通过 Apple 公证，macOS 会自动验证应用来源。
 5. 如果你已经确认下载来源和 SHA256，但 macOS 仍阻止启动，可以手动移除 quarantine 标记：
 
 ```bash

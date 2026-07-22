@@ -35,7 +35,7 @@ Install from the DMG:
 1. Download and open the DMG file.
 2. Drag `QuotaBar.app` into `Applications`.
 3. Launch QuotaBar from the Applications folder.
-4. QuotaBar is currently distributed through Homebrew/GitHub Releases without a Developer ID signature. If macOS blocks the first launch, right-click `QuotaBar.app` in Finder and choose `Open`.
+4. QuotaBar releases are signed with Developer ID and notarized by Apple, so macOS can verify the app automatically.
 5. If you have verified the download source and SHA256 but macOS still blocks launch, remove the quarantine attribute manually:
 
 ```bash
