@@ -148,4 +148,71 @@ extension CursorProvider {
         return try JSONSerialization.jsonObject(with: data)
     }
 
+    func fetchPlanInfo(accessToken: String) async throws -> Any {
+        var request = URLRequest(url: apiBaseURL.appendingPathComponent("aiserver.v1.DashboardService/GetPlanInfo"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
+        request.httpBody = Data("{}".utf8)
+
+        let data = try await dataWithRetry(for: request, operation: "Cursor 套餐信息查询")
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    func fetchUsageSummary(accessToken: String) async throws -> Any? {
+        guard let sessionToken = cursorSessionToken(from: accessToken) else { return nil }
+        var request = URLRequest(url: URL(string: "https://cursor.com/api/usage-summary")!)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        request.setValue("WorkosCursorSessionToken=\(sessionToken)", forHTTPHeaderField: "Cookie")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let data = try await dataWithRetry(for: request, operation: "Cursor usage-summary 查询")
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    func fetchRequestBasedUsage(accessToken: String) async throws -> Any? {
+        guard let subject = jwtStringClaim(accessToken, claim: "sub")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !subject.isEmpty,
+              let sessionToken = cursorSessionToken(from: accessToken) else {
+            return nil
+        }
+        let parts = subject.split(separator: "|", omittingEmptySubsequences: false)
+        let userID = String(parts.count > 1 ? parts[1] : parts[0])
+        guard !userID.isEmpty else { return nil }
+
+        var components = URLComponents(string: "https://cursor.com/api/usage")!
+        components.queryItems = [URLQueryItem(name: "user", value: userID)]
+        guard let url = components.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        request.setValue("WorkosCursorSessionToken=\(sessionToken)", forHTTPHeaderField: "Cookie")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let data = try await dataWithRetry(for: request, operation: "Cursor request 用量查询")
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    func resolvedPlanName(from planInfo: Any?, credentials: CursorCredentials) -> String? {
+        if let planInfo,
+           let planDict = planInfo as? [String: Any],
+           let nested = planDict["planInfo"] as? [String: Any],
+           let name = firstString(in: nested, keys: ["planName", "plan_name"]) {
+            return normalizedPlanName(name)
+        }
+        return normalizedPlanName(credentials.membershipType)
+    }
+
 }

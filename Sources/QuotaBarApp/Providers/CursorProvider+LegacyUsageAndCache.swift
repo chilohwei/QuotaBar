@@ -66,24 +66,35 @@ extension CursorProvider {
         }
     }
 
-    func cursorUsageNote(plan: [String: Any]?, onDemand: [String: Any]?) -> String? {
+    func cursorUsageNote(
+        plan: [String: Any]?,
+        onDemand: [String: Any]?,
+        spendLimit: [String: Any]? = nil
+    ) -> String? {
         var parts: [String] = []
-        if let plan,
-           let used = firstDouble(in: plan, keys: Self.usedAmountKeys),
-           let limit = firstDouble(in: plan, keys: Self.limitAmountKeys),
-           limit > 0 {
-            parts.append("Included \(formatDollars(used))/\(formatDollars(limit))")
+        if let included = includedPlanSpendNote(plan: plan) {
+            parts.append(included)
         }
 
-        if let onDemand,
-           firstBool(in: onDemand, keys: ["enabled"]) == true,
-           let used = firstDouble(in: onDemand, keys: Self.usedAmountKeys.union(["pooledUsed", "individualUsed"])),
-           used > 0 {
-            let limit = firstDouble(in: onDemand, keys: Self.limitAmountKeys.union(["pooledLimit", "individualLimit"]))
-            if let limit, limit > 0 {
-                parts.append("On-demand \(formatDollars(used))/\(formatDollars(limit))")
-            } else {
-                parts.append("On-demand \(formatDollars(used))")
+        let onDemandSources = [onDemand, spendLimit].compactMap { $0 }
+        for source in onDemandSources {
+            if let window = parseSpendLimitOnDemandWindow(source, resetAt: nil) {
+                parts.append("On-demand \(formatDollars(window.used))/\(formatDollars(window.limit))")
+                break
+            }
+            if firstBool(in: source, keys: ["enabled"]) == true,
+               let used = directDouble(in: source, keys: ["totalSpend", "total_spend"])
+                ?? directDouble(in: source, keys: ["individualUsed", "individual_used"])
+                ?? directDouble(in: source, keys: ["pooledUsed", "pooled_used"]),
+               used > 0 {
+                let limit = directDouble(in: source, keys: ["individualLimit", "individual_limit"])
+                    ?? directDouble(in: source, keys: ["pooledLimit", "pooled_limit"])
+                if let limit, limit > 0 {
+                    parts.append("On-demand \(formatDollars(used))/\(formatDollars(limit))")
+                } else {
+                    parts.append("On-demand \(formatDollars(used))")
+                }
+                break
             }
         }
 

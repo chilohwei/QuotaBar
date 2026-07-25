@@ -158,9 +158,27 @@ extension CursorProvider {
 
         do {
             let currentUsage = try await fetchCurrentPeriodUsage(accessToken: credentials.accessToken)
+            let planInfo = try? await fetchPlanInfo(accessToken: credentials.accessToken)
+            let resolvedPlanName = resolvedPlanName(from: planInfo, credentials: credentials)
+
+            if shouldUseUsageSummaryFallback(currentUsage, planName: resolvedPlanName) {
+                if let summary = try await fetchUsageSummary(accessToken: credentials.accessToken) {
+                    let requestUsage = try? await fetchRequestBasedUsage(accessToken: credentials.accessToken)
+                    let snapshot = try parseUsageSummaryFallback(
+                        summary: summary,
+                        requestUsage: requestUsage,
+                        credentials: credentials,
+                        planName: resolvedPlanName
+                    )
+                    try? storeQuotaSnapshot(snapshot, cacheKey: cacheKey)
+                    return snapshot
+                }
+            }
+
             let snapshot = try parseCurrentPeriodUsage(
                 currentUsage,
-                credentials: credentials
+                credentials: credentials,
+                planNameOverride: resolvedPlanName
             )
             try? storeQuotaSnapshot(snapshot, cacheKey: cacheKey)
             return snapshot

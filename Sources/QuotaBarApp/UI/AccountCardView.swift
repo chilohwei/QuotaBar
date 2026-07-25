@@ -244,6 +244,21 @@ struct AccountCardView: View {
         Array(metrics.prefix(3))
     }
 
+    private var useRingMetricLayout: Bool {
+        account.tool == .cursor
+    }
+
+    private var cursorRingTiles: [(title: String, metric: QuotaDisplayMetric?)] {
+        if visibleMetrics.isEmpty {
+            return [
+                (quota?.primary?.label ?? "Total", quota?.primaryPanelMetric),
+                ("Auto", quota?.secondaryPanelMetric),
+                ("API", quota?.tertiaryPanelMetric)
+            ]
+        }
+        return visibleMetrics.map { ($0.title, $0) }
+    }
+
     private var isInitialLoadingWithoutQuota: Bool {
         quota == nil && (isRefreshing || loadState == .loadingInitial || loadState == .refreshing)
     }
@@ -418,6 +433,9 @@ struct AccountCardView: View {
     }
 
     private var metricTiles: [(title: String, metric: QuotaDisplayMetric?)] {
+        if useRingMetricLayout {
+            return cursorRingTiles
+        }
         if visibleMetrics.isEmpty {
             return [
                 (quota?.primary?.label ?? "5h", quota?.primaryPanelMetric),
@@ -454,7 +472,14 @@ struct AccountCardView: View {
             header
 
             if isInitialLoadingWithoutQuota {
-                LoadingQuotaPlaceholder(language: language)
+                LoadingQuotaPlaceholder(language: language, useRingLayout: useRingMetricLayout)
+            } else if useRingMetricLayout {
+                RingQuotaMetricStrip(
+                    tiles: metricTiles,
+                    fallbackResetAt: quota?.periodEnd,
+                    language: language,
+                    fallbackDetail: metricFallbackDetail
+                )
             } else {
                 CompactQuotaMetricStrip(
                     tiles: metricTiles,

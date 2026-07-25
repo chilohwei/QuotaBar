@@ -23,14 +23,16 @@ extension CursorProvider {
     }
 #endif
 
-    func parseCurrentPeriodUsage(_ payload: Any, credentials: CursorCredentials) throws -> QuotaSnapshot {
+    func parseCurrentPeriodUsage(_ payload: Any, credentials: CursorCredentials, planNameOverride: String? = nil) throws -> QuotaSnapshot {
         let plan = firstDictionary(
             in: payload,
             keys: Self.includedUsageKeys
         )
-        let onDemand = firstDictionary(in: payload, keys: Self.onDemandUsageKeys)
+        let spendLimit = spendLimitUsage(from: payload)
+        let onDemand = firstDictionary(in: payload, keys: Self.onDemandUsageKeys) ?? spendLimit
         let planName = normalizedPlanName(
-            firstString(in: payload, keys: ["membershipType", "membership_type", "planName", "plan_name"])
+            planNameOverride
+                ?? firstString(in: payload, keys: ["membershipType", "membership_type", "planName", "plan_name"])
                 ?? credentials.membershipType
         )
         let periodEnd = firstDate(in: payload, keys: Self.cycleBoundaryDateKeys)
@@ -53,21 +55,17 @@ extension CursorProvider {
             ?? credentials.subscriptionStatus
         let accountIdentifier = cursorAccountIdentifier(from: payload, credentials: credentials)
 
-        let totalPercentUsed = firstDouble(in: payload, keys: ["totalPercentUsed", "total_percent_used"])
-        let autoPercentUsed = firstDouble(in: payload, keys: ["autoPercentUsed", "auto_percent_used"])
-        let apiPercentUsed = firstDouble(in: payload, keys: ["apiPercentUsed", "api_percent_used"])
+        let totalPercentUsed = plan.flatMap { planUsagePercent($0, key: "totalPercentUsed") }
+        let autoPercentUsed = plan.flatMap { planUsagePercent($0, key: "autoPercentUsed") }
+        let apiPercentUsed = plan.flatMap { planUsagePercent($0, key: "apiPercentUsed") }
         let fallbackWindows = extractCursorUsageWindows(from: payload, defaultResetAt: periodEnd)
         let quotaBlocked = isQuotaBlocked(in: payload)
+        let isTeamAccount = isTeamCursorAccount(planName: planName, spendLimit: spendLimit)
 
         let onDemandHasCapacity = onDemandHasPositiveCapacity(onDemand)
         let hasRealCapacity = planHasPositiveCapacity(plan)
             || onDemandHasCapacity
             || !fallbackWindows.isEmpty
-        // Free / included accounts meter usage purely as percentages: they carry no
-        // spendable dollar limit on the plan and no on-demand budget. When the plan
-        // name is absent (Free logins often omit `stripeMembershipType`), fall back
-        // to this shape check so such accounts render a single "Total" bar instead of
-        // the paid three-bucket Auto / API layout.
         let hasSpendableDollarCapacity = planHasSpendableDollarCapacity(plan) || onDemandHasCapacity
         let isFreePlan = isFreeCursorPlan(planName)
             || (planName == nil && !hasSpendableDollarCapacity)
@@ -75,56 +73,70 @@ extension CursorProvider {
             guard let value else { return false }
             return value > 0
         }
-        // Free / included plans report their allowance only as percentages, so a
-        // fully unused account reads as *PercentUsed == 0. That means "100%
-        // remaining", not "no quota" — trust the percent windows whenever Cursor
-        // is actively metering an included-usage budget on this account.
         let hasIncludedAllowance = hasIncludedUsageAllowance(
             payload: payload,
             plan: plan,
             quotaBlocked: quotaBlocked
         )
-        // The Auto / API sub-buckets only carry meaning when backed by real
-        // capacity or a non-zero reading (paid plans). A Free account exposes a
-        // single included allowance, so it should surface one "Total" bar rather
-        // than mirroring the paid three-bucket layout at a flat 100%.
         let canTrustDetailedPercentWindows = !isFreePlan && (hasRealCapacity || hasPercentUsageSignal)
         let canTrustPercentWindows = canTrustDetailedPercentWindows || hasIncludedAllowance
 
-        let primary = parsePlanWindow(plan, resetAt: periodEnd)
-            ?? (canTrustPercentWindows ? parsePercentWindow(
+        let primary: QuotaWindow? = {
+            if isFreePlan {
+                return (canTrustPercentWindows ? parsePercentWindow(
+                    label: "Total",
+                    usedPercent: totalPercentUsed,
+                    resetAt: periodEnd
+                ) : nil)
+                    ?? firstCursorWindow(
+                        in: fallbackWindows,
+                        preferredLabels: ["Total", "Included", "Requests", "Usage"]
+                    )
+            }
+
+            if let plan {
+                if isTeamAccount, let teamWindow = parseTeamDollarPlanWindow(plan, resetAt: periodEnd) {
+                    return teamWindow
+                }
+                if let individualWindow = parseIndividualPercentPlanWindow(plan, resetAt: periodEnd) {
+                    return individualWindow
+                }
+            }
+
+            return (canTrustPercentWindows ? parsePercentWindow(
                 label: "Total",
                 usedPercent: totalPercentUsed,
                 resetAt: periodEnd
             ) : nil)
-            ?? firstCursorWindow(
-                in: fallbackWindows,
-                preferredLabels: ["Total", "Included", "Requests", "Usage"]
-            )
-        let auto = isFreePlan ? nil : ((canTrustDetailedPercentWindows ? parsePercentWindow(
+                ?? firstCursorWindow(
+                    in: fallbackWindows,
+                    preferredLabels: ["Total", "Included", "Requests", "Usage"]
+                )
+        }()
+
+        let auto = isFreePlan ? nil : (parsePercentWindow(
             label: "Auto",
             usedPercent: autoPercentUsed,
             resetAt: periodEnd
-        ) : nil)
-            ?? firstCursorWindow(
-                in: fallbackWindows,
-                preferredLabels: ["Auto"],
-                excluding: [primary],
-                allowAnyFallback: false
-            ))
-        let api = isFreePlan ? nil : ((canTrustDetailedPercentWindows ? parsePercentWindow(
+        ) ?? firstCursorWindow(
+            in: fallbackWindows,
+            preferredLabels: ["Auto"],
+            excluding: [primary],
+            allowAnyFallback: false
+        ))
+        let api = isFreePlan ? nil : (parsePercentWindow(
             label: "API",
             usedPercent: apiPercentUsed,
             resetAt: periodEnd
-        ) : nil)
-            ?? firstCursorWindow(
-                in: fallbackWindows,
-                preferredLabels: ["API"],
-                excluding: [primary, auto],
-                allowAnyFallback: false
-            ))
+        ) ?? firstCursorWindow(
+            in: fallbackWindows,
+            preferredLabels: ["API"],
+            excluding: [primary, auto],
+            allowAnyFallback: false
+        ))
         let secondary = isFreePlan ? nil : (auto
             ?? api
+            ?? parseSpendLimitOnDemandWindow(spendLimit, resetAt: periodEnd)
             ?? firstCursorWindow(
                 in: fallbackWindows,
                 preferredLabels: ["Requests", "Usage", "On-demand"],
@@ -136,12 +148,13 @@ extension CursorProvider {
             return earlierWindows.contains(where: { sameCursorWindow($0, api) }) ? nil : api
         }()
         let tertiary = isFreePlan ? nil : (tertiaryFromAPI
+            ?? parseSpendLimitOnDemandWindow(spendLimit, resetAt: periodEnd)
             ?? firstCursorWindow(
                 in: fallbackWindows,
                 preferredLabels: ["On-demand", "API", "Requests", "Usage"],
                 excluding: [primary, secondary]
             ))
-        let note = cursorUsageNote(plan: plan, onDemand: onDemand)
+        let note = cursorUsageNote(plan: plan, onDemand: onDemand, spendLimit: spendLimit)
 
         // Some free / zero-quota payloads include *PercentUsed=0 placeholders.
         // Those should not be rendered as "100% remaining".

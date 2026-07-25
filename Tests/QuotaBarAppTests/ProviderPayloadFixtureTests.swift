@@ -135,15 +135,16 @@ struct ProviderPayloadFixtureTests {
           "current_period_end": "2026-06-30T00:00:00Z",
           "subscriptionStatus": "active",
           "planUsage": {
-            "used": 2500,
-            "limit": 10000
+            "includedSpend": 2500,
+            "limit": 10000,
+            "totalPercentUsed": 25,
+            "autoPercentUsed": 60,
+            "apiPercentUsed": 82
           },
-          "autoPercentUsed": 0.6,
-          "apiPercentUsed": 82,
-          "onDemand": {
+          "spendLimitUsage": {
             "enabled": true,
-            "used": 1200,
-            "limit": 5000
+            "individualUsed": 1200,
+            "individualLimit": 5000
           }
         }
         """)
@@ -156,8 +157,8 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.accountIdentifier == "cursor@example.com")
         #expect(snapshot.planName == "Pro+")
         #expect(snapshot.primary?.label == "Total")
-        #expect(snapshot.primary?.used == 2500)
-        #expect(snapshot.primary?.limit == 10000)
+        #expect(snapshot.primary?.used == 25)
+        #expect(snapshot.primary?.limit == 100)
         #expect(snapshot.secondary?.label == "Auto")
         #expect(snapshot.secondary?.used == 60)
         #expect(snapshot.tertiary?.label == "API")
@@ -174,16 +175,16 @@ struct ProviderPayloadFixtureTests {
           "membership_type": "business",
           "subscription_status": "active",
           "current_period_end": "2026-07-31T00:00:00Z",
-          "included_usage": {
-            "used": 4200,
-            "limit": 12000
+          "planUsage": {
+            "totalSpend": 4200,
+            "limit": 12000,
+            "autoPercentUsed": 44,
+            "apiPercentUsed": 8
           },
-          "auto_percent_used": 44,
-          "api_percent_used": 8,
           "spend_limit_usage": {
             "enabled": true,
-            "used_cents": 500,
-            "hard_limit_cents": 5000
+            "individualUsed": 500,
+            "individualLimit": 5000
           }
         }
         """)
