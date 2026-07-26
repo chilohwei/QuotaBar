@@ -105,6 +105,45 @@ extension ClaudeCodeProvider {
         try data.write(to: url, options: .atomic)
     }
 
+    /// Copies the stored account's `oauthAccount` profile into the live `~/.claude.json`,
+    /// leaving every other field — including the installation-scoped `userID`/`machineID` and
+    /// the CLI's own caches — untouched. The keychain holds only tokens (no identity), so
+    /// `claude auth status` reports whoever this cached profile describes; without the merge,
+    /// a keychain swap would leave the CLI announcing the previous account.
+    func writeClaudeOAuthAccount(from credentials: ClaudeCodeCredentials) throws {
+        let url = claudeJSONURL()
+        var live: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: url.path),
+           let data = try? Data(contentsOf: url),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            live = existing
+        }
+        guard let merged = mergingClaudeOAuthAccount(into: live, from: credentials) else {
+            return
+        }
+        let data = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+    }
+
+    /// Pure merge behind `writeClaudeOAuthAccount`: swaps only `oauthAccount` into the live
+    /// object. Everything else in `~/.claude.json` is installation state, not credentials —
+    /// most notably `projects` (the per-project prompt history that lets `claude --continue`
+    /// resume sessions after an account switch) — and must survive the swap.
+    /// Returns nil when the stored snapshot carries no `oauthAccount` to merge.
+    func mergingClaudeOAuthAccount(
+        into liveObject: [String: Any],
+        from credentials: ClaudeCodeCredentials
+    ) -> [String: Any]? {
+        guard let claudeJSON = credentials.claudeJSON,
+              let storedObject = parseJSONObject(claudeJSON) as? [String: Any],
+              let oauthAccount = storedObject["oauthAccount"] as? [String: Any] else {
+            return nil
+        }
+        var object = liveObject
+        object["oauthAccount"] = oauthAccount
+        return object
+    }
+
     func hasRestorableClaudeArtifacts(_ credentials: ClaudeCodeCredentials) -> Bool {
         [
             credentials.claudeCredentialsJSON,
@@ -115,12 +154,12 @@ extension ClaudeCodeProvider {
     }
 
     func restoreClaudeArtifacts(from credentials: ClaudeCodeCredentials) throws {
-        if let claudeJSON = credentials.claudeJSON,
-           !claudeJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try writeText(claudeJSON, to: claudeJSONURL(), permissions: nil)
-        } else {
-            try writeClaudeUserID(credentials.userID)
-        }
+        // The stored `claudeJSON` is a full snapshot of `~/.claude.json`, but it must never be
+        // written back wholesale: that would roll the live file back to snapshot time, losing
+        // `projects` prompt history (what `claude --continue` resumes from) and CLI caches.
+        // Only the account identity and the installation `userID` belong to the restore.
+        try writeClaudeOAuthAccount(from: credentials)
+        try writeClaudeUserID(credentials.userID)
 
         if let claudeCredentialsJSON = credentials.claudeCredentialsJSON,
            !claudeCredentialsJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -195,12 +234,19 @@ extension ClaudeCodeProvider {
             "-a",
             account
         ], capturePassword: false)
+        // `-A` (allow all applications) keeps the rewritten item readable by Claude Code's own
+        // process without a keychain authorization prompt. Without it the item's ACL trusts only
+        // the `security` tool that created it, so the CLI (and any GUI client) reading natively
+        // after a QuotaBar-driven account switch pops the macOS keychain dialog. The tokens'
+        // native home (the CLI's original item) is no stricter — same service, same visibility
+        // to keychain-aware local apps — so this loosens nothing that was previously tight.
         _ = try runSecurity(arguments: [
             "add-generic-password",
             "-s",
             "Claude Code-credentials",
             "-a",
             account,
+            "-A",
             "-w",
             credentials
         ], capturePassword: false)
@@ -247,15 +293,22 @@ extension ClaudeCodeProvider {
         if let email = readableEmail(from: credentials) {
             return email
         }
-        guard let userID = credentials.userID?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !userID.isEmpty else {
+        // The account UUID, never `userID`: the latter is installation-scoped and identical for
+        // every account on this machine.
+        guard let accountUuid = claudeAccountUuid(from: credentials) else {
             return nil
         }
-        return "Claude \(String(userID.suffix(8)))"
+        return "Claude \(String(accountUuid.suffix(8)))"
     }
 
     func readableEmail(from credentials: ClaudeCodeCredentials) -> String? {
-        [
+        // Structured sources first: `claude auth status`'s `email` field and the cached
+        // `oauthAccount.emailAddress` name the login precisely, while the regex scan below can
+        // latch onto any address that merely appears in the blobs (e.g. an org name).
+        if let email = claudeAccountEmail(from: credentials) {
+            return email
+        }
+        return [
             credentials.authStatusJSON,
             credentials.claudeJSON,
             credentials.claudeCredentialsJSON,

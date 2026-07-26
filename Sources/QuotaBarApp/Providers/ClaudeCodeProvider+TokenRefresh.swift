@@ -369,6 +369,126 @@ extension ClaudeCodeProvider {
         try writeClaudeCodeKeychainCredentials(newText)
     }
 
+    // MARK: - Detached stored-account renewal
+
+    /// Renews the token pair of a stored account the CLI is no longer signed into. Such a pair
+    /// exists nowhere but in QuotaBar's own store — logging the CLI into another account
+    /// overwrote the keychain copy — so rotating it races nobody. Never touches the keychain,
+    /// which belongs to whichever account the CLI is using. Returns the stored credentials with
+    /// the fresh pair embedded, or nil when nothing needed doing (also on failure, where a
+    /// per-pair backoff marker keeps the retry cadence honest).
+    func refreshDetachedStoredCredentials(
+        _ stored: ClaudeCodeCredentials,
+        liveKeychainCredentials: String?,
+        now: Date = Date()
+    ) async -> ClaudeCodeCredentials? {
+        guard shouldFetchOAuthUsage(stored),
+              let token = parseOAuthToken(from: stored),
+              token.isHardExpired,
+              let refreshToken = token.refreshToken else {
+            return nil
+        }
+        // The same pair sitting in the keychain means the CLI (or the keychain self-refresh
+        // path) owns the rotation; consuming the shared single-use refresh token here would
+        // log that side out.
+        if let liveToken = parseOAuthToken(fromJSONText: liveKeychainCredentials),
+           liveToken.accessToken == token.accessToken {
+            return nil
+        }
+
+        let blockPath = detachedRefreshBlockPath(refreshToken: refreshToken)
+        if let blockedUntil = refreshBlockedUntil(atPath: blockPath), blockedUntil > now {
+            return nil
+        }
+
+        do {
+            let refreshed = try await requestTokenRefresh(refreshToken: refreshToken, scopes: token.scopes)
+            try? fileService.removeItemIfExists(at: blockPath)
+            return replacingOAuthToken(in: stored, with: refreshed)
+        } catch OAuthUsageFetchError.unauthorized {
+            setRefreshBlock(atPath: blockPath, until: now.addingTimeInterval(Self.selfRefreshDeadGrantRetryFloor))
+            return nil
+        } catch OAuthUsageFetchError.rateLimited(let retryAfter) {
+            let floor = now.addingTimeInterval(Self.selfRefreshRetryFloor)
+            setRefreshBlock(atPath: blockPath, until: max(retryAfter ?? .distantPast, floor))
+            return nil
+        } catch {
+            setRefreshBlock(atPath: blockPath, until: now.addingTimeInterval(Self.selfRefreshRetryFloor))
+            return nil
+        }
+    }
+
+    /// Embeds a rotated token pair into the stored credentials' own copies of the credential
+    /// artifacts (keychain text and, when present, `.credentials.json` text).
+    func replacingOAuthToken(
+        in credentials: ClaudeCodeCredentials,
+        with refreshed: RefreshedOAuthToken
+    ) -> ClaudeCodeCredentials? {
+        let updatedKeychain = credentials.keychainCredentials.flatMap {
+            replacingOAuthTokenFields(inJSONText: $0, with: refreshed)
+        }
+        let updatedCredentialsJSON = credentials.claudeCredentialsJSON.flatMap {
+            replacingOAuthTokenFields(inJSONText: $0, with: refreshed)
+        }
+        guard updatedKeychain != nil || updatedCredentialsJSON != nil else {
+            return nil
+        }
+        return ClaudeCodeCredentials(
+            loggedIn: credentials.loggedIn,
+            authMethod: credentials.authMethod,
+            apiProvider: credentials.apiProvider,
+            userID: credentials.userID,
+            claudeExecutablePath: credentials.claudeExecutablePath,
+            keychainCredentials: updatedKeychain ?? credentials.keychainCredentials,
+            authStatusJSON: credentials.authStatusJSON,
+            claudeSettingsJSON: credentials.claudeSettingsJSON,
+            claudeJSON: credentials.claudeJSON,
+            claudeCredentialsJSON: updatedCredentialsJSON ?? credentials.claudeCredentialsJSON,
+            claudeAuthJSON: credentials.claudeAuthJSON
+        )
+    }
+
+    func replacingOAuthTokenFields(inJSONText text: String, with refreshed: RefreshedOAuthToken) -> String? {
+        guard let data = text.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
+              var full = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var oauth = full["claudeAiOauth"] as? [String: Any] else {
+            return nil
+        }
+        oauth["accessToken"] = refreshed.accessToken
+        oauth["refreshToken"] = refreshed.refreshToken
+        if let expiresAt = refreshed.expiresAt {
+            oauth["expiresAt"] = Int(expiresAt.timeIntervalSince1970 * 1000)
+        }
+        full["claudeAiOauth"] = oauth
+        guard let newData = try? JSONSerialization.data(withJSONObject: full) else { return nil }
+        return String(data: newData, encoding: .utf8)
+    }
+
+    /// Backoff marker per token pair (the keychain self-refresh marker below is machine-global,
+    /// which would let one account's dead grant silence every other account's renewal).
+    func detachedRefreshBlockPath(refreshToken: String) -> String {
+        AppPaths.quotaCacheDirectory
+            .appendingPathComponent("claude-detached-refresh-block-\(stableCredentialFingerprint(refreshToken))")
+            .path
+    }
+
+    func refreshBlockedUntil(atPath path: String) -> Date? {
+        guard let text = try? fileService.readText(at: path),
+              let epoch = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: epoch)
+    }
+
+    func setRefreshBlock(atPath path: String, until: Date) {
+        try? fileService.createDirectoryIfNeeded(at: AppPaths.quotaCacheDirectory.path)
+        try? fileService.writeText(
+            String(until.timeIntervalSince1970),
+            to: path,
+            permissions: 0o600
+        )
+    }
+
     // The keychain item is a single machine-global resource, so the failure backoff is one
     // global marker rather than per-account state.
     func selfRefreshBlockPath() -> String {

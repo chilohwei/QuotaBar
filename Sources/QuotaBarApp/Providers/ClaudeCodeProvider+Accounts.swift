@@ -61,7 +61,10 @@ extension ClaudeCodeProvider {
         if let keychainCredentials = stored.keychainCredentials?.trimmingCharacters(in: .whitespacesAndNewlines),
            !keychainCredentials.isEmpty {
             try writeClaudeCodeKeychainCredentials(keychainCredentials)
-            try writeClaudeUserID(stored.userID)
+            // The keychain swap alone leaves `~/.claude.json`'s cached `oauthAccount` describing
+            // the previous account — which is where `claude auth status` reads identity from, so
+            // both the CLI and the verification below would keep reporting the old login.
+            try writeClaudeOAuthAccount(from: stored)
             replacedCredentials = true
         }
         let latest = try await readClaudeCodeCredentials()
@@ -85,17 +88,25 @@ extension ClaudeCodeProvider {
 
     func fetchQuota(account: Account, secret: String, intent: RefreshIntent) async throws -> QuotaSnapshot {
         let storedCredentials = try parseCredentials(secret)
+        let liveCredentials = try? await readClaudeCodeCredentials()
+        let isLiveCliAccount = liveCredentials.map {
+            claudeCredentialsRepresentSameAccount($0, storedCredentials)
+        } ?? false
         let credentials: ClaudeCodeCredentials
-        if let latest = try? await readClaudeCodeCredentials(),
-           claudeCredentialsRepresentSameAccount(latest, storedCredentials) {
-            credentials = mergeCredentials(preferred: latest, fallback: storedCredentials)
+        if isLiveCliAccount, let liveCredentials {
+            credentials = mergeCredentials(preferred: liveCredentials, fallback: storedCredentials)
         } else {
             credentials = storedCredentials
         }
 
         let now = Date()
-        let statusLineLoad = try? loadStatusLineSnapshot()
-        let rateLimitEvent = loadActiveRateLimitEvent(status: statusLineLoad?.status, now: now)
+        // The statusLine snapshot and session transcripts describe whichever account the CLI is
+        // signed into right now. For any other stored account they are someone else's numbers,
+        // so that account must rely on its own OAuth token and cache exclusively.
+        let statusLineLoad = isLiveCliAccount ? (try? loadStatusLineSnapshot()) : nil
+        let rateLimitEvent = isLiveCliAccount
+            ? loadActiveRateLimitEvent(status: statusLineLoad?.status, now: now)
+            : nil
         let cachedOAuthSnapshot = loadCachedOAuthUsage(credentials: credentials)
             .flatMap { cached -> QuotaSnapshot? in
                 guard now.timeIntervalSince(cached.cachedAt) <= Self.historicalFillMaxAge else { return nil }
@@ -130,6 +141,19 @@ extension ClaudeCodeProvider {
                 hasUsableStatusLineSnapshot: hasUsableStatusLineSnapshot
             )
             return applyActiveRateLimit(to: preferredSnapshot, rateLimitEvent: rateLimitEvent, now: now)
+        }
+
+        // With live usage unavailable, an account the CLI is NOT signed into has no statusLine
+        // to fall back on — its own historical cache is all there is.
+        if !isLiveCliAccount {
+            let fallback = cachedOAuthSnapshot ?? statusLineSnapshot
+            if isAuthRateLimited(credentials, now: now) {
+                return fallback.replacing(
+                    note: Self.usageRateLimitedNote,
+                    availabilityStatus: .authRateLimited
+                )
+            }
+            return fallback
         }
 
         // The OAuth fallback path being down *because Anthropic is rate-limiting us* is a distinct,
@@ -218,7 +242,17 @@ extension ClaudeCodeProvider {
               !expected.isEmpty else {
             return encoded
         }
-        if accountIdentity(from: encoded) == expected {
+        if accountIdentityAliases(from: encoded)
+            .map(normalizeIdentityKey)
+            .contains(normalizeIdentityKey(expected)) {
+            return encoded
+        }
+        // Accounts stored before identity moved off the machine-scoped `userID` still carry a
+        // `claude-code:user:<installation ID>` key. Accept it until the bootstrap migration
+        // (and the per-refresh identity update) re-keys them to account-scoped identities.
+        if let userID = merged.userID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !userID.isEmpty,
+           normalizeIdentityKey(expected) == normalizeIdentityKey("claude-code:user:\(userID)") {
             return encoded
         }
         if legacyIdentity(from: merged) == normalizeIdentityKey(expected),
@@ -230,26 +264,40 @@ extension ClaudeCodeProvider {
 
     func refreshSecretIfNeeded(_ secret: String) async throws -> String {
         let stored = try parseCredentials(secret)
-        guard let latest = try? await readClaudeCodeCredentials(),
-              latest.loggedIn,
-              claudeCredentialsRepresentSameAccount(latest, stored) else {
-            return secret
+        let latest = try? await readClaudeCodeCredentials()
+        if let latest, latest.loggedIn, claudeCredentialsRepresentSameAccount(latest, stored) {
+            let merged = mergeCredentials(preferred: latest, fallback: stored)
+            let encoded = try encodeCredentials(merged)
+            return encoded == secret ? secret : encoded
         }
-        let merged = mergeCredentials(preferred: latest, fallback: stored)
-        let encoded = try encodeCredentials(merged)
-        return encoded == secret ? secret : encoded
+        // The CLI is signed into a different account (or none), so nothing else maintains this
+        // stored token pair — the CLI lost its copy the moment the keychain was overwritten.
+        // QuotaBar is its only holder, making rotation race-free, and without it the account
+        // would go permanently stale ~8 hours after the last switch away from it.
+        if let refreshed = await refreshDetachedStoredCredentials(
+            stored,
+            liveKeychainCredentials: latest?.keychainCredentials
+        ) {
+            return try encodeCredentials(refreshed)
+        }
+        return secret
     }
 
     func accountIdentity(from secret: String) -> String? {
         accountIdentityAliases(from: secret).first
     }
 
+    // `~/.claude.json`'s `userID` is deliberately absent here: it is an installation-scoped
+    // random ID the CLI never rotates on login, so it is identical for every account on this
+    // machine and made a second added account dedupe-match (and overwrite) the first one.
     func accountIdentityAliases(from secret: String) -> [String] {
         guard let credentials = try? parseCredentials(secret) else { return [] }
         var aliases: [String] = []
-        if let userID = credentials.userID?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !userID.isEmpty {
-            aliases.append("claude-code:user:\(userID)")
+        if let accountUuid = claudeAccountUuid(from: credentials) {
+            aliases.append("claude-code:account:\(accountUuid)")
+        }
+        if let email = claudeAccountEmail(from: credentials) {
+            aliases.append("claude-code:email:\(email)")
         }
         if let keychainCredentials = credentials.keychainCredentials?.trimmingCharacters(in: .whitespacesAndNewlines),
            !keychainCredentials.isEmpty {
@@ -266,9 +314,10 @@ extension ClaudeCodeProvider {
         if let email = readableEmail(from: credentials) {
             return email
         }
-        if let userID = credentials.userID?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !userID.isEmpty {
-            return "Claude \(String(userID.suffix(8)))"
+        // Fall back to the account UUID, never the installation-scoped `userID`: that value is
+        // shared by every account on this machine, so names derived from it are identical.
+        if let accountUuid = claudeAccountUuid(from: credentials) {
+            return "Claude \(String(accountUuid.suffix(8)))"
         }
         if let provider = credentials.apiProvider?.trimmingCharacters(in: .whitespacesAndNewlines),
            !provider.isEmpty,

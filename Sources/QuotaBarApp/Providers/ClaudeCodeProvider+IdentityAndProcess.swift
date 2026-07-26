@@ -21,14 +21,54 @@ extension ClaudeCodeProvider {
         )
     }
 
+    // Fields that identify the ACCOUNT, not the installation. `~/.claude.json`'s `userID` must
+    // never be used for this: the CLI mints it once per machine (`getOrCreateUserID` persists
+    // random bytes forever) and keeps it across logins, so every account on this machine shares
+    // it — treating it as identity is what once collapsed a freshly added second account into
+    // the first one's card.
+    func claudeAccountUuid(from credentials: ClaudeCodeCredentials) -> String? {
+        guard let claudeJSON = credentials.claudeJSON,
+              let object = parseJSONObject(claudeJSON) as? [String: Any],
+              let oauthAccount = object["oauthAccount"] as? [String: Any],
+              let uuid = (oauthAccount["accountUuid"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !uuid.isEmpty else {
+            return nil
+        }
+        return uuid
+    }
+
+    func claudeAccountEmail(from credentials: ClaudeCodeCredentials) -> String? {
+        if let statusJSON = credentials.authStatusJSON,
+           let object = parseJSONObject(statusJSON) as? [String: Any],
+           let email = (object["email"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !email.isEmpty {
+            return email
+        }
+        guard let claudeJSON = credentials.claudeJSON,
+              let object = parseJSONObject(claudeJSON) as? [String: Any],
+              let oauthAccount = object["oauthAccount"] as? [String: Any],
+              let email = (oauthAccount["emailAddress"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !email.isEmpty else {
+            return nil
+        }
+        return email
+    }
+
     func claudeCredentialsRepresentSameAccount(
         _ lhs: ClaudeCodeCredentials,
         _ rhs: ClaudeCodeCredentials
     ) -> Bool {
-        let lhsUserID = lhs.userID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let rhsUserID = rhs.userID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        if !lhsUserID.isEmpty || !rhsUserID.isEmpty {
-            return !lhsUserID.isEmpty && lhsUserID == rhsUserID
+        if let lhsUuid = claudeAccountUuid(from: lhs),
+           let rhsUuid = claudeAccountUuid(from: rhs) {
+            return lhsUuid == rhsUuid
+        }
+
+        if let lhsEmail = claudeAccountEmail(from: lhs),
+           let rhsEmail = claudeAccountEmail(from: rhs) {
+            return lhsEmail == rhsEmail
         }
 
         if let lhsCredentials = lhs.keychainCredentials,

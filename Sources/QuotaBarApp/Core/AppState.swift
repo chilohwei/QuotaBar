@@ -111,6 +111,7 @@ final class AppState: ObservableObject {
 
             loadCachedQuotaSnapshots()
             normalizeActiveSelections()
+            await migrateLegacyClaudeIdentityKeys()
             let initialSelectedTool = selectedTool
             let initiallySelectedAccounts = accounts(for: initialSelectedTool)
             primeRefreshState(for: initiallySelectedAccounts)
@@ -239,9 +240,24 @@ final class AppState: ObservableObject {
     private func quickAddSecret(tool: ToolKind, provider: any Provider) async throws -> QuickAddSecretResult {
         addAccountPhase = .importingLocal
         if let importedSecret = try? await provider.importCurrentCredentials(),
-           !importedSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           storedDuplicate(for: tool, provider: provider, secret: importedSecret) == nil {
-            return QuickAddSecretResult(secret: importedSecret, matchesExistingAccount: false)
+           !importedSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if storedDuplicate(for: tool, provider: provider, secret: importedSecret) == nil {
+                return QuickAddSecretResult(secret: importedSecret, matchesExistingAccount: false)
+            }
+            // The tool is signed into an account we already store, so the user is about to add a
+            // DIFFERENT one via the browser — which overwrites the tool's live credentials. Sync
+            // the live (possibly rotated, single-use) token pair into the stored card first, or
+            // the stored copy may hold an already-consumed refresh token and die the moment the
+            // login replaces the tool's own copy.
+            _ = try? await addAccount(
+                tool: tool,
+                name: "",
+                secret: importedSecret,
+                makeActive: false,
+                useAsDefaultActive: false,
+                applyToTool: false,
+                refreshAfterAdd: false
+            )
         }
 
         addAccountPhase = .waitingBrowserAuthorization
@@ -917,6 +933,42 @@ final class AppState: ObservableObject {
                 return recovered
             }
             throw SecretStoreError.missingData
+        }
+    }
+
+    // Claude Code identity keys used to be derived from `~/.claude.json`'s `userID`, which the
+    // CLI mints once per installation and never rotates on login — every account on the machine
+    // shared it, so adding a second account merged it into the first one's card. Re-key stored
+    // accounts from their own secrets before the launch-time credential sync runs, or that sync
+    // would fail to match the migrated aliases and create a duplicate card.
+    private func migrateLegacyClaudeIdentityKeys() async {
+        let provider = provider(for: .claudeCode)
+        var changed = false
+        for index in accounts.indices where accounts[index].tool == .claudeCode {
+            let currentKey = accounts[index].settings.identityKey?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let normalized = currentKey?.lowercased(),
+               normalized.hasPrefix("claude-code:account:") || normalized.hasPrefix("claude-code:email:") {
+                continue
+            }
+            guard let secret = try? await resolveSecret(for: accounts[index], provider: provider),
+                  let identity = provider.accountIdentity(from: secret)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !identity.isEmpty,
+                  identity.lowercased() != currentKey?.lowercased() else {
+                continue
+            }
+            let normalizedIdentity = identity.lowercased()
+            guard normalizedIdentity.hasPrefix("claude-code:account:")
+                || normalizedIdentity.hasPrefix("claude-code:email:") else {
+                continue
+            }
+            accounts[index].settings.identityKey = identity
+            changed = true
+            AppLog.account.info("Migrated legacy Claude identity key for account \(self.accounts[index].id.uuidString, privacy: .public)")
+        }
+        if changed {
+            try? await persistState()
         }
     }
 

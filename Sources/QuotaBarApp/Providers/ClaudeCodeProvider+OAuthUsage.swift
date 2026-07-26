@@ -189,10 +189,15 @@ extension ClaudeCodeProvider {
         usageCacheKey(credentials).flatMap { try? loadCachedUsage(cacheKey: $0) }
     }
 
+    // Keyed on account-scoped identity. The old key used `~/.claude.json`'s `userID`, which the
+    // CLI mints once per installation — every account on the machine landed in the same cache
+    // file and inherited each other's numbers.
     func usageCacheKey(_ credentials: ClaudeCodeCredentials) -> String? {
-        if let userID = credentials.userID?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !userID.isEmpty {
-            return "claude-usage-" + stableCredentialFingerprint("user:\(userID)")
+        if let accountUuid = claudeAccountUuid(from: credentials) {
+            return "claude-usage-" + stableCredentialFingerprint("account:\(accountUuid)")
+        }
+        if let email = claudeAccountEmail(from: credentials) {
+            return "claude-usage-" + stableCredentialFingerprint("email:\(email)")
         }
         if let keychainCredentials = credentials.keychainCredentials?.trimmingCharacters(in: .whitespacesAndNewlines),
            !keychainCredentials.isEmpty {
@@ -292,14 +297,27 @@ extension ClaudeCodeProvider {
         payload: [String: Any],
         credentials: ClaudeCodeCredentials
     ) -> QuotaSnapshot {
-        let primary = parseOAuthUsageWindow(
+        let legacyPrimary = parseOAuthUsageWindow(
             usageWindowDictionary(in: payload, keys: Self.fiveHourLimitKeys),
             label: "5h"
         )
-        let secondary = parseOAuthUsageWindow(
+        let legacySecondary = parseOAuthUsageWindow(
             usageWindowDictionary(in: payload, keys: Self.weeklyLimitKeys),
             label: "7d"
         )
+
+        // Newer `/usage` payloads null out `seven_day` and move the weekly windows into a
+        // `limits` array (entries carry `group`, `percent`, `resets_at`, and for model-scoped
+        // weekly limits a `scope.model.display_name` like "Fable").
+        let limitWindows = parseOAuthLimitsArray(payload["limits"])
+        let primary = legacyPrimary ?? limitWindows.session
+        var weekly = limitWindows.weekly
+        if let legacySecondary {
+            weekly.removeAll { $0.label == legacySecondary.label }
+            weekly.insert(legacySecondary, at: 0)
+        }
+        let secondary = weekly.first
+        let tertiary = weekly.dropFirst().first
 
         return QuotaSnapshot(
             source: "Claude Code OAuth",
@@ -307,7 +325,7 @@ extension ClaudeCodeProvider {
             planName: planName(credentials: credentials, status: nil),
             primary: primary,
             secondary: secondary,
-            tertiary: nil,
+            tertiary: tertiary,
             creditsRemaining: nil,
             creditsTotal: nil,
             updatedAt: Date(),
@@ -318,6 +336,54 @@ extension ClaudeCodeProvider {
             availabilityStatus: isQuotaBlocked(primary: primary, secondary: secondary) == true ? .quotaExhausted : nil,
             note: nil
         )
+    }
+
+    struct OAuthLimitWindows {
+        var session: QuotaWindow?
+        var weekly: [QuotaWindow] = []
+    }
+
+    /// Parses the `limits` array of newer `/usage` payloads. Entries look like
+    /// `{kind: "session"|"weekly"|"weekly_scoped", group: "session"|"weekly", percent: 54,
+    ///   resets_at: "...", scope: {model: {display_name: "Fable"}}}`.
+    /// `is_active` is deliberately ignored: it marks the currently binding window, not
+    /// whether the limit exists — the CLI's own usage panel shows inactive windows too.
+    func parseOAuthLimitsArray(_ value: Any?) -> OAuthLimitWindows {
+        var result = OAuthLimitWindows()
+        guard let entries = value as? [[String: Any]] else { return result }
+        for entry in entries {
+            guard let percent = number(entry["percent"]) ?? number(entry["utilization"]) else {
+                continue
+            }
+            let group = ((entry["group"] as? String) ?? (entry["kind"] as? String))?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let resetAt = parseFlexibleDate(firstValue(
+                in: entry,
+                keys: ["resets_at", "reset_at", "resetAt", "resetsAt"]
+            ))
+            func window(_ label: String) -> QuotaWindow {
+                QuotaWindow(label: label, used: min(max(percent, 0), 100), limit: 100, resetAt: resetAt)
+            }
+            switch group {
+            case "session":
+                if result.session == nil {
+                    result.session = window("5h")
+                }
+            case "weekly":
+                let model = (entry["scope"] as? [String: Any])?["model"] as? [String: Any]
+                let modelName = (model?["display_name"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = (modelName?.isEmpty == false) ? "7d·\(modelName!)" : "7d"
+                result.weekly.append(window(label))
+            default:
+                continue
+            }
+        }
+        // The all-models weekly window ahead of model-scoped ones.
+        result.weekly.sort { lhs, rhs in
+            (lhs.label == "7d" ? 0 : 1) < (rhs.label == "7d" ? 0 : 1)
+        }
+        return result
     }
 
     func shouldUseStatusLineSnapshot(_ status: [String: Any]?, settingsJSON: String?) -> Bool {

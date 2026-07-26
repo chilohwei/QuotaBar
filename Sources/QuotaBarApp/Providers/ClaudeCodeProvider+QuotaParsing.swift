@@ -98,13 +98,66 @@ extension ClaudeCodeProvider {
             return thirdPartyProvider
         }
         if isFirstPartyClaudeProvider(credentials.apiProvider) || credentials.authMethod == "oauth" {
-            return "Claude.ai"
+            return claudeSubscriptionPlanName(from: credentials) ?? "Claude.ai"
         }
         if let provider = credentials.apiProvider?.trimmingCharacters(in: .whitespacesAndNewlines),
            !provider.isEmpty {
             return displayProviderName(from: provider)
         }
         return nil
+    }
+
+    /// Resolves the real subscription tier ("Claude Max 20x", "Claude Pro") instead of the
+    /// generic "Claude.ai" label. The token payloads carry `subscriptionType` ("max"/"pro")
+    /// plus `rateLimitTier` ("default_claude_max_20x"); the cached `oauthAccount` profile
+    /// carries `organizationType` ("claude_max") as a fallback for older captures.
+    func claudeSubscriptionPlanName(from credentials: ClaudeCodeCredentials) -> String? {
+        for text in [credentials.keychainCredentials, credentials.claudeCredentialsJSON] {
+            guard let text,
+                  let object = parseJSONObject(text) as? [String: Any],
+                  let oauth = object["claudeAiOauth"] as? [String: Any] else {
+                continue
+            }
+            if let name = claudeSubscriptionDisplayName(
+                type: oauth["subscriptionType"] as? String,
+                tier: oauth["rateLimitTier"] as? String
+            ) {
+                return name
+            }
+        }
+        guard let claudeJSON = credentials.claudeJSON,
+              let object = parseJSONObject(claudeJSON) as? [String: Any],
+              let oauthAccount = object["oauthAccount"] as? [String: Any] else {
+            return nil
+        }
+        let organizationType = (oauthAccount["organizationType"] as? String)?
+            .replacingOccurrences(of: "claude_", with: "")
+        return claudeSubscriptionDisplayName(
+            type: organizationType,
+            tier: (oauthAccount["organizationRateLimitTier"] as? String)
+                ?? (oauthAccount["userRateLimitTier"] as? String)
+        )
+    }
+
+    func claudeSubscriptionDisplayName(type: String?, tier: String?) -> String? {
+        guard let type = type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !type.isEmpty else {
+            return nil
+        }
+        let base: String
+        switch type {
+        case "max": base = "Max"
+        case "pro": base = "Pro"
+        case "free": base = "Free"
+        case "team": base = "Team"
+        case "enterprise": base = "Enterprise"
+        default: base = type.prefix(1).uppercased() + type.dropFirst()
+        }
+        if let tier = tier?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           let match = tier.range(of: #"(\d+)x$"#, options: .regularExpression) {
+            return "Claude \(base) \(tier[match])"
+        }
+        return "Claude \(base)"
     }
 
     // Note for the non-rate-limited case; an active session limit replaces this with

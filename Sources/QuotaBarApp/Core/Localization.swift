@@ -1095,6 +1095,16 @@ struct AppText {
         case "usage":
             return language == .english ? "Usage" : (language == .traditionalChinese ? "用量" : "用量")
         default:
+            // Scoped windows like "7d·Fable" (weekly limit for one model family): localize the
+            // window part, keep the model name as-is.
+            if raw.contains("·") {
+                let parts = raw.split(separator: "·", maxSplits: 1).map {
+                    String($0).trimmingCharacters(in: .whitespaces)
+                }
+                if parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty, parts[0] != raw {
+                    return "\(quotaLabel(parts[0]))·\(parts[1])"
+                }
+            }
             return raw
         }
     }

@@ -706,6 +706,89 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.orderedMetrics.count == 2)
     }
 
+    @Test("Claude OAuth usage payload reads weekly windows from the limits array")
+    func claudeOAuthUsagePayloadReadsLimitsArray() throws {
+        // Newer /usage payloads null out `seven_day` and describe the weekly windows in a
+        // `limits` array, model-scoped ones carrying `scope.model.display_name`.
+        let payload = try jsonDictionary("""
+        {
+          "five_hour": {
+            "utilization": 54.0,
+            "resets_at": "2026-07-26T15:49:59.316047+00:00"
+          },
+          "seven_day": null,
+          "seven_day_opus": null,
+          "limits": [
+            {
+              "kind": "session",
+              "group": "session",
+              "percent": 54,
+              "severity": "normal",
+              "resets_at": "2026-07-26T15:49:59.316047+00:00",
+              "scope": null,
+              "is_active": true
+            },
+            {
+              "kind": "weekly_scoped",
+              "group": "weekly",
+              "percent": 20,
+              "severity": "normal",
+              "resets_at": "2026-07-27T14:59:59.316297+00:00",
+              "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null },
+              "is_active": false
+            }
+          ]
+        }
+        """)
+
+        let snapshot = ClaudeCodeProvider().parseOAuthUsagePayloadForTesting(
+            payload,
+            authStatusJSON: #"{"email":"claude-user@example.com"}"#
+        )
+
+        #expect(snapshot.primary?.label == "5h")
+        #expect(snapshot.primary?.used == 54)
+        #expect(snapshot.secondary?.label == "7d·Fable")
+        #expect(snapshot.secondary?.used == 20)
+        #expect(snapshot.secondary?.resetAt != nil)
+        #expect(snapshot.tertiary == nil)
+        #expect(snapshot.isQuotaBlocked == false)
+    }
+
+    @Test("Claude OAuth usage limits array yields session window when five_hour is absent")
+    func claudeOAuthUsageLimitsArraySessionFallback() throws {
+        let payload = try jsonDictionary("""
+        {
+          "five_hour": null,
+          "seven_day": null,
+          "limits": [
+            { "kind": "session", "group": "session", "percent": 87, "resets_at": "2026-07-26T15:49:59Z" },
+            { "kind": "weekly", "group": "weekly", "percent": 41, "resets_at": "2026-07-27T14:59:59Z" },
+            {
+              "kind": "weekly_scoped",
+              "group": "weekly",
+              "percent": 12,
+              "resets_at": "2026-07-27T14:59:59Z",
+              "scope": { "model": { "display_name": "Fable" } }
+            }
+          ]
+        }
+        """)
+
+        let snapshot = ClaudeCodeProvider().parseOAuthUsagePayloadForTesting(
+            payload,
+            authStatusJSON: #"{"email":"claude-user@example.com"}"#
+        )
+
+        #expect(snapshot.primary?.label == "5h")
+        #expect(snapshot.primary?.used == 87)
+        // All-models weekly ranks ahead of the model-scoped window.
+        #expect(snapshot.secondary?.label == "7d")
+        #expect(snapshot.secondary?.used == 41)
+        #expect(snapshot.tertiary?.label == "7d·Fable")
+        #expect(snapshot.tertiary?.used == 12)
+    }
+
     @Test("Claude OAuth live snapshot marks active session limit without rewriting utilization")
     func claudeOAuthUsagePayloadMarksActiveRateLimitWithoutRewritingUsage() throws {
         // A Claude Code 429 can mean the current session is blocked, but the OAuth rolling-window
