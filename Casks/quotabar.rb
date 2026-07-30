@@ -1,6 +1,6 @@
 cask "quotabar" do
-  version "1.2.5"
-  sha256 "299bcdb488009e027ea7fa451e59f2ce2c8ce3727760d5432a8cad232b80dd25"
+  version "1.3.0"
+  sha256 "a9364808b01fd69146ed614f44dbb0754265e5c1fec864403762053a1697c091"
 
   url "https://github.com/chilohwei/QuotaBar/releases/download/v#{version}/QuotaBar-#{version}-universal.dmg"
   name "QuotaBar"
