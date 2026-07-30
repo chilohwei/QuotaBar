@@ -5,29 +5,132 @@ extension ClaudeCodeProvider {
         guard let executable = claudeExecutableURL() else {
             throw ProviderError.cliMissing(tool: .claudeCode, message: "未找到 Claude Code CLI。请先安装 claude，或确认 claude 命令可用。")
         }
-        // `claude auth status` only reports auth state — verified against CLI 2.x, it returns
-        // loggedIn:true while leaving an expired keychain token untouched (and there is no
-        // `auth refresh` subcommand). Renewal of a lapsed token happens in
-        // ClaudeCodeProvider+TokenRefresh. The generous timeout is for cold CLI startup.
-        let output = try await runProcess(executable: executable, arguments: ["auth", "status"], timeout: 30)
-        guard let data = output.data(using: .utf8),
-              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ProviderError.credentialParsingFailed(tool: .claudeCode)
-        }
-        let loggedIn = object["loggedIn"] as? Bool ?? false
+        let keychainCredentials = try? readClaudeCodeKeychainCredentials()
+        let claudeSettingsJSON = readTextIfExists(claudeSettingsURL())
+        let claudeJSON = readTextIfExists(claudeJSONURL())
+        let claudeCredentialsJSON = readTextIfExists(claudeCredentialsURL())
+        let claudeAuthJSON = readTextIfExists(claudeAuthURL())
+        let authentication = inferredClaudeAuthentication(
+            keychainCredentials: keychainCredentials,
+            claudeCredentialsJSON: claudeCredentialsJSON,
+            claudeAuthJSON: claudeAuthJSON,
+            claudeSettingsJSON: claudeSettingsJSON
+        )
+
         return ClaudeCodeCredentials(
-            loggedIn: loggedIn,
-            authMethod: object["authMethod"] as? String,
-            apiProvider: object["apiProvider"] as? String,
+            loggedIn: authentication.loggedIn,
+            authMethod: authentication.authMethod,
+            apiProvider: authentication.apiProvider,
             userID: readClaudeUserID(),
             claudeExecutablePath: executable.path,
-            keychainCredentials: try? readClaudeCodeKeychainCredentials(),
-            authStatusJSON: output,
-            claudeSettingsJSON: readTextIfExists(claudeSettingsURL()),
-            claudeJSON: readTextIfExists(claudeJSONURL()),
-            claudeCredentialsJSON: readTextIfExists(claudeCredentialsURL()),
-            claudeAuthJSON: readTextIfExists(claudeAuthURL())
+            keychainCredentials: keychainCredentials,
+            authStatusJSON: nil,
+            claudeSettingsJSON: claudeSettingsJSON,
+            claudeJSON: claudeJSON,
+            claudeCredentialsJSON: claudeCredentialsJSON,
+            claudeAuthJSON: claudeAuthJSON
         )
+    }
+
+    struct InferredClaudeAuthentication: Equatable {
+        let loggedIn: Bool
+        let authMethod: String?
+        let apiProvider: String?
+    }
+
+    func inferredClaudeAuthentication(
+        keychainCredentials: String?,
+        claudeCredentialsJSON: String?,
+        claudeAuthJSON: String?,
+        claudeSettingsJSON: String?
+    ) -> InferredClaudeAuthentication {
+        let settings = claudeSettingsJSON
+            .flatMap(parseJSONObject) as? [String: Any]
+        let environment = settings?["env"] as? [String: Any]
+        let configuredProvider = firstString(
+            in: environment ?? [:],
+            keys: ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_URL", "CLAUDE_BASE_URL"]
+        )
+        let settingsHasAPISecret = firstString(
+            in: environment ?? [:],
+            keys: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+        ) != nil
+        if settingsHasAPISecret {
+            return InferredClaudeAuthentication(
+                loggedIn: true,
+                authMethod: "api_key",
+                apiProvider: configuredProvider ?? "api_key"
+            )
+        }
+
+        let credentialSources = [
+            keychainCredentials,
+            claudeCredentialsJSON,
+            claudeAuthJSON
+        ].compactMap { $0 }
+        if credentialSources.contains(where: { containsClaudeAPIKey(in: $0) }) {
+            return InferredClaudeAuthentication(
+                loggedIn: true,
+                authMethod: "api_key",
+                apiProvider: configuredProvider ?? "api_key"
+            )
+        }
+        if credentialSources.contains(where: {
+            parseOAuthToken(fromJSONText: $0) != nil || containsClaudeOAuthToken(in: $0)
+        }) {
+            return InferredClaudeAuthentication(
+                loggedIn: true,
+                authMethod: "oauth",
+                apiProvider: "firstParty"
+            )
+        }
+        return InferredClaudeAuthentication(
+            loggedIn: false,
+            authMethod: nil,
+            apiProvider: configuredProvider
+        )
+    }
+
+    private func containsClaudeAPIKey(in text: String) -> Bool {
+        jsonContainsNonEmptyString(
+            text,
+            normalizedKeys: ["apikey", "anthropicapikey", "authtoken", "anthropicauthtoken"]
+        )
+    }
+
+    private func containsClaudeOAuthToken(in text: String) -> Bool {
+        jsonContainsNonEmptyString(
+            text,
+            normalizedKeys: ["accesstoken", "oauthtoken"]
+        )
+    }
+
+    private func jsonContainsNonEmptyString(
+        _ text: String,
+        normalizedKeys: Set<String>
+    ) -> Bool {
+        guard let object = parseJSONObject(text) else { return false }
+        func containsValue(_ value: Any) -> Bool {
+            if let dictionary = value as? [String: Any] {
+                for (key, nestedValue) in dictionary {
+                    let normalizedKey = key
+                        .lowercased()
+                        .filter { $0.isLetter || $0.isNumber }
+                    if normalizedKeys.contains(normalizedKey),
+                       let string = nestedValue as? String,
+                       !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return true
+                    }
+                    if containsValue(nestedValue) {
+                        return true
+                    }
+                }
+            } else if let array = value as? [Any] {
+                return array.contains(where: containsValue)
+            }
+            return false
+        }
+        return containsValue(object)
     }
 
     var claudeLoginRequiredMessage: String {
@@ -226,67 +329,39 @@ extension ClaudeCodeProvider {
     }
 
     func writeClaudeCodeKeychainCredentials(_ credentials: String) throws {
-        let account = NSUserName()
-        _ = try? runSecurity(arguments: [
-            "delete-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-a",
-            account
-        ], capturePassword: false)
-        // `-A` (allow all applications) keeps the rewritten item readable by Claude Code's own
-        // process without a keychain authorization prompt. Without it the item's ACL trusts only
-        // the `security` tool that created it, so the CLI (and any GUI client) reading natively
-        // after a QuotaBar-driven account switch pops the macOS keychain dialog. The tokens'
-        // native home (the CLI's original item) is no stricter — same service, same visibility
-        // to keychain-aware local apps — so this loosens nothing that was previously tight.
-        _ = try runSecurity(arguments: [
-            "add-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-a",
-            account,
-            "-A",
-            "-w",
-            credentials
-        ], capturePassword: false)
+        guard let data = credentials.data(using: .utf8) else {
+            throw SecretStoreError.dataEncoding
+        }
+        try SystemSecretKeychainClient().saveSecret(
+            data,
+            service: "Claude Code-credentials",
+            account: NSUserName()
+        )
+    }
+
+    func compareAndSwapClaudeCodeKeychainCredentials(
+        expected: String,
+        replacement: String
+    ) throws -> Bool {
+        guard let expectedData = expected.data(using: .utf8),
+              let replacementData = replacement.data(using: .utf8) else {
+            throw SecretStoreError.dataEncoding
+        }
+        return try SystemSecretKeychainClient().compareAndSwapGenericPassword(
+            expected: expectedData,
+            replacement: replacementData,
+            service: "Claude Code-credentials",
+            account: NSUserName()
+        )
     }
 
     func readKeychainPassword(service: String) throws -> String? {
-        let value = try runSecurity(arguments: [
-            "find-generic-password",
-            "-s",
-            service,
-            "-w"
-        ], capturePassword: true)
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    func runSecurity(arguments: [String], capturePassword: Bool) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = arguments
-
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if process.terminationStatus == 0 {
-            return output
-        }
-
-        if capturePassword {
-            return ""
-        }
-        let error = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        throw ProviderError.network(error?.isEmpty == false ? error! : "写入 Claude Code Keychain 失败")
+        // `Claude Code-credentials` is created by Claude Code via `/usr/bin/security`, so its
+        // decrypt ACL trusts only that binary. A direct Security.framework read from QuotaBar
+        // fails closed and would make `readClaudeCodeCredentials` report a signed-in account as
+        // logged out — the "还没有登录" failure when adding an account right after login. Read
+        // through the trusted tool instead.
+        SystemSecretKeychainClient().readGenericPasswordUsingSecurityTool(service: service)
     }
 
     func readableIdentity(from credentials: ClaudeCodeCredentials) -> String? {

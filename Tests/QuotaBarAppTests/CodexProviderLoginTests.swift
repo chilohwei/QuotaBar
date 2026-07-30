@@ -10,4 +10,14 @@ struct CodexProviderLoginTests {
 
         #expect(candidates.contains(URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex")))
     }
+
+    @Test("every Codex login attempt forces file credential storage")
+    func everyLoginAttemptForcesFileCredentialStorage() {
+        let attempts = CodexProvider().codexLoginAttempts()
+
+        #expect(attempts.count == 2)
+        #expect(attempts.allSatisfy {
+            $0.arguments.contains(#"cli_auth_credentials_store="file""#)
+        })
+    }
 }

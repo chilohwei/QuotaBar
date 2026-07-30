@@ -1,111 +1,14 @@
+import Darwin
 import Foundation
 
-// Self-renewal of a lapsed Claude Code keychain token.
-//
-// QuotaBar treats Claude Code as the owner of these credentials and never races it for the
-// single-use refresh token: rotating the pair while the CLI is maintaining it invalidates the
-// copy the CLI holds and logs the user out — the ping-pong that once forced re-logins several
-// times a day. But the owner doesn't always show up: GUI clients (the Claude Code desktop app)
-// keep their own credential store and never renew this keychain item, and `claude auth status`
-// merely reports state without refreshing. Left alone, the keychain token dies 8 hours after
-// the last CLI use and QuotaBar is stuck on cached data.
-//
-// So the policy is: give the CLI first claim, then take over. Only once the token has sat
-// hard-expired past `selfRefreshGrace` — proof no CLI is actively maintaining it — QuotaBar
-// renews the pair against the exact credentials currently in the keychain and immediately
-// writes the rotated pair back, so the CLI's next launch rides the fresh token just like
-// QuotaBar rides its own.
-//
-// The renewal itself mirrors the CLI's request exactly (platform.claude.com endpoint, granted
-// scopes in the body) and, when the CDN edge still rejects URLSession's TLS signature with a
-// 429/403, retries once through a local Node/Bun runtime — the client class the edge is known
-// to accept, since the CLI itself is one.
+// Claude refresh tokens are single-use. Detached accounts can be renewed directly; the live
+// account additionally uses Claude Code's own cross-process locks plus a Keychain CAS.
 extension ClaudeCodeProvider {
     struct RefreshedOAuthToken {
         let accessToken: String
         let refreshToken: String
         let expiresAt: Date?
-    }
-
-    /// Renews the keychain token pair when it has lapsed with no other maintainer in sight.
-    /// Returns a usable access token — freshly rotated, or the keychain's own if some other
-    /// maintainer beat us to the renewal — or nil when the fallback note should stay.
-    func selfRefreshHardExpiredToken(
-        matching expired: ClaudeOAuthToken,
-        intent: RefreshIntent,
-        now: Date = Date()
-    ) async -> ClaudeOAuthToken? {
-        guard Self.shouldAttemptSelfRefresh(
-            expiresAt: expired.expiresAt,
-            blockedUntil: selfRefreshBlockedUntil(),
-            intent: intent,
-            now: now
-        ) else {
-            return nil
-        }
-
-        // Rotate only the exact pair sitting in the keychain right now. The live re-read both
-        // picks up a token some other maintainer just minted (ride it, no rotation) and
-        // guarantees we never consume a refresh token from a stale stored copy.
-        guard let live = parseOAuthToken(fromJSONText: try? readClaudeCodeKeychainCredentials()) else {
-            return nil
-        }
-        if !live.isHardExpired {
-            return live
-        }
-        guard live.accessToken == expired.accessToken,
-              let refreshToken = live.refreshToken else {
-            // The keychain holds a different (also expired) pair than the one this fetch started
-            // from — likely another account was activated mid-flight. Not ours to rotate.
-            return nil
-        }
-
-        do {
-            let refreshed = try await requestTokenRefresh(refreshToken: refreshToken, scopes: live.scopes)
-            // Write-back must not be skipped: the old refresh token is consumed the moment the
-            // endpoint answers, so a keychain still holding it would strand the CLI. If the write
-            // fails there is nothing better to do than still use the fresh token for this fetch.
-            try? writeRefreshedOAuthToken(refreshed)
-            clearSelfRefreshBlock()
-            return ClaudeOAuthToken(
-                accessToken: refreshed.accessToken,
-                refreshToken: refreshed.refreshToken,
-                expiresAt: refreshed.expiresAt
-            )
-        } catch OAuthUsageFetchError.unauthorized {
-            setSelfRefreshBlock(until: now.addingTimeInterval(Self.selfRefreshDeadGrantRetryFloor))
-            return nil
-        } catch OAuthUsageFetchError.rateLimited(let retryAfter) {
-            // A rate-limited endpoint stays rate-limited if we knock every ten minutes; honor
-            // its own deadline when it names one longer than the floor.
-            let floor = now.addingTimeInterval(Self.selfRefreshRetryFloor)
-            setSelfRefreshBlock(until: max(retryAfter ?? .distantPast, floor))
-            return nil
-        } catch {
-            setSelfRefreshBlock(until: now.addingTimeInterval(Self.selfRefreshRetryFloor))
-            return nil
-        }
-    }
-
-    /// Pure gate for `selfRefreshHardExpiredToken`: expired past the grace window, and not inside
-    /// a failure-backoff window (manual refreshes bypass the backoff, never the grace — the grace
-    /// is what keeps QuotaBar from stealing an in-flight CLI rotation).
-    static func shouldAttemptSelfRefresh(
-        expiresAt: Date?,
-        blockedUntil: Date?,
-        intent: RefreshIntent,
-        now: Date = Date()
-    ) -> Bool {
-        guard let expiresAt, now.timeIntervalSince(expiresAt) >= selfRefreshGrace else {
-            return false
-        }
-        if intent.bypassesAppBackoff {
-            return true
-        }
-        if let blockedUntil, blockedUntil > now {
-            return false
-        }
-        return true
+        var refreshTokenExpiresAt: Date? = nil
     }
 
     func requestTokenRefresh(refreshToken: String, scopes: [String]?) async throws -> RefreshedOAuthToken {
@@ -119,10 +22,8 @@ extension ClaudeCodeProvider {
                 fallbackRefreshToken: refreshToken
             )
         }
-        // Cloudflare fingerprints the TLS client on this endpoint: URLSession's signature can be
-        // throttled or blocked outright (HTTP 429/403 even for a perfectly valid grant) while
-        // Claude Code's own Node-based stack passes. Rerun the identical request through a local
-        // JavaScript runtime before believing the edge's answer.
+        // Some edge responses are client-shaped rather than grant-shaped. Rerun the identical
+        // request through a local JavaScript runtime before treating a 429/403 as authoritative.
         guard let viaRuntime = try? await postTokenRefreshViaJavaScriptRuntime(body: body) else {
             return try Self.parseTokenRefreshResponse(
                 statusCode: direct.statusCode,
@@ -169,7 +70,6 @@ extension ClaudeCodeProvider {
         request.httpShouldHandleCookies = false
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(Self.oauthUsageUserAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = body
 
         let (data, response) = try await Self.liveSession.data(for: request)
@@ -201,11 +101,14 @@ extension ClaudeCodeProvider {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let expiresIn = (object["expires_in"] as? NSNumber)?.doubleValue
                 ?? (object["expires_in"] as? String).flatMap(Double.init)
-            let expiresAt = expiresIn.map { Date().addingTimeInterval($0) }
+            let refreshTokenExpiresIn = (object["refresh_token_expires_in"] as? NSNumber)?.doubleValue
+                ?? (object["refresh_token_expires_in"] as? String).flatMap(Double.init)
+            let now = Date()
             return RefreshedOAuthToken(
                 accessToken: access,
                 refreshToken: (newRefresh?.isEmpty == false) ? newRefresh! : fallbackRefreshToken,
-                expiresAt: expiresAt
+                expiresAt: expiresIn.map { now.addingTimeInterval($0) },
+                refreshTokenExpiresAt: refreshTokenExpiresIn.map { now.addingTimeInterval($0) }
             )
         case 400:
             // OAuth error responses use 400 for permanently dead grants (RFC 6749 §5.2).
@@ -229,7 +132,6 @@ extension ClaudeCodeProvider {
     static func isPermanentTokenRefreshFailure(body: Data) -> Bool {
         guard let text = String(data: body, encoding: .utf8)?.lowercased() else { return false }
         return text.contains("invalid_grant")
-            || text.contains("invalid_request")
             || text.contains("invalid refresh token")
     }
 
@@ -349,24 +251,155 @@ extension ClaudeCodeProvider {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    /// Merges the rotated tokens back into the keychain credentials, preserving every other field.
-    func writeRefreshedOAuthToken(_ token: RefreshedOAuthToken) throws {
-        guard let text = try readClaudeCodeKeychainCredentials()?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !text.isEmpty,
-              let data = text.data(using: .utf8),
-              var full = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var oauth = full["claudeAiOauth"] as? [String: Any] else {
-            return
+    // MARK: - Live account renewal
+
+    static let activeRefreshLeeway: TimeInterval = 5 * 60
+    static let oauthRefreshLockHeartbeatInterval: TimeInterval = 2
+    static let oauthRefreshLockStaleInterval: TimeInterval = 10
+    static let oauthRefreshLockRetryCount = 5
+
+    static func shouldRefreshActiveOAuthToken(
+        _ token: ClaudeOAuthToken,
+        failedAccessToken: String?,
+        now: Date
+    ) -> Bool {
+        guard token.refreshToken != nil else { return false }
+        if let failedAccessToken {
+            return token.accessToken == failedAccessToken
         }
-        oauth["accessToken"] = token.accessToken
-        oauth["refreshToken"] = token.refreshToken
-        if let expiresAt = token.expiresAt {
-            oauth["expiresAt"] = Int(expiresAt.timeIntervalSince1970 * 1000)
+        guard let expiresAt = token.expiresAt else { return false }
+        return expiresAt <= now.addingTimeInterval(activeRefreshLeeway)
+    }
+
+    /// Mirrors Claude Code 2.1.x's secure-storage directory semantics. XDG_CONFIG_HOME is not
+    /// part of this path: the CLI uses CLAUDE_SECURESTORAGE_CONFIG_DIR, then CLAUDE_CONFIG_DIR,
+    /// then ~/.claude.
+    static func claudeSecureStorageDirectoryURL(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        let defaultPath = homeDirectory.appendingPathComponent(".claude", isDirectory: true).path
+        let path: String
+        if let explicit = environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] {
+            path = explicit.isEmpty ? defaultPath : explicit
+        } else if let explicit = environment["CLAUDE_CONFIG_DIR"], !explicit.isEmpty {
+            path = explicit
+        } else {
+            path = defaultPath
         }
-        full["claudeAiOauth"] = oauth
-        let newData = try JSONSerialization.data(withJSONObject: full)
-        guard let newText = String(data: newData, encoding: .utf8) else { return }
-        try writeClaudeCodeKeychainCredentials(newText)
+        return URL(fileURLWithPath: path.precomposedStringWithCanonicalMapping, isDirectory: true)
+            .standardizedFileURL
+    }
+
+    /// `proper-lockfile` is given the secure-storage directory with an explicit
+    /// `.oauth_refresh.lock`, then a legacy target whose explicit lock path is
+    /// `<real secure-storage path>.lock`.
+    static func claudeOAuthRefreshLockPaths(secureStorageDirectory: URL) -> [URL] {
+        let realDirectory = secureStorageDirectory.resolvingSymlinksInPath().standardizedFileURL
+        return [
+            realDirectory.appendingPathComponent(".oauth_refresh.lock", isDirectory: true),
+            URL(fileURLWithPath: realDirectory.path + ".lock", isDirectory: true)
+        ]
+    }
+
+    func refreshActiveStoredCredentials(
+        _ stored: ClaudeCodeCredentials,
+        failedAccessToken: String? = nil,
+        now: Date = Date()
+    ) async throws -> ClaudeCodeCredentials? {
+        let secureStorageDirectory = Self.claudeSecureStorageDirectoryURL()
+        var lease: ClaudeOAuthRefreshLease?
+        for attempt in 0 ... Self.oauthRefreshLockRetryCount {
+            lease = ClaudeOAuthRefreshLease.acquire(
+                secureStorageDirectory: secureStorageDirectory,
+                heartbeatInterval: Self.oauthRefreshLockHeartbeatInterval,
+                staleInterval: Self.oauthRefreshLockStaleInterval
+            )
+            if lease != nil {
+                break
+            }
+            guard attempt < Self.oauthRefreshLockRetryCount else { return nil }
+            let delay = Double.random(in: 1 ... 2)
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+        guard let lease else { return nil }
+        defer { lease.release() }
+
+        return try await refreshActiveStoredCredentialsLocked(
+            stored,
+            failedAccessToken: failedAccessToken,
+            now: now,
+            readLiveKeychain: {
+                try readClaudeCodeKeychainCredentials()
+            },
+            compareAndSwapLiveKeychain: { expected, replacement in
+                guard lease.isValid else { return false }
+                return try compareAndSwapClaudeCodeKeychainCredentials(
+                    expected: expected,
+                    replacement: replacement
+                )
+            },
+            requestRefresh: { refreshToken, scopes in
+                guard lease.isValid else {
+                    throw OAuthUsageFetchError.invalidResponse
+                }
+                return try await requestTokenRefresh(refreshToken: refreshToken, scopes: scopes)
+            }
+        )
+    }
+
+    /// Testable lock-held core. The first same-value CAS is a no-UI writeability preflight;
+    /// the second installs and verifies the rotated pair. Both compare the complete JSON value.
+    func refreshActiveStoredCredentialsLocked(
+        _ stored: ClaudeCodeCredentials,
+        failedAccessToken: String?,
+        now: Date,
+        readLiveKeychain: () throws -> String?,
+        compareAndSwapLiveKeychain: (_ expected: String, _ replacement: String) throws -> Bool,
+        requestRefresh: (_ refreshToken: String, _ scopes: [String]?) async throws -> RefreshedOAuthToken
+    ) async throws -> ClaudeCodeCredentials? {
+        guard shouldFetchOAuthUsage(stored),
+              let expectedToken = parseOAuthToken(from: stored),
+              let liveKeychain = try readLiveKeychain(),
+              let liveToken = parseOAuthToken(fromJSONText: liveKeychain),
+              liveToken.accessToken == expectedToken.accessToken,
+              liveToken.refreshToken == expectedToken.refreshToken,
+              Self.shouldRefreshActiveOAuthToken(
+                  liveToken,
+                  failedAccessToken: failedAccessToken,
+                  now: now
+              ),
+              let refreshToken = liveToken.refreshToken else {
+            return nil
+        }
+
+        // Do not consume the shared, single-use refresh token unless this process can silently
+        // update the exact live Keychain item while the CLI's refresh locks are held.
+        guard try compareAndSwapLiveKeychain(liveKeychain, liveKeychain) else {
+            return nil
+        }
+
+        let refreshed = try await requestRefresh(refreshToken, liveToken.scopes)
+        var liveStored = stored
+        liveStored = ClaudeCodeCredentials(
+            loggedIn: liveStored.loggedIn,
+            authMethod: liveStored.authMethod,
+            apiProvider: liveStored.apiProvider,
+            userID: liveStored.userID,
+            claudeExecutablePath: liveStored.claudeExecutablePath,
+            keychainCredentials: liveKeychain,
+            authStatusJSON: liveStored.authStatusJSON,
+            claudeSettingsJSON: liveStored.claudeSettingsJSON,
+            claudeJSON: liveStored.claudeJSON,
+            claudeCredentialsJSON: liveStored.claudeCredentialsJSON,
+            claudeAuthJSON: liveStored.claudeAuthJSON
+        )
+        guard let updated = replacingOAuthToken(in: liveStored, with: refreshed),
+              let replacement = updated.keychainCredentials,
+              try compareAndSwapLiveKeychain(liveKeychain, replacement) else {
+            throw OAuthUsageFetchError.invalidResponse
+        }
+        return updated
     }
 
     // MARK: - Detached stored-account renewal
@@ -380,11 +413,30 @@ extension ClaudeCodeProvider {
     func refreshDetachedStoredCredentials(
         _ stored: ClaudeCodeCredentials,
         liveKeychainCredentials: String?,
+        force: Bool = false,
         now: Date = Date()
+    ) async -> ClaudeCodeCredentials? {
+        await refreshDetachedStoredCredentials(
+            stored,
+            liveKeychainCredentials: liveKeychainCredentials,
+            force: force,
+            now: now,
+            requestRefresh: { refreshToken, scopes in
+                try await requestTokenRefresh(refreshToken: refreshToken, scopes: scopes)
+            }
+        )
+    }
+
+    func refreshDetachedStoredCredentials(
+        _ stored: ClaudeCodeCredentials,
+        liveKeychainCredentials: String?,
+        force: Bool,
+        now: Date,
+        requestRefresh: (String, [String]?) async throws -> RefreshedOAuthToken
     ) async -> ClaudeCodeCredentials? {
         guard shouldFetchOAuthUsage(stored),
               let token = parseOAuthToken(from: stored),
-              token.isHardExpired,
+              force || token.isHardExpired,
               let refreshToken = token.refreshToken else {
             return nil
         }
@@ -402,18 +454,18 @@ extension ClaudeCodeProvider {
         }
 
         do {
-            let refreshed = try await requestTokenRefresh(refreshToken: refreshToken, scopes: token.scopes)
+            let refreshed = try await requestRefresh(refreshToken, token.scopes)
             try? fileService.removeItemIfExists(at: blockPath)
             return replacingOAuthToken(in: stored, with: refreshed)
         } catch OAuthUsageFetchError.unauthorized {
-            setRefreshBlock(atPath: blockPath, until: now.addingTimeInterval(Self.selfRefreshDeadGrantRetryFloor))
+            setRefreshBlock(atPath: blockPath, until: now.addingTimeInterval(Self.detachedRefreshDeadGrantRetryFloor))
             return nil
         } catch OAuthUsageFetchError.rateLimited(let retryAfter) {
-            let floor = now.addingTimeInterval(Self.selfRefreshRetryFloor)
+            let floor = now.addingTimeInterval(Self.detachedRefreshRetryFloor)
             setRefreshBlock(atPath: blockPath, until: max(retryAfter ?? .distantPast, floor))
             return nil
         } catch {
-            setRefreshBlock(atPath: blockPath, until: now.addingTimeInterval(Self.selfRefreshRetryFloor))
+            setRefreshBlock(atPath: blockPath, until: now.addingTimeInterval(Self.detachedRefreshRetryFloor))
             return nil
         }
     }
@@ -459,6 +511,9 @@ extension ClaudeCodeProvider {
         if let expiresAt = refreshed.expiresAt {
             oauth["expiresAt"] = Int(expiresAt.timeIntervalSince1970 * 1000)
         }
+        if let refreshTokenExpiresAt = refreshed.refreshTokenExpiresAt {
+            oauth["refreshTokenExpiresAt"] = Int(refreshTokenExpiresAt.timeIntervalSince1970 * 1000)
+        }
         full["claudeAiOauth"] = oauth
         guard let newData = try? JSONSerialization.data(withJSONObject: full) else { return nil }
         return String(data: newData, encoding: .utf8)
@@ -468,7 +523,7 @@ extension ClaudeCodeProvider {
     /// which would let one account's dead grant silence every other account's renewal).
     func detachedRefreshBlockPath(refreshToken: String) -> String {
         AppPaths.quotaCacheDirectory
-            .appendingPathComponent("claude-detached-refresh-block-\(stableCredentialFingerprint(refreshToken))")
+            .appendingPathComponent("claude-detached-refresh-block-v2-\(stableCredentialFingerprint(refreshToken))")
             .path
     }
 
@@ -489,30 +544,175 @@ extension ClaudeCodeProvider {
         )
     }
 
-    // The keychain item is a single machine-global resource, so the failure backoff is one
-    // global marker rather than per-account state.
-    func selfRefreshBlockPath() -> String {
-        AppPaths.quotaCacheDirectory.appendingPathComponent("claude-token-refresh-block").path
+}
+
+final class ClaudeOAuthRefreshLease: @unchecked Sendable {
+    private struct OwnedLock {
+        let url: URL
+        let fileNumber: UInt64
     }
 
-    func selfRefreshBlockedUntil() -> Date? {
-        guard let text = try? fileService.readText(at: selfRefreshBlockPath()),
-              let epoch = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+    private let ownedLocks: [OwnedLock]
+    private let heartbeatTimer: DispatchSourceTimer
+    private let stateLock = NSLock()
+    private var isReleased = false
+
+    private init(ownedLocks: [OwnedLock], heartbeatInterval: TimeInterval) {
+        self.ownedLocks = ownedLocks
+        heartbeatTimer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        heartbeatTimer.schedule(
+            deadline: .now() + heartbeatInterval,
+            repeating: heartbeatInterval
+        )
+        heartbeatTimer.setEventHandler { [weak self] in
+            self?.touchOwnedLocks()
+        }
+        heartbeatTimer.resume()
+    }
+
+    static func acquire(
+        secureStorageDirectory: URL,
+        heartbeatInterval: TimeInterval,
+        staleInterval: TimeInterval,
+        now: Date = Date()
+    ) -> ClaudeOAuthRefreshLease? {
+        let fileManager = FileManager.default
+        do {
+            try fileManager.createDirectory(
+                at: secureStorageDirectory,
+                withIntermediateDirectories: true
+            )
+        } catch {
             return nil
         }
-        return Date(timeIntervalSince1970: epoch)
-    }
 
-    func setSelfRefreshBlock(until: Date) {
-        try? fileService.createDirectoryIfNeeded(at: AppPaths.quotaCacheDirectory.path)
-        try? fileService.writeText(
-            String(until.timeIntervalSince1970),
-            to: selfRefreshBlockPath(),
-            permissions: 0o600
+        var owned: [OwnedLock] = []
+        for url in ClaudeCodeProvider.claudeOAuthRefreshLockPaths(
+            secureStorageDirectory: secureStorageDirectory
+        ) {
+            guard let lock = createOwnedLock(
+                at: url,
+                staleInterval: staleInterval,
+                now: now,
+                fileManager: fileManager
+            ) else {
+                release(owned, fileManager: fileManager)
+                return nil
+            }
+            owned.append(lock)
+        }
+        return ClaudeOAuthRefreshLease(
+            ownedLocks: owned,
+            heartbeatInterval: heartbeatInterval
         )
     }
 
-    func clearSelfRefreshBlock() {
-        try? fileService.removeItemIfExists(at: selfRefreshBlockPath())
+    func release() {
+        stateLock.lock()
+        guard !isReleased else {
+            stateLock.unlock()
+            return
+        }
+        isReleased = true
+        heartbeatTimer.cancel()
+        stateLock.unlock()
+        Self.release(ownedLocks, fileManager: .default)
+    }
+
+    var isValid: Bool {
+        stateLock.lock()
+        let active = !isReleased
+        stateLock.unlock()
+        guard active else { return false }
+        let fileManager = FileManager.default
+        return ownedLocks.allSatisfy {
+            Self.fileNumber(at: $0.url, fileManager: fileManager) == $0.fileNumber
+        }
+    }
+
+    deinit {
+        release()
+    }
+
+    private func touchOwnedLocks() {
+        stateLock.lock()
+        let shouldTouch = !isReleased
+        stateLock.unlock()
+        guard shouldTouch else { return }
+
+        let fileManager = FileManager.default
+        for owned in ownedLocks where Self.fileNumber(at: owned.url, fileManager: fileManager) == owned.fileNumber {
+            try? fileManager.setAttributes(
+                [.modificationDate: Date()],
+                ofItemAtPath: owned.url.path
+            )
+        }
+    }
+
+    private static func release(_ locks: [OwnedLock], fileManager: FileManager) {
+        for owned in locks.reversed()
+            where fileNumber(at: owned.url, fileManager: fileManager) == owned.fileNumber {
+            try? fileManager.removeItem(at: owned.url)
+        }
+    }
+
+    private static func fileNumber(at url: URL, fileManager: FileManager) -> UInt64? {
+        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+        return (attributes?[.systemFileNumber] as? NSNumber)?.uint64Value
+    }
+
+    private static func createOwnedLock(
+        at url: URL,
+        staleInterval: TimeInterval,
+        now: Date,
+        fileManager: FileManager
+    ) -> OwnedLock? {
+        if url.path.withCString({ Darwin.mkdir($0, 0o700) }) != 0 {
+            guard errno == EEXIST,
+                  removeStaleLock(
+                      at: url,
+                      staleInterval: staleInterval,
+                      now: now,
+                      fileManager: fileManager
+                  ),
+                  url.path.withCString({ Darwin.mkdir($0, 0o700) }) == 0 else {
+                return nil
+            }
+        }
+        guard let fileNumber = fileNumber(at: url, fileManager: fileManager) else {
+            _ = url.path.withCString { Darwin.rmdir($0) }
+            return nil
+        }
+        return OwnedLock(url: url, fileNumber: fileNumber)
+    }
+
+    private static func removeStaleLock(
+        at url: URL,
+        staleInterval: TimeInterval,
+        now: Date,
+        fileManager: FileManager
+    ) -> Bool {
+        guard let first = lockMetadata(at: url, fileManager: fileManager),
+              now.timeIntervalSince(first.modificationDate) > staleInterval,
+              let second = lockMetadata(at: url, fileManager: fileManager),
+              first == second else {
+            return false
+        }
+        return url.path.withCString { Darwin.rmdir($0) } == 0
+    }
+
+    private struct LockMetadata: Equatable {
+        let fileNumber: UInt64
+        let modificationDate: Date
+    }
+
+    private static func lockMetadata(at url: URL, fileManager: FileManager) -> LockMetadata? {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeDirectory,
+              let fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+              let modificationDate = attributes[.modificationDate] as? Date else {
+            return nil
+        }
+        return LockMetadata(fileNumber: fileNumber, modificationDate: modificationDate)
     }
 }

@@ -8,33 +8,29 @@ final class QuotaNotificationService {
         Bundle.main.bundleIdentifier != nil
     }
 
-    private var hasRequestedAuthorization = false
-
-    func requestAuthorizationIfNeeded() {
-        guard Self.isSupported, !hasRequestedAuthorization else { return }
-        hasRequestedAuthorization = true
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error {
-                AppLog.app.error("Notification authorization failed: \(String(describing: error), privacy: .private)")
-            } else {
-                AppLog.app.info("Notification authorization granted: \(granted, privacy: .public)")
-            }
-        }
-    }
-
     func post(identifier: String, title: String, body: String) {
         guard Self.isSupported else { return }
-        requestAuthorizationIfNeeded()
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                break
+            case .denied, .notDetermined:
+                return
+            @unknown default:
+                return
+            }
 
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
 
-        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error {
-                AppLog.app.error("Notification delivery failed: \(String(describing: error), privacy: .private)")
+            let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+            center.add(request) { error in
+                if let error {
+                    AppLog.app.error("Notification delivery failed: \(String(describing: error), privacy: .private)")
+                }
             }
         }
     }

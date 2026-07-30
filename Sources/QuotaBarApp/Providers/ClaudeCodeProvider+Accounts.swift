@@ -94,7 +94,7 @@ extension ClaudeCodeProvider {
         } ?? false
         let credentials: ClaudeCodeCredentials
         if isLiveCliAccount, let liveCredentials {
-            credentials = mergeCredentials(preferred: liveCredentials, fallback: storedCredentials)
+            credentials = mergeCurrentCredentials(live: liveCredentials, stored: storedCredentials)
         } else {
             credentials = storedCredentials
         }
@@ -107,11 +107,10 @@ extension ClaudeCodeProvider {
         let rateLimitEvent = isLiveCliAccount
             ? loadActiveRateLimitEvent(status: statusLineLoad?.status, now: now)
             : nil
-        let cachedOAuthSnapshot = loadCachedOAuthUsage(credentials: credentials)
-            .flatMap { cached -> QuotaSnapshot? in
-                guard now.timeIntervalSince(cached.cachedAt) <= Self.historicalFillMaxAge else { return nil }
-                return historicalLiveFallback(cached)
-            }
+        let cachedOAuthUsage = loadCachedOAuthUsage(credentials: credentials)
+        let cachedOAuthSnapshot = cachedOAuthUsage.flatMap {
+            historicalOAuthSnapshotForFilling($0, now: now)
+        }
         let statusLineStatus = shouldUseStatusLineSnapshot(statusLineLoad?.status, settingsJSON: credentials.claudeSettingsJSON)
             ? statusLineLoad?.status
             : nil
@@ -123,17 +122,21 @@ extension ClaudeCodeProvider {
             rateLimitEvent: rateLimitEvent
         )
         let hasUsableStatusLineSnapshot = shouldUseStatusLineSnapshotAsPrimary(statusLineSnapshot)
-        let canFillFromHistoricalOAuthCache = statusLineSnapshot.effectiveAvailabilityStatus == .sessionRateLimited
-            || !statusLineSnapshot.orderedMetrics.isEmpty
-        let statusLineOrCachedSnapshot = canFillFromHistoricalOAuthCache ? (cachedOAuthSnapshot.map {
-            mergeClaudeSnapshot(statusLineSnapshot, fillingMissingMetricsFrom: $0)
-        } ?? statusLineSnapshot) : statusLineSnapshot
+        let statusLineOrCachedSnapshot = fillStatusLineSnapshot(
+            statusLineSnapshot,
+            fromHistoricalOAuthCache: cachedOAuthUsage,
+            now: now
+        )
 
-        // For first-party Claude.ai OAuth accounts, the official usage endpoint is the source of
-        // truth for quota percentages. statusLine is fast and useful, but Claude Code can freeze its
-        // `rate_limits` between API calls, so use it as a fallback when live usage is unavailable.
-        // The live OAuth `utilization` numbers track the 5h/7d rolling windows, which are
-        // distinct from the session limit Claude Code reports via a 429 "Usage limit reached".
+        // A local file event should render its statusLine value immediately without becoming an
+        // OAuth poll. Scheduled/visible/manual refreshes still consult OAuth because Claude may
+        // keep rewriting a frozen statusLine payload with a fresh file timestamp.
+        if isLiveCliAccount,
+           shouldPreferFreshStatusLine(statusLineSnapshot, intent: intent, now: now) {
+            return applyActiveRateLimit(to: statusLineOrCachedSnapshot, rateLimitEvent: rateLimitEvent, now: now)
+        }
+
+        // Once statusLine has aged, OAuth can refresh the rolling windows at its guarded low rate.
         if let liveSnapshot = try await fetchOAuthUsageSnapshot(credentials: credentials, intent: intent) {
             let preferredSnapshot = preferredClaudeSnapshot(
                 liveSnapshot: liveSnapshot,
@@ -179,11 +182,42 @@ extension ClaudeCodeProvider {
         guard hasUsableStatusLineSnapshot else {
             return liveSnapshot
         }
-        if liveSnapshot.source == "Claude Code OAuth Cache",
-           statusLineSnapshot.updatedAt > liveSnapshot.updatedAt {
+        return mergeClaudeSnapshot(liveSnapshot, fillingMissingMetricsFrom: statusLineSnapshot)
+    }
+
+    func shouldPreferFreshStatusLine(
+        _ snapshot: QuotaSnapshot,
+        intent: RefreshIntent,
+        now: Date = Date()
+    ) -> Bool {
+        intent == .local
+            && shouldUseStatusLineSnapshotAsPrimary(snapshot)
+            && now.timeIntervalSince(snapshot.updatedAt) <= Self.liveUsageMinFetchInterval
+    }
+
+    func historicalOAuthSnapshotForFilling(
+        _ cached: CachedClaudeUsage,
+        now: Date = Date()
+    ) -> QuotaSnapshot? {
+        guard now.timeIntervalSince(cached.cachedAt) <= Self.historicalFillMaxAge else {
+            return nil
+        }
+        return historicalLiveFallback(cached)
+    }
+
+    func fillStatusLineSnapshot(
+        _ statusLineSnapshot: QuotaSnapshot,
+        fromHistoricalOAuthCache cached: CachedClaudeUsage?,
+        now: Date = Date()
+    ) -> QuotaSnapshot {
+        let canFillFromHistoricalOAuthCache = statusLineSnapshot.effectiveAvailabilityStatus == .sessionRateLimited
+            || !statusLineSnapshot.orderedMetrics.isEmpty
+        guard canFillFromHistoricalOAuthCache,
+              let cached,
+              let fallback = historicalOAuthSnapshotForFilling(cached, now: now) else {
             return statusLineSnapshot
         }
-        return mergeClaudeSnapshot(liveSnapshot, fillingMissingMetricsFrom: statusLineSnapshot)
+        return mergeClaudeSnapshot(statusLineSnapshot, fillingMissingMetricsFrom: fallback)
     }
 
     func mergeClaudeSnapshot(
@@ -200,12 +234,18 @@ extension ClaudeCodeProvider {
             return preferred
         }
 
+        // The fallback only contributes windows that the preferred snapshot is missing. Its
+        // transient block state may already be stale once a fresh OAuth request succeeds.
         let isBlocked = preferred.isQuotaBlocked == true
-            || fallback.isQuotaBlocked == true
             || isQuotaBlocked(primary: primary, secondary: secondary) == true
         let availabilityStatus = preferred.availabilityStatus
-            ?? fallback.availabilityStatus
             ?? (isBlocked ? .quotaExhausted : nil)
+        let fallbackNote: String? = if fallback.note == Self.rateLimitReachedNote
+            || fallback.note == Self.usageRateLimitedNote {
+            nil
+        } else {
+            fallback.note
+        }
 
         return QuotaSnapshot(
             source: preferred.source,
@@ -222,7 +262,7 @@ extension ClaudeCodeProvider {
             subscriptionStatus: preferred.subscriptionStatus ?? fallback.subscriptionStatus,
             isQuotaBlocked: isBlocked,
             availabilityStatus: availabilityStatus,
-            note: preferred.note ?? fallback.note
+            note: preferred.note ?? fallbackNote
         )
     }
 
@@ -265,22 +305,101 @@ extension ClaudeCodeProvider {
     func refreshSecretIfNeeded(_ secret: String) async throws -> String {
         let stored = try parseCredentials(secret)
         let latest = try? await readClaudeCodeCredentials()
-        if let latest, latest.loggedIn, claudeCredentialsRepresentSameAccount(latest, stored) {
-            let merged = mergeCredentials(preferred: latest, fallback: stored)
+        if let latest, claudeCredentialsRepresentSameAccount(latest, stored) {
+            // A noninteractive keychain read can legitimately return identity metadata without
+            // the protected token. In that case this is still the live CLI account: never consume
+            // its stored single-use refresh token as though the account were detached.
+            guard latest.loggedIn, parseOAuthToken(from: latest) != nil else {
+                return secret
+            }
+            let merged = mergeCurrentCredentials(live: latest, stored: stored)
+            if let refreshed = try await refreshActiveStoredCredentials(merged) {
+                return try encodeCredentials(refreshed)
+            }
             let encoded = try encodeCredentials(merged)
             return encoded == secret ? secret : encoded
         }
-        // The CLI is signed into a different account (or none), so nothing else maintains this
+        guard let latest,
+              latest.loggedIn,
+              claudeCredentialsRepresentDifferentAccounts(latest, stored) else {
+            // A missing/noninteractive keychain read is not proof this account is detached.
+            // Consuming its single-use refresh token without that proof can race the live CLI.
+            return secret
+        }
+        // The CLI is confirmed signed into a different account, so nothing else maintains this
         // stored token pair — the CLI lost its copy the moment the keychain was overwritten.
         // QuotaBar is its only holder, making rotation race-free, and without it the account
         // would go permanently stale ~8 hours after the last switch away from it.
         if let refreshed = await refreshDetachedStoredCredentials(
             stored,
-            liveKeychainCredentials: latest?.keychainCredentials
+            liveKeychainCredentials: latest.keychainCredentials
         ) {
             return try encodeCredentials(refreshed)
         }
         return secret
+    }
+
+    func reconcileImportedSecret(
+        _ importedSecret: String,
+        withStoredSecret storedSecret: String
+    ) throws -> String {
+        let imported = try parseCredentials(importedSecret)
+        let stored = try parseCredentials(storedSecret)
+        guard claudeCredentialsRepresentSameAccount(imported, stored) else {
+            return importedSecret
+        }
+        return try encodeCredentials(mergeCurrentCredentials(live: imported, stored: stored))
+    }
+
+    func canSafelyReplaceInstalledCredentials(afterImport secret: String) -> Bool {
+        guard let credentials = try? parseCredentials(secret) else { return false }
+        guard shouldFetchOAuthUsage(credentials) else { return true }
+        guard let refreshToken = parseOAuthToken(fromJSONText: credentials.keychainCredentials)?
+            .refreshToken?
+            .trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !refreshToken.isEmpty
+    }
+
+    func refreshSecretAfterAuthenticationFailure(_ secret: String) async throws -> String? {
+        let stored = try parseCredentials(secret)
+        guard let latest = try? await readClaudeCodeCredentials(),
+              latest.loggedIn else {
+            return nil
+        }
+        if claudeCredentialsRepresentSameAccount(latest, stored),
+           parseOAuthToken(from: latest) != nil {
+            let failedAccessToken = parseOAuthToken(from: stored)?.accessToken
+            let merged = mergeCurrentCredentials(live: latest, stored: stored)
+            if parseOAuthToken(from: merged)?.accessToken != failedAccessToken {
+                return try encodeCredentials(merged)
+            }
+            guard let refreshed = try await refreshActiveStoredCredentials(
+                merged,
+                failedAccessToken: failedAccessToken
+            ) else {
+                return nil
+            }
+            return try encodeCredentials(refreshed)
+        }
+        guard claudeCredentialsRepresentDifferentAccounts(latest, stored),
+              let refreshed = await refreshDetachedStoredCredentials(
+                stored,
+                liveKeychainCredentials: latest.keychainCredentials,
+                force: true
+              ) else {
+            return nil
+        }
+        return try encodeCredentials(refreshed)
+    }
+
+    func isAuthenticationFailure(_ error: Error) -> Bool {
+        guard let providerError = error as? ProviderError else { return false }
+        if case .invalidCredentials = providerError {
+            return true
+        }
+        return false
     }
 
     func accountIdentity(from secret: String) -> String? {

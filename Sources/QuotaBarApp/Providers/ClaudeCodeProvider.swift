@@ -19,17 +19,11 @@ struct ClaudeCodeProvider: Provider {
         "user:mcp_servers",
         "user:file_upload"
     ]
-    // How long a hard-expired keychain token must sit untouched before QuotaBar renews it itself
-    // (see ClaudeCodeProvider+TokenRefresh). Any actively used CLI refreshes its token within
-    // seconds of the first API call past expiry, so a token still expired after this window has
-    // no other maintainer — GUI clients like the Claude desktop app keep their own credential
-    // store and never renew this keychain item.
-    static let selfRefreshGrace: TimeInterval = 10 * 60
-    // Floor between self-refresh attempts after a transient failure (network, 5xx, throttling).
-    static let selfRefreshRetryFloor: TimeInterval = 10 * 60
+    // Floor between detached-account refresh attempts after a transient failure.
+    static let detachedRefreshRetryFloor: TimeInterval = 10 * 60
     // Floor after the server declared the refresh token dead (invalid_grant): only a fresh
     // Claude Code login can mint a new pair, so retrying sooner is pure noise.
-    static let selfRefreshDeadGrantRetryFloor: TimeInterval = 24 * 60 * 60
+    static let detachedRefreshDeadGrantRetryFloor: TimeInterval = 24 * 60 * 60
     // Floor between real `/usage` network calls per account. Bursty triggers (panel open, foreground,
     // statusLine change) within this window reuse the last live snapshot instead of re-hitting the
     // endpoint, which keeps QuotaBar from tripping the endpoint's own per-account rate limit.
@@ -41,7 +35,7 @@ struct ClaudeCodeProvider: Provider {
     static let liveUsageStaleMax: TimeInterval = 30 * 60
     // Cached OAuth data older than this no longer fills gaps in the statusLine snapshot;
     // day-old numbers presented next to live ones mislead more than they inform.
-    static let historicalFillMaxAge: TimeInterval = 24 * 60 * 60
+    static let historicalFillMaxAge: TimeInterval = liveUsageStaleMax
     static let rateLimitTranscriptLookback: TimeInterval = 24 * 60 * 60
     static let recentTranscriptFileLimit = 16
     static let transcriptTailByteLimit: UInt64 = 512 * 1024

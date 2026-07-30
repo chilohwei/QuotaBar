@@ -33,7 +33,7 @@ extension AppState {
 
     func refreshActiveAccount(for tool: ToolKind, syncInstalled: Bool, intent: RefreshIntent) async {
         if syncInstalled {
-            await syncInstalledCurrentAccount(for: tool)
+            await syncInstalledCurrentAccount(for: tool, intent: intent)
         }
         guard let account = activeAccount(for: tool) else { return }
         await refreshQuota(for: account, intent: intent)
@@ -99,7 +99,9 @@ extension AppState {
         guard !Task.isCancelled else { return }
         switch reason {
         case .claudeStatusLineChanged:
-            await refreshActiveAccount(for: .claudeCode, syncInstalled: false, intent: .background)
+            // Claude rotates a single-use refresh-token pair while serving CLI requests.
+            // Capture that pair before the next account switch overwrites the shared keychain.
+            await refreshActiveAccount(for: .claudeCode, syncInstalled: true, intent: .local)
         case .credentialsChanged(let tool):
             await refreshAfterCredentialChange(for: tool)
         case .appForegrounded:
@@ -111,11 +113,22 @@ extension AppState {
 
     func refreshAfterCredentialChange(for tool: ToolKind) async {
         guard supportedTools.contains(tool) else { return }
+        guard await beginCredentialSync(for: tool) else { return }
+        defer { finishCredentialSync(for: tool) }
         let provider = provider(for: tool)
 
         do {
             var secret = try await provider.importCurrentCredentials()
             guard !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return
+            }
+            if absorbCredentialSyncForPendingDeletion(
+                tool: tool,
+                provider: provider,
+                secret: secret
+            ) {
+                credentialSignatureByTool[tool] = credentialEventSignature(secret: secret, provider: provider)
+                AppLog.refresh.info("Skipped credential event for pending-deletion \(tool.rawValue, privacy: .public) account")
                 return
             }
 
@@ -163,12 +176,23 @@ extension AppState {
         }
     }
 
-    func applyActiveSelectionToInstalledTool(_ tool: ToolKind) async {
+    func applyActiveSelectionToInstalledTool(
+        _ tool: ToolKind,
+        discardedAccount: Account? = nil
+    ) async {
         guard let account = activeAccount(for: tool) else { return }
         let provider = provider(for: tool)
         do {
-            let secret = try await resolveSecret(for: account, provider: provider)
-            try await provider.activate(account: account, secret: secret)
+            if tool == .claudeCode {
+                try await performAccountActivation(
+                    account,
+                    captureMissingCurrentAccount: false,
+                    discardedAccount: discardedAccount
+                )
+            } else {
+                let secret = try await resolveSecret(for: account, provider: provider)
+                try await provider.activate(account: account, secret: secret)
+            }
         } catch {
             AppLog.account.error("Apply active selection failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
             errorByAccount[account.id] = text.switchAccountFailedMessage(resolvedErrorMessage(error))
@@ -213,8 +237,13 @@ extension AppState {
     }
 
     @discardableResult
-    func syncInstalledCurrentAccount(for tool: ToolKind) async -> Account? {
+    func syncInstalledCurrentAccount(
+        for tool: ToolKind,
+        intent: RefreshIntent = .background
+    ) async -> Account? {
         guard supportedTools.contains(tool) else { return nil }
+        guard await beginCredentialSync(for: tool) else { return nil }
+        defer { finishCredentialSync(for: tool) }
         let provider = provider(for: tool)
 
         do {
@@ -222,8 +251,17 @@ extension AppState {
             guard !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return nil
             }
-
-            if let refreshed = try? await provider.refreshSecretIfNeeded(secret) {
+            if absorbCredentialSyncForPendingDeletion(
+                tool: tool,
+                provider: provider,
+                secret: secret
+            ) {
+                credentialSignatureByTool[tool] = credentialEventSignature(secret: secret, provider: provider)
+                AppLog.account.info("Skipped credential sync for pending-deletion \(tool.rawValue, privacy: .public) account")
+                return nil
+            }
+            if intent.allowsProviderCredentialRefresh,
+               let refreshed = try? await provider.refreshSecretIfNeeded(secret) {
                 if refreshed != secret {
                     try? await provider.updateCurrentCredentials(refreshed)
                 }
@@ -266,6 +304,29 @@ extension AppState {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Claude's credential files and keychain describe one process-global account. Keep imports
+    /// outside the replacement transaction so a late file event cannot reactivate the old account
+    /// after the new keychain pair has been installed.
+    func beginCredentialSync(for tool: ToolKind) async -> Bool {
+        guard tool == .claudeCode else { return true }
+        while activatingTools.contains(tool) || (credentialSyncCountByTool[tool] ?? 0) > 0 {
+            guard !Task.isCancelled else { return false }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        credentialSyncCountByTool[tool, default: 0] += 1
+        return true
+    }
+
+    func finishCredentialSync(for tool: ToolKind) {
+        guard tool == .claudeCode,
+              let count = credentialSyncCountByTool[tool] else { return }
+        if count <= 1 {
+            credentialSyncCountByTool.removeValue(forKey: tool)
+        } else {
+            credentialSyncCountByTool[tool] = count - 1
+        }
+    }
+
     func refreshAccounts(_ targetAccounts: [Account], intent: RefreshIntent = .background) async {
         guard !targetAccounts.isEmpty else { return }
 
@@ -289,7 +350,8 @@ extension AppState {
 
     func primeRefreshState(for targetAccounts: [Account]) {
         for account in targetAccounts where supportedTools.contains(account.tool) {
-            guard !refreshingAccountIDs.contains(account.id) else { continue }
+            guard !refreshingAccountIDs.contains(account.id),
+                  !activatingTools.contains(account.tool) else { continue }
             loadStateByAccount[account.id] = quotaByAccount[account.id] == nil ? .loadingInitial : .refreshing
         }
     }
@@ -349,9 +411,15 @@ extension AppState {
 
     func refreshQuota(for account: Account, intent: RefreshIntent = .background) async {
         guard !refreshingAccountIDs.contains(account.id) else { return }
-        if intent.bypassesAppBackoff {
+        guard !activatingTools.contains(account.tool) else {
+            restoreRefreshStateAfterSkippedRefresh(for: account)
+            return
+        }
+        if intent == .manual {
             refreshBackoffUntilByAccount[account.id] = nil
-        } else if let retryAt = refreshBackoffUntilByAccount[account.id], retryAt > Date() {
+        } else if !intent.bypassesAppBackoff,
+                  let retryAt = refreshBackoffUntilByAccount[account.id],
+                  retryAt > Date() {
             AppLog.refresh.debug("Skipping account \(account.id.uuidString, privacy: .public) until \(retryAt, privacy: .public)")
             return
         }
@@ -360,21 +428,40 @@ extension AppState {
 
         AppLog.refresh.info("Refreshing account \(account.id.uuidString, privacy: .public) for \(account.tool.rawValue, privacy: .public), intent=\(intent.rawValue, privacy: .public)")
         refreshingAccountIDs.insert(account.id)
+        refreshingToolByAccountID[account.id] = account.tool
         loadStateByAccount[account.id] = hadSnapshot ? .refreshing : .loadingInitial
         defer {
             refreshingAccountIDs.remove(account.id)
+            refreshingToolByAccountID.removeValue(forKey: account.id)
             if loadStateByAccount[account.id] == .refreshing || loadStateByAccount[account.id] == .loadingInitial {
                 loadStateByAccount[account.id] = quotaByAccount[account.id] == nil ? .idle : .loaded
             }
         }
 
         do {
-            let secret = try await resolveSecret(for: account, provider: provider)
-            var refreshedSecret = try await provider.refreshSecretIfNeeded(secret)
-            if refreshedSecret != secret {
-                try await persistRefreshedSecret(
+            let resolvedSecret = try await resolveSecret(for: account, provider: provider)
+            let storedSecretAtStart = account.tool == .claudeCode
+                ? storedSecretSnapshot(for: account)
+                : nil
+            let secret = if let storedSecretAtStart {
+                (try? provider.reconcileImportedSecret(
+                    resolvedSecret,
+                    withStoredSecret: storedSecretAtStart
+                )) ?? resolvedSecret
+            } else {
+                resolvedSecret
+            }
+            var refreshedSecret = intent.allowsProviderCredentialRefresh
+                ? try await provider.refreshSecretIfNeeded(secret)
+                : secret
+            if refreshedSecret != secret
+                || (account.tool == .claudeCode
+                    && storedSecretAtStart != nil
+                    && refreshedSecret != storedSecretAtStart) {
+                refreshedSecret = try await persistRefreshedSecret(
                     refreshedSecret,
                     previousSecret: secret,
+                    expectedStoredSecret: storedSecretAtStart,
                     account: account,
                     provider: provider
                 )
@@ -389,13 +476,15 @@ extension AppState {
                     throw error
                 }
                 if forcedSecret != refreshedSecret {
-                    try await persistRefreshedSecret(
+                    refreshedSecret = try await persistRefreshedSecret(
                         forcedSecret,
                         previousSecret: refreshedSecret,
+                        expectedStoredSecret: account.tool == .claudeCode
+                            ? storedSecretSnapshot(for: account)
+                            : nil,
                         account: account,
                         provider: provider
                     )
-                    refreshedSecret = forcedSecret
                 }
                 snapshot = try await provider.fetchQuota(account: account, secret: refreshedSecret, intent: .manual)
             }
@@ -426,7 +515,9 @@ extension AppState {
                 errorRequiresUserActionByAccount[account.id] = nil
                 loadStateByAccount[account.id] = loadStateAfterFailedRefresh(for: account)
                 refreshFailureCountByAccount[account.id] = nil
-                refreshBackoffUntilByAccount[account.id] = nil
+                if !intent.preservesAppBackoffAfterSuccess {
+                    refreshBackoffUntilByAccount[account.id] = nil
+                }
                 if renamed || settingsChanged || readableNameUpdated {
                     try await persistState()
                 }
@@ -439,7 +530,9 @@ extension AppState {
             errorRequiresUserActionByAccount[account.id] = nil
             loadStateByAccount[account.id] = .loaded
             refreshFailureCountByAccount[account.id] = nil
-            refreshBackoffUntilByAccount[account.id] = nil
+            if !intent.preservesAppBackoffAfterSuccess {
+                refreshBackoffUntilByAccount[account.id] = nil
+            }
             do {
                 try quotaCacheStore.save(snapshot, accountID: account.id)
             } catch {
@@ -461,6 +554,20 @@ extension AppState {
             errorByAccount[account.id] = text.refreshAccountFailedMessage(resolvedErrorMessage(error))
             errorRequiresUserActionByAccount[account.id] = errorRequiresUserAction(error)
             loadStateByAccount[account.id] = loadStateAfterFailedRefresh(for: account)
+        }
+    }
+
+    func restoreRefreshStateAfterSkippedRefresh(for account: Account) {
+        guard loadStateByAccount[account.id] == .refreshing
+            || loadStateByAccount[account.id] == .loadingInitial else {
+            return
+        }
+        if errorByAccount[account.id] != nil {
+            loadStateByAccount[account.id] = quotaByAccount[account.id] == nil ? .failed : .stale
+        } else if let snapshot = quotaByAccount[account.id] {
+            loadStateByAccount[account.id] = loadStateForCachedSnapshot(snapshot)
+        } else {
+            loadStateByAccount[account.id] = .idle
         }
     }
 

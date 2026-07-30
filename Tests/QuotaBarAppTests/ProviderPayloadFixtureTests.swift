@@ -977,7 +977,16 @@ struct ProviderPayloadFixtureTests {
             liveSnapshot: staleLiveCache,
             statusLineSnapshot: statusLine,
             hasUsableStatusLineSnapshot: true
-        ).source == "Claude Code StatusLine")
+        ).source == "Claude Code OAuth Cache")
+        let recentCachedOAuth = liveOAuth.replacing(
+            source: "Claude Code OAuth Cache",
+            updatedAt: statusLine.updatedAt.addingTimeInterval(-30)
+        )
+        #expect(provider.preferredClaudeSnapshot(
+            liveSnapshot: recentCachedOAuth,
+            statusLineSnapshot: statusLine,
+            hasUsableStatusLineSnapshot: true
+        ).source == "Claude Code OAuth Cache")
 
         let blockedStatusLine = QuotaSnapshot(
             source: "Claude Code StatusLine",

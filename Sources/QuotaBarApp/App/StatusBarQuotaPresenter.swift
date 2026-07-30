@@ -3,28 +3,40 @@ import Foundation
 struct StatusBarQuotaInput {
     let tool: ToolKind
     let accountName: String
-    let quota: QuotaSnapshot
+    let quota: QuotaSnapshot?
     var alternativeAccountName: String?
 }
 
 struct StatusBarQuotaPresenter {
     static func entries(for inputs: [StatusBarQuotaInput]) -> [StatusBarQuotaEntry] {
-        inputs.compactMap { input in
+        inputs.map { input in
             // Two stacked lines next to the logo: top = primary window (e.g. 5h),
-            // bottom = secondary window (e.g. weekly). Read live from the snapshot.
-            let lines = [input.quota.primaryPanelMetric, input.quota.secondaryPanelMetric]
-                .compactMap(quotaLine(for:))
-            guard !lines.isEmpty else { return nil }
+            // bottom = secondary window (e.g. weekly). Fall back to any other real
+            // metric, and keep the tool visible with an honest placeholder while
+            // Claude Code is still waiting for its first rate-limit payload.
+            var lines = [
+                input.quota?.primaryPanelMetric,
+                input.quota?.secondaryPanelMetric
+            ].compactMap(quotaLine(for:))
+            if lines.isEmpty,
+               let tertiaryLine = quotaLine(for: input.quota?.tertiaryPanelMetric) {
+                lines = [tertiaryLine]
+            }
+            let displayLines = lines.isEmpty
+                ? [StatusBarQuotaLine(text: "--", level: .normal)]
+                : lines
 
-            let remainingRatio = min(max(input.quota.statusBarMetric?.ratio ?? 0, 0), 1)
+            let remainingPercent = input.quota?.statusBarMetric?.ratio.map {
+                Int((min(max($0, 0), 1) * 100).rounded())
+            }
             return StatusBarQuotaEntry(
                 tool: input.tool,
                 accountName: input.accountName,
-                remainingPercent: Int(max(remainingRatio * 100, 0).rounded()),
-                source: input.quota.source,
-                updatedAt: input.quota.updatedAt,
-                availabilityStatus: input.quota.effectiveAvailabilityStatus,
-                lines: lines,
+                remainingPercent: remainingPercent,
+                source: input.quota?.source,
+                updatedAt: input.quota?.updatedAt,
+                availabilityStatus: input.quota?.effectiveAvailabilityStatus,
+                lines: displayLines,
                 alternativeAccountName: input.alternativeAccountName
             )
         }
@@ -36,13 +48,34 @@ struct StatusBarQuotaPresenter {
         }
         return entries
             .map { entry in
-                var line = text.statusBarTooltip(
-                    tool: entry.tool,
-                    remainingPercent: entry.remainingPercent,
-                    accountName: entry.accountName,
-                    metadata: text.quotaSnapshotMeta(source: entry.source, updatedAt: entry.updatedAt),
-                    availability: entry.availabilityStatus
-                )
+                let metadata: String?
+                if let source = entry.source, let updatedAt = entry.updatedAt {
+                    metadata = text.quotaSnapshotMeta(source: source, updatedAt: updatedAt)
+                } else {
+                    metadata = nil
+                }
+                var line: String
+                if let remainingPercent = entry.remainingPercent {
+                    line = text.statusBarTooltip(
+                        tool: entry.tool,
+                        remainingPercent: remainingPercent,
+                        accountName: entry.accountName,
+                        metadata: metadata,
+                        availability: entry.availabilityStatus
+                    )
+                } else {
+                    var parts = [
+                        "\(entry.tool.displayName) \(entry.accountName)",
+                        text.string(.waitingData)
+                    ]
+                    if let availability = entry.availabilityStatus.flatMap(text.quotaAvailabilityText) {
+                        parts.append(availability)
+                    }
+                    if let metadata {
+                        parts.append(metadata)
+                    }
+                    line = parts.joined(separator: " · ")
+                }
                 if let alternative = entry.alternativeAccountName {
                     line += "\n· " + text.alternativeAccountAvailable(alternative)
                 }

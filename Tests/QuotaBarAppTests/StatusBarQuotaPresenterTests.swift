@@ -107,4 +107,47 @@ struct StatusBarQuotaPresenterTests {
 
         #expect(try #require(entries.first).remainingPercent == 100)
     }
+
+    @Test("visible tool stays in the menu bar while quota is unavailable")
+    func unavailableQuotaKeepsVisibleEntry() throws {
+        let entries = StatusBarQuotaPresenter.entries(for: [
+            StatusBarQuotaInput(
+                tool: .claudeCode,
+                accountName: "Claude",
+                quota: nil
+            )
+        ])
+
+        let entry = try #require(entries.first)
+        #expect(entry.lines.map(\.text) == ["--"])
+        #expect(entry.remainingPercent == nil)
+        let tooltip = StatusBarQuotaPresenter.tooltip(
+            for: entries,
+            text: AppText(language: .simplifiedChinese)
+        )
+        #expect(tooltip.contains("暂无数据"))
+        #expect(!tooltip.contains("0%"))
+    }
+
+    @Test("tertiary quota is used when primary windows are absent")
+    func tertiaryQuotaFallback() throws {
+        let entries = StatusBarQuotaPresenter.entries(for: [
+            StatusBarQuotaInput(
+                tool: .claudeCode,
+                accountName: "Claude",
+                quota: QuotaSnapshot(
+                    source: "Claude Code StatusLine",
+                    primary: nil,
+                    secondary: nil,
+                    tertiary: QuotaWindow(label: "Sonnet", used: 25, limit: 100, resetAt: nil),
+                    creditsRemaining: nil,
+                    creditsTotal: nil,
+                    updatedAt: Date(timeIntervalSince1970: 1),
+                    note: nil
+                )
+            )
+        ])
+
+        #expect(try #require(entries.first).lines.map(\.text) == ["75%"])
+    }
 }

@@ -115,20 +115,8 @@ extension CodexProvider {
                 opensDevicePrompt: false
             ),
             CodexLoginAttempt(
-                name: "兼容浏览器登录",
-                arguments: ["login"],
-                timeout: 180,
-                opensDevicePrompt: false
-            ),
-            CodexLoginAttempt(
                 name: "设备码登录",
                 arguments: ["login", "-c", fileCredentialStoreOverride, "--device-auth"],
-                timeout: 15 * 60,
-                opensDevicePrompt: true
-            ),
-            CodexLoginAttempt(
-                name: "兼容设备码登录",
-                arguments: ["login", "--device-auth"],
                 timeout: 15 * 60,
                 opensDevicePrompt: true
             )

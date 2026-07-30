@@ -9,6 +9,7 @@ struct ClaudeQuotaStalenessTests {
         secondary: QuotaWindow? = nil,
         isQuotaBlocked: Bool? = nil,
         availabilityStatus: QuotaAvailabilityStatus? = nil,
+        note: String? = nil,
         updatedAt: Date = Date()
     ) -> QuotaSnapshot {
         QuotaSnapshot(
@@ -20,7 +21,7 @@ struct ClaudeQuotaStalenessTests {
             updatedAt: updatedAt,
             isQuotaBlocked: isQuotaBlocked,
             availabilityStatus: availabilityStatus,
-            note: nil
+            note: note
         )
     }
 
@@ -73,6 +74,46 @@ struct ClaudeQuotaStalenessTests {
         #expect(pruned.availabilityStatus == .quotaExhausted)
     }
 
+    @Test("fresh OAuth recovery does not inherit stale fallback block state")
+    func mergedSnapshotRecomputesBlockStateFromSelectedWindows() {
+        let provider = ClaudeCodeProvider()
+        let healthyPrimary = QuotaWindow(label: "5h", used: 20, limit: 100, resetAt: nil)
+        let healthySecondary = QuotaWindow(label: "7d", used: 30, limit: 100, resetAt: nil)
+        let exhaustedSecondary = QuotaWindow(label: "7d", used: 100, limit: 100, resetAt: nil)
+        let preferred = snapshot(
+            primary: healthyPrimary,
+            isQuotaBlocked: false
+        )
+        for (availability, note) in [
+            (QuotaAvailabilityStatus.sessionRateLimited, QuotaNoteCatalog.claudeRateLimitReached),
+            (.authRateLimited, QuotaNoteCatalog.claudeUsageRateLimited)
+        ] {
+            let staleBlockedFallback = snapshot(
+                primary: nil,
+                secondary: healthySecondary,
+                isQuotaBlocked: true,
+                availabilityStatus: availability,
+                note: note
+            )
+            let recovered = provider.mergeClaudeSnapshot(
+                preferred,
+                fillingMissingMetricsFrom: staleBlockedFallback
+            )
+            #expect(recovered.secondary == healthySecondary)
+            #expect(recovered.isQuotaBlocked == false)
+            #expect(recovered.availabilityStatus == nil)
+            #expect(recovered.note == nil)
+            #expect(recovered.effectiveAvailabilityStatus == .normal)
+        }
+
+        let selectedExhaustedWindow = provider.mergeClaudeSnapshot(
+            preferred,
+            fillingMissingMetricsFrom: snapshot(primary: nil, secondary: exhaustedSecondary)
+        )
+        #expect(selectedExhaustedWindow.isQuotaBlocked == true)
+        #expect(selectedExhaustedWindow.availabilityStatus == .quotaExhausted)
+    }
+
     @Test("stale live fallback rejects a cache whose windows all reset")
     func staleFallbackRejectsFullyExpiredCache() {
         let provider = ClaudeCodeProvider()
@@ -105,6 +146,394 @@ struct ClaudeQuotaStalenessTests {
         let fallback = try #require(provider.staleLiveFallback(cached))
         #expect(fallback.source == "Claude Code OAuth Cache")
         #expect(fallback.primary?.label == "5h")
+    }
+
+    @Test("usage rate-limit marker suppresses automatic traffic but manual refresh can retry")
+    func freshUsageRateLimitMarkerSuppressesNetworkWithoutCache() {
+        let provider = ClaudeCodeProvider()
+        let now = Date()
+
+        for intent in [RefreshIntent.background, .visible, .local] {
+            let preflight = provider.oauthUsagePreflight(
+                cached: nil,
+                rateLimitMarkerIsFresh: true,
+                intent: intent,
+                now: now
+            )
+            #expect(!preflight.shouldRequestNetwork)
+            #expect(preflight.snapshot == nil)
+        }
+        let manual = provider.oauthUsagePreflight(
+            cached: nil,
+            rateLimitMarkerIsFresh: true,
+            intent: .manual,
+            now: now
+        )
+        #expect(manual.shouldRequestNetwork)
+        #expect(manual.snapshot == nil)
+    }
+
+    @Test("usage rate-limit deadline honors Retry-After with a polling floor")
+    func usageRateLimitDeadlineHonorsServer() {
+        let now = Date()
+        let short = ClaudeCodeProvider.usageRateLimitDeadline(
+            retryAfter: now.addingTimeInterval(30),
+            now: now
+        )
+        let long = ClaudeCodeProvider.usageRateLimitDeadline(
+            retryAfter: now.addingTimeInterval(3600),
+            now: now
+        )
+        let unspecified = ClaudeCodeProvider.usageRateLimitDeadline(retryAfter: nil, now: now)
+
+        #expect(short == now.addingTimeInterval(ClaudeCodeProvider.liveUsageMinFetchInterval))
+        #expect(long == now.addingTimeInterval(3600))
+        #expect(unspecified == now.addingTimeInterval(ClaudeCodeProvider.usageRateLimitMarkerFreshness))
+    }
+
+    @Test("local statusLine refresh never requests OAuth usage")
+    func localStatusLineRefreshNeverRequestsOAuthUsage() {
+        let provider = ClaudeCodeProvider()
+        let preflight = provider.oauthUsagePreflight(
+            cached: nil,
+            rateLimitMarkerIsFresh: false,
+            intent: .local,
+            now: Date()
+        )
+
+        #expect(!preflight.shouldRequestNetwork)
+        #expect(preflight.snapshot == nil)
+    }
+
+    @Test("OAuth usage 429 without cache does not require a later CLI event")
+    func oauthUsageRateLimitWithoutCacheRemainsSelfRecovering() async throws {
+        let provider = ClaudeCodeProvider()
+        let credentialsJSON = """
+        {
+          "claudeAiOauth": {
+            "accessToken": "fixture-access-token",
+            "refreshToken": "fixture-refresh-token",
+            "expiresAt": 4102444800000
+          }
+        }
+        """
+        let credentials = ClaudeCodeProvider.ClaudeCodeCredentials(
+            loggedIn: true,
+            authMethod: "oauth",
+            apiProvider: "firstParty",
+            userID: nil,
+            claudeExecutablePath: nil,
+            keychainCredentials: nil,
+            authStatusJSON: nil,
+            claudeSettingsJSON: nil,
+            claudeJSON: nil,
+            claudeCredentialsJSON: credentialsJSON,
+            claudeAuthJSON: nil
+        )
+
+        let cacheKey = try #require(provider.usageCacheKey(credentials))
+        defer { provider.clearUsageRateLimitMarker(cacheKey) }
+        let snapshot = try await provider.fetchOAuthUsageSnapshot(
+            credentials: credentials,
+            intent: .background
+        ) { _ in
+            throw OAuthUsageFetchError.rateLimited(
+                retryAfter: Date().addingTimeInterval(6 * 60 * 60)
+            )
+        }
+
+        #expect(snapshot == nil)
+        #expect(provider.isAuthRateLimited(credentials))
+    }
+
+    @Test("OAuth retry throttling is not misreported as invalid credentials")
+    func oauthRetryRateLimitKeepsAuthenticationValid() async throws {
+        func credentials(accessToken: String) -> ClaudeCodeProvider.ClaudeCodeCredentials {
+            ClaudeCodeProvider.ClaudeCodeCredentials(
+                loggedIn: true,
+                authMethod: "oauth",
+                apiProvider: "firstParty",
+                userID: nil,
+                claudeExecutablePath: nil,
+                keychainCredentials: """
+                {"claudeAiOauth":{"accessToken":"\(accessToken)","refreshToken":"refresh-\(accessToken)","expiresAt":4102444800000}}
+                """,
+                authStatusJSON: nil,
+                claudeSettingsJSON: nil,
+                claudeJSON: #"{"oauthAccount":{"accountUuid":"cccccccc-cccc-4ccc-cccc-cccccccccccc"}}"#,
+                claudeCredentialsJSON: nil,
+                claudeAuthJSON: nil
+            )
+        }
+
+        let provider = ClaudeCodeProvider()
+        let original = credentials(accessToken: "old-token")
+        let latest = credentials(accessToken: "new-token")
+        let cacheKey = try #require(provider.usageCacheKey(original))
+        defer { provider.clearUsageRateLimitMarker(cacheKey) }
+        var attempts = 0
+
+        let snapshot = try await provider.fetchOAuthUsageSnapshot(
+            credentials: original,
+            intent: .manual,
+            requestUsage: { _ in
+                attempts += 1
+                if attempts == 1 {
+                    throw OAuthUsageFetchError.unauthorized
+                }
+                throw OAuthUsageFetchError.rateLimited(retryAfter: nil)
+            },
+            readLatestCredentials: { latest }
+        )
+
+        #expect(snapshot == nil)
+        #expect(attempts == 2)
+        #expect(provider.isAuthRateLimited(original))
+    }
+
+    @Test("OAuth 401 never retries with another account's live token")
+    func oauthUnauthorizedDoesNotCrossAccounts() async throws {
+        func credentials(accountUuid: String, accessToken: String) -> ClaudeCodeProvider.ClaudeCodeCredentials {
+            let tokenJSON = """
+            {"claudeAiOauth":{"accessToken":"\(accessToken)","refreshToken":"refresh-\(accessToken)","expiresAt":4102444800000}}
+            """
+            let accountJSON = """
+            {"oauthAccount":{"accountUuid":"\(accountUuid)"}}
+            """
+            return ClaudeCodeProvider.ClaudeCodeCredentials(
+                loggedIn: true,
+                authMethod: "oauth",
+                apiProvider: "firstParty",
+                userID: nil,
+                claudeExecutablePath: nil,
+                keychainCredentials: tokenJSON,
+                authStatusJSON: nil,
+                claudeSettingsJSON: nil,
+                claudeJSON: accountJSON,
+                claudeCredentialsJSON: nil,
+                claudeAuthJSON: nil
+            )
+        }
+
+        let provider = ClaudeCodeProvider()
+        let stored = credentials(
+            accountUuid: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+            accessToken: "account-a-token"
+        )
+        let liveOtherAccount = credentials(
+            accountUuid: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+            accessToken: "account-b-token"
+        )
+        var requestedTokens: [String] = []
+
+        do {
+            _ = try await provider.fetchOAuthUsageSnapshot(
+                credentials: stored,
+                // Bypass any rate-limit marker left by another parallel fixture; this test is
+                // specifically about 401 account isolation.
+                intent: .manual,
+                requestUsage: { token in
+                    requestedTokens.append(token)
+                    if token == "account-a-token" {
+                        throw OAuthUsageFetchError.unauthorized
+                    }
+                    return [:]
+                },
+                readLatestCredentials: {
+                    liveOtherAccount
+                }
+            )
+            Issue.record("401 should enter detached-account credential recovery")
+        } catch let error as ProviderError {
+            guard case .invalidCredentials = error else {
+                Issue.record("unexpected provider error: \(error)")
+                return
+            }
+        }
+        #expect(requestedTokens == ["account-a-token"])
+    }
+
+    @Test("detached account can rotate a server-rejected token before local expiry")
+    func detachedAuthenticationRecoveryForcesRefresh() async throws {
+        let refreshToken = "fixture-\(UUID().uuidString)"
+        let storedTokenJSON = """
+        {"claudeAiOauth":{"accessToken":"stored-access","refreshToken":"\(refreshToken)","expiresAt":4102444800000}}
+        """
+        let liveOtherTokenJSON = """
+        {"claudeAiOauth":{"accessToken":"other-access","refreshToken":"other-refresh","expiresAt":4102444800000}}
+        """
+        let stored = ClaudeCodeProvider.ClaudeCodeCredentials(
+            loggedIn: true,
+            authMethod: "oauth",
+            apiProvider: "firstParty",
+            userID: nil,
+            claudeExecutablePath: nil,
+            keychainCredentials: storedTokenJSON,
+            authStatusJSON: nil,
+            claudeSettingsJSON: nil,
+            claudeJSON: nil,
+            claudeCredentialsJSON: nil,
+            claudeAuthJSON: nil
+        )
+        let provider = ClaudeCodeProvider()
+        let now = Date()
+
+        let notForced = await provider.refreshDetachedStoredCredentials(
+            stored,
+            liveKeychainCredentials: liveOtherTokenJSON,
+            force: false,
+            now: now,
+            requestRefresh: { _, _ in
+                Issue.record("locally valid token must not refresh without an authentication failure")
+                return ClaudeCodeProvider.RefreshedOAuthToken(
+                    accessToken: "unexpected",
+                    refreshToken: "unexpected",
+                    expiresAt: nil
+                )
+            }
+        )
+        #expect(notForced == nil)
+
+        let refreshed = await provider.refreshDetachedStoredCredentials(
+            stored,
+            liveKeychainCredentials: liveOtherTokenJSON,
+            force: true,
+            now: now,
+            requestRefresh: { receivedRefreshToken, _ in
+                #expect(receivedRefreshToken == refreshToken)
+                return ClaudeCodeProvider.RefreshedOAuthToken(
+                    accessToken: "renewed-access",
+                    refreshToken: "renewed-refresh",
+                    expiresAt: now.addingTimeInterval(28_800)
+                )
+            }
+        )
+        let refreshedToken = try #require(refreshed.flatMap(provider.parseOAuthToken(from:)))
+        #expect(refreshedToken.accessToken == "renewed-access")
+        #expect(refreshedToken.refreshToken == "renewed-refresh")
+        #expect(provider.isAuthenticationFailure(ProviderError.invalidCredentials))
+        #expect(!provider.isAuthenticationFailure(ProviderError.network("offline")))
+    }
+
+    @Test("recent OAuth usage cache is explicitly labeled as cache")
+    func recentOAuthUsageCacheIsLabeled() throws {
+        let provider = ClaudeCodeProvider()
+        let now = Date()
+        let cachedAt = now.addingTimeInterval(-60)
+        let cached = ClaudeCodeProvider.CachedClaudeUsage(
+            schemaVersion: 1,
+            cachedAt: cachedAt,
+            snapshot: snapshot(
+                primary: QuotaWindow(label: "5h", used: 40, limit: 100, resetAt: now.addingTimeInterval(3600)),
+                updatedAt: cachedAt
+            )
+        )
+
+        let preflight = provider.oauthUsagePreflight(
+            cached: cached,
+            rateLimitMarkerIsFresh: false,
+            intent: .background,
+            now: now
+        )
+        let reused = try #require(preflight.snapshot)
+        #expect(!preflight.shouldRequestNetwork)
+        #expect(reused.source == "Claude Code OAuth Cache")
+        #expect(reused.updatedAt == cachedAt)
+        #expect(reused.primary?.used == 40)
+    }
+
+    @Test("only a fresh usable statusLine skips OAuth usage")
+    func freshUsableStatusLineSkipsOAuthUsage() {
+        let provider = ClaudeCodeProvider()
+        let capturedAt = Date()
+        let usable = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            primary: QuotaWindow(label: "5h", used: 12, limit: 100, resetAt: capturedAt.addingTimeInterval(3600)),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: capturedAt,
+            note: nil
+        )
+        let empty = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            primary: nil,
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: capturedAt,
+            note: nil
+        )
+
+        #expect(provider.shouldPreferFreshStatusLine(
+            usable,
+            intent: .local,
+            now: capturedAt.addingTimeInterval(60)
+        ))
+        for intent in [RefreshIntent.background, .visible, .manual] {
+            #expect(!provider.shouldPreferFreshStatusLine(
+                usable,
+                intent: intent,
+                now: capturedAt.addingTimeInterval(60)
+            ))
+        }
+        #expect(!provider.shouldPreferFreshStatusLine(
+            usable,
+            intent: .local,
+            now: capturedAt.addingTimeInterval(ClaudeCodeProvider.liveUsageMinFetchInterval + 1)
+        ))
+        #expect(!provider.shouldPreferFreshStatusLine(
+            empty,
+            intent: .local,
+            now: capturedAt.addingTimeInterval(60)
+        ))
+    }
+
+    @Test("day-old OAuth cache cannot fill a statusLine gap")
+    func dayOldOAuthCacheCannotFillStatusLineGap() {
+        let provider = ClaudeCodeProvider()
+        let now = Date()
+        let statusLine = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            primary: QuotaWindow(label: "5h", used: 12, limit: 100, resetAt: now.addingTimeInterval(3600)),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: now,
+            note: nil
+        )
+        let cachedSnapshot = snapshot(
+            primary: nil,
+            secondary: QuotaWindow(label: "7d", used: 73, limit: 100, resetAt: nil),
+            updatedAt: now.addingTimeInterval(-24 * 60 * 60)
+        )
+
+        let dayOld = ClaudeCodeProvider.CachedClaudeUsage(
+            schemaVersion: 1,
+            cachedAt: now.addingTimeInterval(-24 * 60 * 60),
+            snapshot: cachedSnapshot
+        )
+        let unchanged = provider.fillStatusLineSnapshot(
+            statusLine,
+            fromHistoricalOAuthCache: dayOld,
+            now: now
+        )
+        #expect(unchanged.source == "Claude Code StatusLine")
+        #expect(unchanged.primary?.used == 12)
+        #expect(unchanged.secondary == nil)
+
+        let recent = ClaudeCodeProvider.CachedClaudeUsage(
+            schemaVersion: 1,
+            cachedAt: now.addingTimeInterval(-29 * 60),
+            snapshot: cachedSnapshot
+        )
+        let filled = provider.fillStatusLineSnapshot(
+            statusLine,
+            fromHistoricalOAuthCache: recent,
+            now: now
+        )
+        #expect(filled.source == "Claude Code StatusLine")
+        #expect(filled.secondary?.used == 73)
     }
 
     @Test("stale-data age humanizes to minutes, hours, and days")
@@ -187,61 +616,13 @@ struct ClaudeQuotaStalenessTests {
         #expect(zh.localizedNote(note) == note)
     }
 
-    @Test("self-refresh waits out the grace window so an active CLI keeps first claim")
-    func selfRefreshGraceWindow() {
-        let now = Date()
-        let grace = ClaudeCodeProvider.selfRefreshGrace
-
-        func gate(expiredFor: TimeInterval?, blockedUntil: Date? = nil, intent: RefreshIntent = .background) -> Bool {
-            ClaudeCodeProvider.shouldAttemptSelfRefresh(
-                expiresAt: expiredFor.map { now.addingTimeInterval(-$0) },
-                blockedUntil: blockedUntil,
-                intent: intent,
-                now: now
-            )
-        }
-
-        // Still valid, freshly expired, or unknown expiry: the CLI may be mid-rotation — hands off.
-        #expect(!gate(expiredFor: -600))
-        #expect(!gate(expiredFor: 60))
-        #expect(!gate(expiredFor: grace - 1))
-        #expect(!gate(expiredFor: nil))
-
-        // Sat expired past the grace: no other maintainer exists, take over.
-        #expect(gate(expiredFor: grace))
-        #expect(gate(expiredFor: 6 * 3600))
-    }
-
-    @Test("self-refresh backoff blocks background retries but yields to manual refresh, never the grace")
-    func selfRefreshBackoff() {
-        let now = Date()
-        let expiredLongAgo: TimeInterval = 2 * ClaudeCodeProvider.selfRefreshGrace
-        let blocked = now.addingTimeInterval(600)
-
-        func gate(expiredFor: TimeInterval, blockedUntil: Date?, intent: RefreshIntent) -> Bool {
-            ClaudeCodeProvider.shouldAttemptSelfRefresh(
-                expiresAt: now.addingTimeInterval(-expiredFor),
-                blockedUntil: blockedUntil,
-                intent: intent,
-                now: now
-            )
-        }
-
-        #expect(!gate(expiredFor: expiredLongAgo, blockedUntil: blocked, intent: .background))
-        #expect(!gate(expiredFor: expiredLongAgo, blockedUntil: blocked, intent: .visible))
-        #expect(gate(expiredFor: expiredLongAgo, blockedUntil: blocked, intent: .manual))
-        // An elapsed block no longer gates.
-        #expect(gate(expiredFor: expiredLongAgo, blockedUntil: now.addingTimeInterval(-1), intent: .background))
-        // Manual bypasses the backoff but not the grace.
-        #expect(!gate(expiredFor: 60, blockedUntil: nil, intent: .manual))
-    }
-
     @Test("dead grants are recognized from the OAuth error body")
     func permanentRefreshFailureDetection() {
         func body(_ text: String) -> Data { Data(text.utf8) }
 
         #expect(ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body(#"{"error":"invalid_grant"}"#)))
         #expect(ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body("Invalid refresh token")))
+        #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body(#"{"error":"invalid_request"}"#)))
         #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body(#"{"error":"temporarily_unavailable"}"#)))
         #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: Data()))
     }

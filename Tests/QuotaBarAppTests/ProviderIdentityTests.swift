@@ -124,6 +124,7 @@ struct ProviderIdentityTests {
         let firstCredentials = try! provider.parseCredentials(first)
         let secondCredentials = try! provider.parseCredentials(second)
         #expect(!provider.claudeCredentialsRepresentSameAccount(firstCredentials, secondCredentials))
+        #expect(provider.claudeCredentialsRepresentDifferentAccounts(firstCredentials, secondCredentials))
         #expect(provider.shouldClearStatusLineSnapshot(previous: firstCredentials, next: secondCredentials))
     }
 
@@ -147,7 +148,31 @@ struct ProviderIdentityTests {
         let afterCredentials = try! provider.parseCredentials(after)
 
         #expect(provider.claudeCredentialsRepresentSameAccount(beforeCredentials, afterCredentials))
+        #expect(!provider.claudeCredentialsRepresentDifferentAccounts(beforeCredentials, afterCredentials))
         #expect(!provider.shouldClearStatusLineSnapshot(previous: beforeCredentials, next: afterCredentials))
+    }
+
+    @Test("Claude token rotation alone never proves accounts differ")
+    func claudeDifferentAccountCheckRequiresIdentity() throws {
+        let provider = ClaudeCodeProvider()
+        let first = try provider.parseCredentials(#"""
+        {
+          "loggedIn": true,
+          "authMethod": "oauth",
+          "apiProvider": "firstParty",
+          "keychainCredentials": "{\"claudeAiOauth\":{\"accessToken\":\"token-a\"}}"
+        }
+        """#)
+        let second = try provider.parseCredentials(#"""
+        {
+          "loggedIn": true,
+          "authMethod": "oauth",
+          "apiProvider": "firstParty",
+          "keychainCredentials": "{\"claudeAiOauth\":{\"accessToken\":\"token-b\"}}"
+        }
+        """#)
+
+        #expect(!provider.claudeCredentialsRepresentDifferentAccounts(first, second))
     }
 
     @Test("Claude usage cache keys are account-scoped despite shared userID")
@@ -197,6 +222,82 @@ struct ProviderIdentityTests {
         #expect(updated.claudeJSON == stored.claudeJSON)
         // Identity is untouched by rotation.
         #expect(provider.claudeCredentialsRepresentSameAccount(stored, updated))
+    }
+
+    @Test("Claude credential sync cannot overwrite a newer stored token pair")
+    func claudeCredentialSyncPreservesNewerStoredPair() throws {
+        let provider = ClaudeCodeProvider()
+        let now = Date()
+        func tokenJSON(access: String, refresh: String, expiresAt: Date) -> String {
+            jsonText([
+                "claudeAiOauth": [
+                    "accessToken": access,
+                    "refreshToken": refresh,
+                    "expiresAt": Int(expiresAt.timeIntervalSince1970 * 1000)
+                ]
+            ])
+        }
+        let liveOld = claudeSecret(
+            userID: "machine-id",
+            accountUuid: "8ff17ea7-ce42-4001-aaaa-000000000001",
+            email: "first@example.com",
+            keychainCredentials: tokenJSON(
+                access: "live-old",
+                refresh: "live-old-refresh",
+                expiresAt: now.addingTimeInterval(-60)
+            )
+        )
+        let storedNew = claudeSecret(
+            userID: "machine-id",
+            accountUuid: "8ff17ea7-ce42-4001-aaaa-000000000001",
+            email: "first@example.com",
+            keychainCredentials: tokenJSON(
+                access: "stored-new",
+                refresh: "stored-new-refresh",
+                expiresAt: now.addingTimeInterval(28_800)
+            )
+        )
+
+        let reconciled = try provider.reconcileImportedSecret(liveOld, withStoredSecret: storedNew)
+        let token = try #require(provider.parseOAuthToken(from: provider.parseCredentials(reconciled)))
+
+        #expect(token.accessToken == "stored-new")
+        #expect(token.refreshToken == "stored-new-refresh")
+    }
+
+    @Test("Claude account replacement requires a captured live OAuth keychain pair")
+    func claudeReplacementCaptureGate() {
+        let provider = ClaudeCodeProvider()
+        let capturedOAuth = claudeSecret(
+            userID: "machine-id",
+            accountUuid: "8ff17ea7-ce42-4001-aaaa-000000000001",
+            email: "first@example.com",
+            keychainCredentials: keychainJSON(accessToken: "token-a", refreshToken: "refresh-a")
+        )
+        let fileOnlyOAuth = jsonText([
+            "loggedIn": true,
+            "authMethod": "oauth",
+            "apiProvider": "firstParty",
+            "keychainCredentials": NSNull(),
+            "claudeCredentialsJSON": keychainJSON(accessToken: "token-a", refreshToken: "refresh-a")
+        ])
+        let accessOnlyOAuth = claudeSecret(
+            userID: "machine-id",
+            accountUuid: "8ff17ea7-ce42-4001-aaaa-000000000001",
+            email: "first@example.com",
+            keychainCredentials: keychainJSON(accessToken: "token-a", refreshToken: "")
+        )
+        let apiKey = jsonText([
+            "loggedIn": true,
+            "authMethod": "api_key",
+            "apiProvider": "api_key",
+            "keychainCredentials": NSNull()
+        ])
+
+        #expect(provider.canSafelyReplaceInstalledCredentials(afterImport: capturedOAuth))
+        #expect(!provider.canSafelyReplaceInstalledCredentials(afterImport: fileOnlyOAuth))
+        #expect(!provider.canSafelyReplaceInstalledCredentials(afterImport: accessOnlyOAuth))
+        #expect(provider.canSafelyReplaceInstalledCredentials(afterImport: apiKey))
     }
 
     @Test("Claude oauthAccount merge preserves live project history and caches")

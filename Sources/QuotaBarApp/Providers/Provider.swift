@@ -14,6 +14,8 @@ protocol Provider: Sendable {
     func fetchQuota(account: Account, secret: String, intent: RefreshIntent) async throws -> QuotaSnapshot
     func refreshSecretIfNeeded(_ secret: String) async throws -> String
     func refreshSecretAfterAuthenticationFailure(_ secret: String) async throws -> String?
+    func reconcileImportedSecret(_ importedSecret: String, withStoredSecret storedSecret: String) throws -> String
+    func canSafelyReplaceInstalledCredentials(afterImport secret: String) -> Bool
     func persistRefreshedSecret(_ secret: String, for account: Account, isActive: Bool) async throws
     func isAuthenticationFailure(_ error: Error) -> Bool
     func recoverSecret(for account: Account) async throws -> String?
@@ -68,6 +70,16 @@ extension Provider {
     func refreshSecretAfterAuthenticationFailure(_ secret: String) async throws -> String? {
         _ = secret
         return nil
+    }
+
+    func reconcileImportedSecret(_ importedSecret: String, withStoredSecret storedSecret: String) throws -> String {
+        _ = storedSecret
+        return importedSecret
+    }
+
+    func canSafelyReplaceInstalledCredentials(afterImport secret: String) -> Bool {
+        _ = secret
+        return true
     }
 
     func persistRefreshedSecret(_ secret: String, for account: Account, isActive: Bool) async throws {

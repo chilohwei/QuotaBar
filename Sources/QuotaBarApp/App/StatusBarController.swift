@@ -29,7 +29,9 @@ private final class DashboardPanel: NSPanel {
 final class StatusBarController: NSObject, NSWindowDelegate {
     private let statusItem: NSStatusItem
     private let dashboardPanel: DashboardPanel
-    private var eventMonitor: Any?
+    private var globalEventMonitor: Any?
+    private var localEventMonitor: Any?
+    private var applicationResignObserver: NSObjectProtocol?
     private let appState: AppState
     private let updateService = UpdateService()
     private let launchAtLoginService = LaunchAtLoginService()
@@ -84,9 +86,17 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     func shutdown() {
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
+        if let globalEventMonitor {
+            NSEvent.removeMonitor(globalEventMonitor)
+            self.globalEventMonitor = nil
+        }
+        if let localEventMonitor {
+            NSEvent.removeMonitor(localEventMonitor)
+            self.localEventMonitor = nil
+        }
+        if let applicationResignObserver {
+            NotificationCenter.default.removeObserver(applicationResignObserver)
+            self.applicationResignObserver = nil
         }
         pendingPanelPresentationTask?.cancel()
         pendingPanelPresentationTask = nil
@@ -98,15 +108,17 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
         let inputs = ToolKind.allCases.compactMap { tool -> StatusBarQuotaInput? in
             guard appState.isToolVisibleInMenuBar(tool),
-                  let active = appState.activeAccount(for: tool),
-                  let quota = appState.quotaByAccount[active.id] else {
+                  let active = appState.activeAccount(for: tool) else {
                 return nil
             }
+            let quota = appState.quotaByAccount[active.id]
             return StatusBarQuotaInput(
                 tool: tool,
                 accountName: active.name,
                 quota: quota,
-                alternativeAccountName: alternativeAccountName(for: tool, active: active, quota: quota)
+                alternativeAccountName: quota.flatMap {
+                    alternativeAccountName(for: tool, active: active, quota: $0)
+                }
             )
         }
         let entries = StatusBarQuotaPresenter.entries(for: inputs)
@@ -165,16 +177,24 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         dashboardPanel.level = .statusBar
         dashboardPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.dashboardPanel.isVisible else { return }
-                // Browser-based account authorization requires clicking outside the
-                // panel; keep it open so the user sees progress and the result.
-                guard !self.appState.isAddingAccount else { return }
-                // A restart sheet is attached to the panel — closing it would take the
-                // unanswered dialog down with it.
-                guard !self.isPresentingRestartPrompt else { return }
-                self.dashboardPanel.close()
+                self?.dismissDashboardPanelIfAllowed()
+            }
+        }
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.handleLocalMouseDown(event)
+            }
+            return event
+        }
+        applicationResignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: NSApp,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.dismissDashboardPanelIfAllowed()
             }
         }
 
@@ -206,6 +226,31 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func handleLocalMouseDown(_ event: NSEvent) {
+        let eventWindow = event.window
+        guard eventWindow !== statusItem.button?.window,
+              !isDashboardOwnedWindow(eventWindow) else {
+            return
+        }
+        dismissDashboardPanelIfAllowed()
+    }
+
+    private func isDashboardOwnedWindow(_ window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        if window === dashboardPanel || window.sheetParent === dashboardPanel {
+            return true
+        }
+        return dashboardPanel.childWindows?.contains(where: { $0 === window }) == true
+    }
+
+    private func dismissDashboardPanelIfAllowed() {
+        guard dashboardPanel.isVisible,
+              !isPresentingRestartPrompt else {
+            return
+        }
+        dashboardPanel.close()
     }
 
     private func scheduleStatusTitleUpdate() {

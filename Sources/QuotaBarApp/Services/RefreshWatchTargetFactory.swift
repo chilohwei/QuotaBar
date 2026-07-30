@@ -16,7 +16,8 @@ struct RefreshWatchTargetFactory {
         var targets: [RefreshWatchTarget] = [
             RefreshWatchTarget(url: AppPaths.claudeCodeStatusFile, reason: .claudeStatusLineChanged),
             RefreshWatchTarget(url: codexAuthURL(), reason: .credentialsChanged(.codex)),
-            RefreshWatchTarget(url: claudeCodeAuthURL(), reason: .credentialsChanged(.claudeCode))
+            RefreshWatchTarget(url: claudeCodeAuthURL(), reason: .credentialsChanged(.claudeCode)),
+            RefreshWatchTarget(url: claudeIdentityURL(), reason: .credentialsChanged(.claudeCode))
         ]
 
         targets.append(contentsOf: cursorStateDatabaseURLs().map {
@@ -49,6 +50,10 @@ struct RefreshWatchTargetFactory {
             .appendingPathComponent(".config", isDirectory: true)
             .appendingPathComponent("claude-code", isDirectory: true)
             .appendingPathComponent("auth.json")
+    }
+
+    func claudeIdentityURL() -> URL {
+        homeDirectory.appendingPathComponent(".claude.json")
     }
 
     func cursorStateDatabaseURLs() -> [URL] {

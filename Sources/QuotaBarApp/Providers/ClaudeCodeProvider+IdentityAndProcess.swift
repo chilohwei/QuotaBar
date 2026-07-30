@@ -21,6 +21,38 @@ extension ClaudeCodeProvider {
         )
     }
 
+    /// Keep live identity/session metadata while refusing to replace a demonstrably newer stored
+    /// OAuth pair with an older keychain copy (for example, after a noninteractive write failed).
+    func mergeCurrentCredentials(
+        live: ClaudeCodeCredentials,
+        stored: ClaudeCodeCredentials,
+        now: Date = Date()
+    ) -> ClaudeCodeCredentials {
+        let merged = mergeCredentials(preferred: live, fallback: stored)
+        guard let liveToken = parseOAuthToken(from: live),
+              let storedToken = parseOAuthToken(from: stored),
+              liveToken.accessToken != storedToken.accessToken,
+              let storedExpiry = storedToken.expiresAt,
+              storedExpiry > now,
+              let liveExpiry = liveToken.expiresAt,
+              storedExpiry > liveExpiry else {
+            return merged
+        }
+        return ClaudeCodeCredentials(
+            loggedIn: merged.loggedIn,
+            authMethod: merged.authMethod,
+            apiProvider: merged.apiProvider,
+            userID: merged.userID,
+            claudeExecutablePath: merged.claudeExecutablePath,
+            keychainCredentials: stored.keychainCredentials ?? merged.keychainCredentials,
+            authStatusJSON: merged.authStatusJSON,
+            claudeSettingsJSON: merged.claudeSettingsJSON,
+            claudeJSON: merged.claudeJSON,
+            claudeCredentialsJSON: stored.claudeCredentialsJSON ?? merged.claudeCredentialsJSON,
+            claudeAuthJSON: merged.claudeAuthJSON
+        )
+    }
+
     // Fields that identify the ACCOUNT, not the installation. `~/.claude.json`'s `userID` must
     // never be used for this: the CLI mints it once per machine (`getOrCreateUserID` persists
     // random bytes forever) and keeps it across logins, so every account on this machine shares
@@ -77,6 +109,23 @@ extension ClaudeCodeProvider {
             return lhsCredentials == rhsCredentials
         }
 
+        return false
+    }
+
+    /// Returns true only with affirmative account-scoped evidence. Missing identity or merely
+    /// different token text is not enough: one account's OAuth pair changes on every rotation.
+    func claudeCredentialsRepresentDifferentAccounts(
+        _ lhs: ClaudeCodeCredentials,
+        _ rhs: ClaudeCodeCredentials
+    ) -> Bool {
+        if let lhsUuid = claudeAccountUuid(from: lhs),
+           let rhsUuid = claudeAccountUuid(from: rhs) {
+            return lhsUuid != rhsUuid
+        }
+        if let lhsEmail = claudeAccountEmail(from: lhs),
+           let rhsEmail = claudeAccountEmail(from: rhs) {
+            return lhsEmail != rhsEmail
+        }
         return false
     }
 

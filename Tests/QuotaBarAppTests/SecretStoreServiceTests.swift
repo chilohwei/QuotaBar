@@ -51,6 +51,34 @@ struct SecretStoreServiceTests {
         #expect(query[kSecAttrAccount as String] as? String == "account.1.secret")
         #expect(query[kSecAttrSynchronizable as String] as? Bool == false)
     }
+
+    @Test("system keychain reads fail instead of showing authentication UI")
+    func systemKeychainReadQueryDisallowsAuthenticationUI() {
+        let query = SystemSecretKeychainClient.readQuery(
+            service: "Claude Code-credentials",
+            account: nil
+        )
+
+        #expect(query[kSecAttrAccount as String] == nil)
+        #expect(
+            query[kSecUseAuthenticationUI as String] as? String
+                == kSecUseAuthenticationUIFail as String
+        )
+    }
+
+    @Test("system keychain CAS updates fail instead of showing authentication UI")
+    func systemKeychainUpdateQueryDisallowsAuthenticationUI() {
+        let query = SystemSecretKeychainClient.updateQuery(
+            service: "Claude Code-credentials",
+            account: "test-user"
+        )
+
+        #expect(query[kSecAttrAccount as String] as? String == "test-user")
+        #expect(
+            query[kSecUseAuthenticationUI as String] as? String
+                == kSecUseAuthenticationUIFail as String
+        )
+    }
 }
 
 private struct SecretStoreFixture {

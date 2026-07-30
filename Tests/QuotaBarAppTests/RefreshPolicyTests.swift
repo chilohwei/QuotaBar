@@ -33,6 +33,14 @@ struct RefreshPolicyTests {
 
         #expect(policy.automaticRefreshInterval(activeRemainingRatios: [0.6]) == policy.defaultInterval)
     }
+
+    @Test("local refresh bypasses only the app failure backoff")
+    func localRefreshBackoffPolicy() {
+        #expect(RefreshIntent.local.bypassesAppBackoff)
+        #expect(!RefreshIntent.local.bypassesProviderCache)
+        #expect(!RefreshIntent.local.allowsProviderCredentialRefresh)
+        #expect(RefreshIntent.local.preservesAppBackoffAfterSuccess)
+    }
 }
 
 @Suite("Refresh watch target factory")
@@ -50,6 +58,13 @@ struct RefreshWatchTargetFactoryTests {
 
         #expect(factory.codexAuthURL().path == "/tmp/codex-home/auth.json")
         #expect(factory.claudeCodeAuthURL().path == "/tmp/claude-config/auth.json")
+        #expect(factory.claudeIdentityURL().path == "/tmp/quotabar-home/.claude.json")
+        #expect(factory.watchTargets().contains(
+            RefreshWatchTarget(
+                url: URL(fileURLWithPath: "/tmp/quotabar-home/.claude.json"),
+                reason: .credentialsChanged(.claudeCode)
+            )
+        ))
         #expect(factory.cursorStateDatabaseURLs().map(\.path) == [
             "/tmp/quotabar-home/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
             "/tmp/quotabar-home/Library/Application Support/Cursor - Insiders/User/globalStorage/state.vscdb",

@@ -154,33 +154,29 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
         CFString,
         UInt16
     ) -> OSStatus
-    private typealias SecKeychainItemCopyAccessFunction = @convention(c) (
-        SecKeychainItem,
-        UnsafeMutablePointer<SecAccess?>?
-    ) -> OSStatus
-    private typealias SecACLCopyAuthorizationsFunction = @convention(c) (
-        SecACL
-    ) -> Unmanaged<CFArray>?
+    private static let interactionLock = NSLock()
 
     func saveSecret(_ data: Data, service: String, account: String) throws {
-        var query = Self.baseQuery(service: service, account: account)
-        query[kSecValueData as String] = data
-        Self.applyAccessPolicy(to: &query)
+        try Self.withUserInteractionDisabled {
+            var query = Self.baseQuery(service: service, account: account)
+            query[kSecValueData as String] = data
+            Self.applyAccessPolicy(to: &query)
 
-        var addStatus = SecItemAdd(query as CFDictionary, nil)
-        if addStatus == errSecDuplicateItem {
-            // Replace instead of SecItemUpdate. The existing item may have been
-            // created by a different build of QuotaBar (ad-hoc signing gives every
-            // build a distinct code signature), so it is guarded by an ACL that
-            // trusts only that old signature. Reading or updating it would raise the
-            // macOS keychain password prompt. SecItemDelete is not gated by that ACL,
-            // so delete-then-add rewrites the item with the unrestricted access
-            // policy below — silently migrating legacy entries and never prompting.
-            SecItemDelete(Self.baseQuery(service: service, account: account) as CFDictionary)
-            addStatus = SecItemAdd(query as CFDictionary, nil)
-        }
-        guard addStatus == errSecSuccess else {
-            throw SecretStoreError.keychain(addStatus)
+            var addStatus = SecItemAdd(query as CFDictionary, nil)
+            if addStatus == errSecDuplicateItem {
+                // Recreate legacy entries instead of updating them. An old ACL may trust only a
+                // previous build, so every step remains inside the no-interaction scope.
+                let deleteStatus = SecItemDelete(
+                    Self.baseQuery(service: service, account: account) as CFDictionary
+                )
+                guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
+                    throw SecretStoreError.keychain(deleteStatus)
+                }
+                addStatus = SecItemAdd(query as CFDictionary, nil)
+            }
+            guard addStatus == errSecSuccess else {
+                throw SecretStoreError.keychain(addStatus)
+            }
         }
     }
 
@@ -268,23 +264,155 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
     }
 
     func readSecret(service: String, account: String) throws -> Data? {
-        // Reading the payload of an item whose ACL trusts only a previous build's code
-        // signature raises the macOS keychain password dialog, and neither
-        // kSecUseAuthenticationUISkip nor any other query key suppresses that legacy prompt.
-        // The ACL itself, however, is readable silently — so inspect it first, and if this
-        // item would prompt, report "not found" WITHOUT touching the payload. The caller then
-        // re-imports the credential from its source and re-saves it under the open policy.
-        // Items that cannot be re-imported (accounts detached from their tool) surface the
-        // ordinary re-add message instead of an authorization dialog.
-        if Self.itemWouldPromptOnRead(service: service, account: account) {
+        try readGenericPassword(service: service, account: account)
+    }
+
+    /// Reads a generic password without ever permitting SecurityAgent UI. Omitting `account`
+    /// matches the first local item for the service, mirroring the providers' previous lookup.
+    func readGenericPassword(service: String, account: String? = nil) throws -> Data? {
+        try Self.withUserInteractionDisabled {
+            try Self.copyGenericPassword(service: service, account: account)
+        }
+    }
+
+    /// Reads a generic password owned by a CLI tool (Claude Code, Cursor) by delegating to
+    /// `/usr/bin/security`. Those items are created with `security add-generic-password`, so
+    /// their decrypt ACL trusts ONLY `/usr/bin/security` (with `don't-require-password`) and
+    /// carries no on-disk fallback on macOS. QuotaBar's own process is not in that ACL, so a
+    /// direct `SecItemCopyMatching` fails closed with errSecInteractionNotAllowed and reports
+    /// the account as signed-out. Delegating the read to the one binary the item trusts returns
+    /// the value without ever raising the keychain authorization dialog. An item QuotaBar has
+    /// rewritten under the open ACL is likewise readable this way, so this is safe for every
+    /// tool-owned item regardless of who last wrote it.
+    func readGenericPasswordUsingSecurityTool(service: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
             return nil
         }
+        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let value = String(data: output, encoding: .utf8) else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
-        var query = Self.baseQuery(service: service, account: account)
+    /// Updates an existing item only when it still contains `expected`, then reads it back.
+    /// Every operation runs with SecurityAgent UI disabled. Unlike `saveSecret`, this never
+    /// deletes and recreates the item, so a failed live-token rotation cannot erase Claude
+    /// Code's credential or replace its ACL.
+    func compareAndSwapGenericPassword(
+        expected: Data,
+        replacement: Data,
+        service: String,
+        account: String
+    ) throws -> Bool {
+        try Self.withUserInteractionDisabled {
+            guard try Self.copyGenericPassword(service: service, account: account) == expected else {
+                return false
+            }
+
+            let status = SecItemUpdate(
+                Self.updateQuery(service: service, account: account) as CFDictionary,
+                [kSecValueData as String: replacement] as CFDictionary
+            )
+            if status == errSecItemNotFound
+                || status == errSecInteractionNotAllowed
+                || status == errSecAuthFailed
+                || status == errSecUserCanceled {
+                return false
+            }
+            guard status == errSecSuccess else {
+                throw SecretStoreError.keychain(status)
+            }
+            return try Self.copyGenericPassword(service: service, account: account) == replacement
+        }
+    }
+
+    func deleteSecret(service: String, account: String) throws {
+        try Self.withUserInteractionDisabled {
+            let status = SecItemDelete(
+                Self.baseQuery(service: service, account: account) as CFDictionary
+            )
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw SecretStoreError.keychain(status)
+            }
+        }
+    }
+
+    static func readQuery(service: String, account: String?) -> [String: Any] {
+        var query = baseQuery(service: service, account: account)
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        return query
+    }
 
+    static func updateQuery(service: String, account: String) -> [String: Any] {
+        var query = baseQuery(service: service, account: account)
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        return query
+    }
+
+    static func baseQuery(service: String, account: String? = nil) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
+        ]
+        if let account {
+            query[kSecAttrAccount as String] = account
+        }
+        return query
+    }
+
+    /// `SecKeychainSetUserInteractionAllowed` is process-global. Serialize every Keychain
+    /// operation, disable UI before touching an item, and do not run the operation if either
+    /// state query fails. This makes locked or ACL-protected items fail closed.
+    private static func withUserInteractionDisabled<T>(
+        _ operation: () throws -> T
+    ) throws -> T {
+        interactionLock.lock()
+        defer { interactionLock.unlock() }
+
+        var interactionWasAllowed = DarwinBoolean(false)
+        let stateStatus = SecKeychainGetUserInteractionAllowed(&interactionWasAllowed)
+        guard stateStatus == errSecSuccess else {
+            throw SecretStoreError.keychain(stateStatus)
+        }
+
+        let disableStatus = SecKeychainSetUserInteractionAllowed(false)
+        guard disableStatus == errSecSuccess else {
+            throw SecretStoreError.keychain(disableStatus)
+        }
+
+        let result: Result<T, Error>
+        do {
+            result = .success(try operation())
+        } catch {
+            result = .failure(error)
+        }
+
+        let restoreStatus = SecKeychainSetUserInteractionAllowed(interactionWasAllowed.boolValue)
+        guard restoreStatus == errSecSuccess else {
+            throw SecretStoreError.keychain(restoreStatus)
+        }
+        return try result.get()
+    }
+
+    private static func copyGenericPassword(service: String, account: String?) throws -> Data? {
+        let query = readQuery(service: service, account: account)
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound || status == errSecInteractionNotAllowed {
@@ -297,89 +425,5 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
             throw SecretStoreError.dataDecoding
         }
         return data
-    }
-
-    /// True when decrypting this item would raise the keychain authorization dialog for the
-    /// current (differently-signed) build: its ACL has no decrypt entry that allows any
-    /// application without confirmation. ACL metadata is readable without authorization, so
-    /// this check itself never prompts. Items that cannot be inspected (missing, or the
-    /// legacy ACL API is unavailable) are reported as safe — the read path then falls back
-    /// to its own non-interactive error handling.
-    private static func itemWouldPromptOnRead(service: String, account: String) -> Bool {
-        var query = baseQuery(service: service, account: account)
-        query[kSecReturnRef as String] = kCFBooleanTrue
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let itemRef = result else {
-            return false
-        }
-
-        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW) else {
-            return false
-        }
-        defer { dlclose(handle) }
-        guard let copyAccessSymbol = dlsym(handle, "SecKeychainItemCopyAccess"),
-              let copyListSymbol = dlsym(handle, "SecAccessCopyACLList"),
-              let copyAuthorizationsSymbol = dlsym(handle, "SecACLCopyAuthorizations"),
-              let copyContentsSymbol = dlsym(handle, "SecACLCopyContents") else {
-            return false
-        }
-        let copyAccess = unsafeBitCast(copyAccessSymbol, to: SecKeychainItemCopyAccessFunction.self)
-        let copyACLList = unsafeBitCast(copyListSymbol, to: SecAccessCopyACLListFunction.self)
-        let copyAuthorizations = unsafeBitCast(copyAuthorizationsSymbol, to: SecACLCopyAuthorizationsFunction.self)
-        let copyContents = unsafeBitCast(copyContentsSymbol, to: SecACLCopyContentsFunction.self)
-
-        let item = unsafeBitCast(itemRef, to: SecKeychainItem.self)
-        var access: SecAccess?
-        guard copyAccess(item, &access) == errSecSuccess, let access else {
-            // No legacy ACL to inspect (e.g. a data-protection item) — nothing that would
-            // raise the legacy dialog.
-            return false
-        }
-        var listRef: CFArray?
-        guard copyACLList(access, &listRef) == errSecSuccess, let list = listRef else {
-            return false
-        }
-
-        for index in 0 ..< CFArrayGetCount(list) {
-            let acl = unsafeBitCast(CFArrayGetValueAtIndex(list, index), to: SecACL.self)
-            guard let authorizations = copyAuthorizations(acl)?.takeRetainedValue() as? [CFString] else {
-                continue
-            }
-            let tags = Set(authorizations.map { $0 as String })
-            guard tags.contains("ACLAuthorizationDecrypt") || tags.contains("ACLAuthorizationAny") else {
-                continue
-            }
-            var applications: CFArray?
-            var description: CFString?
-            var promptSelector: UInt16 = 0
-            guard copyContents(acl, &applications, &description, &promptSelector) == errSecSuccess else {
-                continue
-            }
-            // A nil application list in ACL *contents* means "any application"; a zero prompt
-            // selector means no confirmation dialog. Such an entry makes reads silent.
-            if applications == nil && promptSelector == 0 {
-                return false
-            }
-        }
-        return true
-    }
-
-    func deleteSecret(service: String, account: String) throws {
-        let status = SecItemDelete(Self.baseQuery(service: service, account: account) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw SecretStoreError.keychain(status)
-        }
-    }
-
-    static func baseQuery(service: String, account: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
-        ]
     }
 }

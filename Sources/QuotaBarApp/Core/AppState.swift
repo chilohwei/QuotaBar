@@ -44,9 +44,9 @@ final class AppState: ObservableObject {
     @Published var menuBarVisibleTools: Set<ToolKind> = AppPreferencesStore.menuBarVisibleTools
 
     private let accountStore = AccountStore()
-    private let secretStore = SecretStoreService()
+    private let secretStore: SecretStoreService
     let quotaCacheStore = QuotaSnapshotCacheStore()
-    private let providerRegistry = ProviderRegistry()
+    private let providerRegistry: ProviderRegistry
     let refreshBackoffPolicy = RefreshBackoffPolicy()
     let refreshIntervalPolicy = RefreshIntervalPolicy()
     let notificationService = QuotaNotificationService()
@@ -64,9 +64,10 @@ final class AppState: ObservableObject {
     private var addAccountTask: Task<Void, Never>?
     private var addAccountOperationID: UUID?
     private var transientNoticeTask: Task<Void, Never>?
-    private var pendingDeletion: PendingAccountDeletion?
+    var pendingDeletion: PendingAccountDeletion?
+    var finalizingDeletionAccounts: [UUID: Account] = [:]
 
-    private struct PendingAccountDeletion {
+    struct PendingAccountDeletion {
         let account: Account
         let snapshot: QuotaSnapshot?
         let loadState: AccountLoadState?
@@ -79,6 +80,9 @@ final class AppState: ObservableObject {
     var isDashboardVisible = false
     var dashboardVisibleAccountIDs: [UUID] = []
     var refreshingAccountIDs: Set<UUID> = []
+    var refreshingToolByAccountID: [UUID: ToolKind] = [:]
+    var activatingTools: Set<ToolKind> = []
+    var credentialSyncCountByTool: [ToolKind: Int] = [:]
     var refreshFailureCountByAccount: [UUID: Int] = [:]
     var refreshBackoffUntilByAccount: [UUID: Date] = [:]
     let maxConcurrentRefreshes = 4
@@ -87,6 +91,14 @@ final class AppState: ObservableObject {
     let dashboardOpenRefreshFreshnessInterval: TimeInterval = 25
     let dashboardVisibleRefreshInterval: TimeInterval = 30
     var supportedTools: [ToolKind] { providerRegistry.supportedTools }
+
+    init(
+        secretStore: SecretStoreService = SecretStoreService(),
+        providerRegistry: ProviderRegistry = ProviderRegistry()
+    ) {
+        self.secretStore = secretStore
+        self.providerRegistry = providerRegistry
+    }
 
     var supportedToolsPrioritizingSelectedTool: [ToolKind] {
         guard supportedTools.contains(selectedTool) else { return supportedTools }
@@ -415,6 +427,8 @@ final class AppState: ObservableObject {
     private func finalizeDeletion(accountID: UUID) async {
         guard let pending = pendingDeletion, pending.account.id == accountID else { return }
         pendingDeletion = nil
+        finalizingDeletionAccounts[pending.account.id] = pending.account
+        defer { finalizingDeletionAccounts.removeValue(forKey: pending.account.id) }
         await performPhysicalDeletion(pending)
     }
 
@@ -422,7 +436,11 @@ final class AppState: ObservableObject {
         guard let pending = pendingDeletion else { return }
         pending.finalizeTask?.cancel()
         pendingDeletion = nil
-        Task { await performPhysicalDeletion(pending) }
+        finalizingDeletionAccounts[pending.account.id] = pending.account
+        Task {
+            await performPhysicalDeletion(pending)
+            finalizingDeletionAccounts.removeValue(forKey: pending.account.id)
+        }
     }
 
     private func performPhysicalDeletion(_ pending: PendingAccountDeletion) async {
@@ -436,7 +454,7 @@ final class AppState: ObservableObject {
                 try secretStore.deleteSecret(accountKey: secretStoreKey(for: account.id))
             }
             if pending.wasActive {
-                await applyActiveSelectionToInstalledTool(account.tool)
+                await applyActiveSelectionToInstalledTool(account.tool, discardedAccount: account)
             }
         } catch {
             AppLog.account.error("Delete account failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
@@ -446,24 +464,14 @@ final class AppState: ObservableObject {
     }
 
     func activateAccount(_ account: Account) {
-        let provider = provider(for: account.tool)
-
         Task {
             do {
                 AppLog.account.info("Activating account \(account.id.uuidString, privacy: .public) for \(account.tool.rawValue, privacy: .public)")
-                let secret = try await resolveSecret(for: account, provider: provider)
-                let refreshedSecret = try await provider.refreshSecretIfNeeded(secret)
-                if refreshedSecret != secret {
-                    try await persistRefreshedSecret(
-                        refreshedSecret,
-                        previousSecret: secret,
-                        account: account,
-                        provider: provider
-                    )
-                }
-                try await provider.activate(account: account, secret: refreshedSecret)
-                activeAccountByTool[account.tool] = account.id
-                try await persistState()
+                try await performAccountActivation(
+                    account,
+                    captureMissingCurrentAccount: true,
+                    discardedAccount: nil
+                )
                 let message = text.restartRequiredMessage(accountName: account.name, tool: account.tool)
                 // Codex gets a dialog with a working "restart now" button as the only prompt —
                 // the panel's notice bar stays hidden so the two never show together.
@@ -481,6 +489,76 @@ final class AppState: ObservableObject {
                 notifyAccountSwitchFailureIfDashboardHidden(account: account, error: error)
             }
         }
+    }
+
+    /// Serializes the full Claude replacement transaction: finish every in-flight Claude refresh,
+    /// capture the live pair, renew the detached target if needed, then resolve and install it.
+    func performAccountActivation(
+        _ account: Account,
+        captureMissingCurrentAccount: Bool,
+        discardedAccount: Account?
+    ) async throws {
+        let provider = provider(for: account.tool)
+        guard account.tool == .claudeCode else {
+            let secret = try await resolveSecret(for: account, provider: provider)
+            var refreshedSecret = try await provider.refreshSecretIfNeeded(secret)
+            if refreshedSecret != secret {
+                refreshedSecret = try await persistRefreshedSecret(
+                    refreshedSecret,
+                    previousSecret: secret,
+                    expectedStoredSecret: nil,
+                    account: account,
+                    provider: provider
+                )
+            }
+            try await provider.activate(account: account, secret: refreshedSecret)
+            activeAccountByTool[account.tool] = account.id
+            try await persistState()
+            return
+        }
+
+        guard activatingTools.insert(account.tool).inserted else {
+            throw ProviderError.unsupported("Claude Code 账号切换正在进行，请稍后重试。")
+        }
+        defer { activatingTools.remove(account.tool) }
+
+        while refreshingToolByAccountID.values.contains(account.tool)
+            || (credentialSyncCountByTool[account.tool] ?? 0) > 0 {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard await captureInstalledCurrentAccountBeforeReplacement(
+            for: account.tool,
+            captureMissingAccount: captureMissingCurrentAccount,
+            discardedAccount: discardedAccount
+        ) else {
+            throw ProviderError.unsupported("未能在不弹出授权窗口的前提下安全读取当前 Claude Code 凭据，已取消切换。")
+        }
+
+        let secret = try await resolveSecret(for: account, provider: provider)
+        let storedSecretAtStart = try? secretStore.readSecret(accountKey: secretStoreKey(for: account.id))
+        let reconciledSecret = if let storedSecretAtStart {
+            (try? provider.reconcileImportedSecret(
+                secret,
+                withStoredSecret: storedSecretAtStart
+            )) ?? secret
+        } else {
+            secret
+        }
+        var refreshedSecret = try await provider.refreshSecretIfNeeded(reconciledSecret)
+        if refreshedSecret != reconciledSecret
+            || (storedSecretAtStart != nil && refreshedSecret != storedSecretAtStart) {
+            refreshedSecret = try await persistRefreshedSecret(
+                refreshedSecret,
+                previousSecret: reconciledSecret,
+                expectedStoredSecret: storedSecretAtStart,
+                account: account,
+                provider: provider
+            )
+        }
+        try await provider.activate(account: account, secret: refreshedSecret)
+        activeAccountByTool[account.tool] = account.id
+        try await persistState()
     }
 
     // Switching from the status-bar context menu happens with the panel closed; the card
@@ -636,9 +714,6 @@ final class AppState: ObservableObject {
         guard isQuotaNotificationsEnabled != enabled else { return }
         isQuotaNotificationsEnabled = enabled
         AppPreferencesStore.setQuotaNotificationsEnabled(enabled)
-        if enabled {
-            notificationService.requestAuthorizationIfNeeded()
-        }
     }
 
     func setQuotaNotificationThreshold(_ threshold: Double) {
@@ -724,8 +799,19 @@ final class AppState: ObservableObject {
                 : detectedIdentityAliases
         ) {
             var resolvedDuplicate = duplicate
+            var reconciledSecret = secret
             if shouldStoreSecretInKeychain(for: tool) {
-                try secretStore.saveSecret(secret, accountKey: secretStoreKey(for: duplicate.id))
+                if let storedSecret = try? secretStore.readSecret(accountKey: secretStoreKey(for: duplicate.id)) {
+                    reconciledSecret = (try? provider.reconcileImportedSecret(
+                        secret,
+                        withStoredSecret: storedSecret
+                    )) ?? secret
+                    if reconciledSecret != storedSecret {
+                        try secretStore.saveSecret(reconciledSecret, accountKey: secretStoreKey(for: duplicate.id))
+                    }
+                } else {
+                    try secretStore.saveSecret(reconciledSecret, accountKey: secretStoreKey(for: duplicate.id))
+                }
             }
 
             if let index = accounts.firstIndex(where: { $0.id == duplicate.id }) {
@@ -735,7 +821,7 @@ final class AppState: ObservableObject {
                     accounts[index].name = detectedName
                 }
 
-                let prepared = try await provider.prepareAccount(accounts[index], secret: secret)
+                let prepared = try await provider.prepareAccount(accounts[index], secret: reconciledSecret)
                 accounts[index] = prepared
                 resolvedDuplicate = prepared
             }
@@ -749,7 +835,7 @@ final class AppState: ObservableObject {
             let syncedDuplicate = accounts.first(where: { $0.id == duplicate.id }) ?? resolvedDuplicate
             if let active = accounts.first(where: { $0.id == duplicate.id }) {
                 if applyToTool, activeAccountByTool[tool] == active.id {
-                    try await provider.activate(account: active, secret: secret)
+                    try await provider.activate(account: active, secret: reconciledSecret)
                 }
             }
             if refreshAfterAdd {
@@ -834,6 +920,11 @@ final class AppState: ObservableObject {
         "account.\(accountID.uuidString).secret"
     }
 
+    func storedSecretSnapshot(for account: Account) -> String? {
+        guard shouldStoreSecretInKeychain(for: account.tool) else { return nil }
+        return try? secretStore.readSecret(accountKey: secretStoreKey(for: account.id))
+    }
+
     private func shouldStoreSecretInKeychain(for tool: ToolKind) -> Bool {
         supportedTools.contains(tool)
     }
@@ -841,18 +932,35 @@ final class AppState: ObservableObject {
     func persistRefreshedSecret(
         _ secret: String,
         previousSecret: String,
+        expectedStoredSecret: String?,
         account: Account,
         provider: any Provider
-    ) async throws {
-        guard secret != previousSecret else { return }
+    ) async throws -> String {
+        guard secret != previousSecret
+            || (expectedStoredSecret != nil && secret != expectedStoredSecret) else {
+            return secret
+        }
         let isActive = activeAccountByTool[account.tool] == account.id
         if shouldStoreSecretInKeychain(for: account.tool) {
+            if account.tool == .claudeCode {
+                // A statusLine event may capture a newer single-use pair while this refresh is
+                // suspended. Compare against the exact stored value seen at the start and never
+                // let the older result overwrite a store that has advanced in the meantime.
+                guard let expectedStoredSecret else { return secret }
+                let currentStoredSecret = try secretStore.readSecret(
+                    accountKey: secretStoreKey(for: account.id)
+                )
+                guard currentStoredSecret == expectedStoredSecret else {
+                    return currentStoredSecret
+                }
+            }
             try secretStore.saveSecret(secret, accountKey: secretStoreKey(for: account.id))
         }
         try await provider.persistRefreshedSecret(secret, for: account, isActive: isActive)
         if isActive {
             try await provider.updateCurrentCredentials(secret)
         }
+        return secret
     }
 
     private func loadCachedQuotaSnapshots() {
@@ -987,6 +1095,111 @@ final class AppState: ObservableObject {
         }
 
         return nil
+    }
+
+    /// Captures the installed account without changing QuotaBar's active selection. A deleted
+    /// account may be intentionally discarded; any other untracked account is preserved first.
+    func captureInstalledCurrentAccountBeforeReplacement(
+        for tool: ToolKind,
+        captureMissingAccount: Bool,
+        discardedAccount: Account?
+    ) async -> Bool {
+        let provider = provider(for: tool)
+        do {
+            let secret = try await provider.importCurrentCredentials()
+            guard !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  provider.canSafelyReplaceInstalledCredentials(afterImport: secret) else {
+                return false
+            }
+
+            let aliases = provider.accountIdentityAliases(from: secret)
+            let detectedIdentities = aliases.isEmpty
+                ? provider.accountIdentity(from: secret).map { [$0] } ?? []
+                : aliases
+            let existing = findDuplicateStoredAccount(
+                for: tool,
+                detectedIdentities: detectedIdentities
+            )
+            if existing == nil, !captureMissingAccount {
+                guard let discardedIdentity = discardedAccount?.settings.identityKey
+                    .map(AccountIdentityResolver.normalizeIdentityName) else {
+                    return false
+                }
+                let normalizedDetected = Set(
+                    detectedIdentities.map(AccountIdentityResolver.normalizeIdentityName)
+                )
+                return normalizedDetected.contains(discardedIdentity)
+            }
+
+            _ = try await addAccount(
+                tool: tool,
+                name: "",
+                secret: secret,
+                makeActive: false,
+                useAsDefaultActive: false,
+                applyToTool: false,
+                refreshAfterAdd: false
+            )
+            return true
+        } catch {
+            AppLog.account.error("Failed to capture installed \(tool.rawValue, privacy: .public) credentials before replacement: \(String(describing: error), privacy: .private)")
+            return false
+        }
+    }
+
+    /// A statusLine event can arrive while its active Claude account is hidden for undo. Keep the
+    /// captured token pair with that pending account, but never recreate or reactivate its row.
+    func absorbCredentialSyncForPendingDeletion(
+        tool: ToolKind,
+        provider: any Provider,
+        secret: String
+    ) -> Bool {
+        let aliases = provider.accountIdentityAliases(from: secret)
+        let detectedIdentities = aliases.isEmpty
+            ? provider.accountIdentity(from: secret).map { [$0] } ?? []
+            : aliases
+        if finalizingDeletionAccounts.values.contains(where: {
+            $0.tool == tool
+                && Self.accountIdentity($0.settings.identityKey, matchesAny: detectedIdentities)
+        }) {
+            return true
+        }
+        guard let pending = pendingDeletion,
+              pending.account.tool == tool,
+              Self.accountIdentity(
+                  pending.account.settings.identityKey,
+                  matchesAny: detectedIdentities
+              ) else {
+            return false
+        }
+
+        if shouldStoreSecretInKeychain(for: tool),
+           provider.canSafelyReplaceInstalledCredentials(afterImport: secret) {
+            var reconciledSecret = secret
+            if let storedSecret = try? secretStore.readSecret(accountKey: secretStoreKey(for: pending.account.id)) {
+                reconciledSecret = (try? provider.reconcileImportedSecret(
+                    secret,
+                    withStoredSecret: storedSecret
+                )) ?? secret
+            }
+            do {
+                try secretStore.saveSecret(
+                    reconciledSecret,
+                    accountKey: secretStoreKey(for: pending.account.id)
+                )
+            } catch {
+                AppLog.account.error("Failed to update pending-deletion \(tool.rawValue, privacy: .public) credentials: \(String(describing: error), privacy: .private)")
+            }
+        }
+        return true
+    }
+
+    static func accountIdentity(_ identity: String?, matchesAny candidates: [String]) -> Bool {
+        guard let identity else { return false }
+        let normalizedIdentity = AccountIdentityResolver.normalizeIdentityName(identity)
+        return candidates
+            .map(AccountIdentityResolver.normalizeIdentityName)
+            .contains(normalizedIdentity)
     }
 
     func updateAccountIdentityIfNeeded(accountID: UUID, identity: String?) -> Bool {

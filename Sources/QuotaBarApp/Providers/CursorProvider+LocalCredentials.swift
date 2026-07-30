@@ -125,7 +125,7 @@ extension CursorProvider {
         let credentials = CursorCredentials(
             accessToken: accessToken,
             refreshToken: try readKeychainPassword(service: "cursor-refresh-token"),
-            email: cursorAgentEmail(),
+            email: cursorEmail(fromAccessToken: accessToken),
             membershipType: nil,
             subscriptionStatus: nil,
             subscriptionPeriodEnd: nil,
@@ -153,16 +153,8 @@ extension CursorProvider {
     }
 
     func cursorAccountEmail(from credentials: CursorCredentials) -> String? {
-        let claimKeys = [
-            "email",
-            "https://cursor.sh/email",
-            "https://cursor.com/email"
-        ]
-        for key in claimKeys {
-            if let email = jwtStringClaim(credentials.accessToken, claim: key),
-               let normalized = emailAddress(in: email) {
-                return normalized
-            }
+        if let email = cursorEmail(fromAccessToken: credentials.accessToken) {
+            return email
         }
         if let email = credentials.email,
            let normalized = emailAddress(in: email) {

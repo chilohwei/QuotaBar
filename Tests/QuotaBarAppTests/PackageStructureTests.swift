@@ -4,6 +4,46 @@ import Testing
 
 @Suite("Package structure")
 struct PackageStructureTests {
+    @Test("automatic credential paths never invoke interactive system APIs")
+    func automaticCredentialPathsNeverInvokeInteractiveSystemAPIs() throws {
+        let sourcesRoot = packageRoot
+            .appendingPathComponent("Sources", isDirectory: true)
+            .appendingPathComponent("QuotaBarApp", isDirectory: true)
+        let enumerator = try #require(
+            FileManager.default.enumerator(
+                at: sourcesRoot,
+                includingPropertiesForKeys: nil
+            )
+        )
+        let allSwiftSources = try enumerator
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
+
+        #expect(!allSwiftSources.isEmpty)
+        #expect(!allSwiftSources.contains("requestAuthorization("))
+        // Reading a CLI tool's own keychain item (Claude Code, Cursor) must delegate to
+        // `/usr/bin/security find-generic-password`: that binary is the only one their decrypt
+        // ACL trusts, and the read never prompts because the item grants it
+        // `don't-require-password`. A direct Security.framework read from QuotaBar fails closed
+        // and misreports a signed-in account as logged out. What must never appear is an
+        // ACL-mutating or keychain-unlock security subcommand, which can raise the dialog.
+        #expect(!allSwiftSources.contains(#""add-generic-password""#))
+        #expect(!allSwiftSources.contains(#""delete-generic-password""#))
+        #expect(!allSwiftSources.contains(#""unlock-keychain""#))
+
+        let claudeCredentialsSource = try source(
+            "Providers/ClaudeCodeProvider+LocalCredentials.swift"
+        )
+        #expect(!claudeCredentialsSource.contains(#""auth", "status""#))
+
+        let cursorAgentSource = try source(
+            "Providers/CursorProvider+AgentLogin.swift"
+        )
+        #expect(!cursorAgentSource.contains(#"arguments = ["status"]"#))
+    }
+
     @Test("Quota windows calculate bounded percentages")
     func quotaWindowPercentages() {
         let window = QuotaWindow(label: "5h", used: 25, limit: 100, resetAt: nil)
@@ -109,5 +149,22 @@ struct PackageStructureTests {
         )
         #expect(updateFailure == "为确保安全，更新包没有通过校验，QuotaBar 已停止安装。请稍后重试，或从官方发布页下载。")
         #expect(!updateFailure.contains("abc123"))
+    }
+
+    private var packageRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    private func source(_ relativePath: String) throws -> String {
+        try String(
+            contentsOf: packageRoot
+                .appendingPathComponent("Sources", isDirectory: true)
+                .appendingPathComponent("QuotaBarApp", isDirectory: true)
+                .appendingPathComponent(relativePath),
+            encoding: .utf8
+        )
     }
 }
