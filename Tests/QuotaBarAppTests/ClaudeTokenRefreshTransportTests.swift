@@ -193,6 +193,9 @@ struct ClaudeTokenRefreshTransportTests {
                 swaps.append((expected, replacement))
                 return true
             },
+            writeLiveKeychain: { _ in
+                Issue.record("unconditional write must not run after a successful CAS")
+            },
             requestRefresh: { refreshToken, _ in
                 refreshRequests += 1
                 #expect(refreshToken == "r1")
@@ -246,6 +249,9 @@ struct ClaudeTokenRefreshTransportTests {
                 Issue.record("CAS must not run after the live pair changed")
                 return true
             },
+            writeLiveKeychain: { _ in
+                Issue.record("write must not run after the live pair changed")
+            },
             requestRefresh: { _, _ in
                 refreshRequests += 1
                 throw OAuthUsageFetchError.invalidResponse
@@ -259,6 +265,9 @@ struct ClaudeTokenRefreshTransportTests {
             now: now,
             readLiveKeychain: { storedJSON },
             compareAndSwapLiveKeychain: { _, _ in false },
+            writeLiveKeychain: { _ in
+                Issue.record("write must not run after a failed CAS preflight")
+            },
             requestRefresh: { _, _ in
                 refreshRequests += 1
                 throw OAuthUsageFetchError.invalidResponse
@@ -266,6 +275,55 @@ struct ClaudeTokenRefreshTransportTests {
         )
         #expect(preflightFailed == nil)
         #expect(refreshRequests == 0)
+    }
+
+    @Test("active refresh falls back to unconditional keychain write when CAS cannot install the pair")
+    func activeRefreshFallsBackToUnconditionalWrite() async throws {
+        let provider = ClaudeCodeProvider()
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let storedJSON = """
+        {"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1","expiresAt":\(Int(now.timeIntervalSince1970 * 1000))}}
+        """
+        let stored = ClaudeCodeProvider.ClaudeCodeCredentials(
+            loggedIn: true,
+            authMethod: "oauth",
+            apiProvider: "firstParty",
+            userID: nil,
+            claudeExecutablePath: nil,
+            keychainCredentials: storedJSON,
+            authStatusJSON: nil,
+            claudeSettingsJSON: nil,
+            claudeJSON: nil,
+            claudeCredentialsJSON: nil,
+            claudeAuthJSON: nil
+        )
+        var casCalls = 0
+        var written: String?
+        let refreshed = try await provider.refreshActiveStoredCredentialsLocked(
+            stored,
+            failedAccessToken: "a1",
+            now: now,
+            readLiveKeychain: { storedJSON },
+            compareAndSwapLiveKeychain: { expected, replacement in
+                casCalls += 1
+                if expected == replacement { return true }
+                return false
+            },
+            writeLiveKeychain: { replacement in
+                written = replacement
+            },
+            requestRefresh: { _, _ in
+                ClaudeCodeProvider.RefreshedOAuthToken(
+                    accessToken: "a2",
+                    refreshToken: "r2",
+                    expiresAt: now.addingTimeInterval(28_800)
+                )
+            }
+        )
+        let refreshedCredentials = try #require(refreshed)
+        #expect(try #require(provider.parseOAuthToken(from: refreshedCredentials)).accessToken == "a2")
+        #expect(casCalls > 1)
+        #expect(try #require(provider.parseOAuthToken(fromJSONText: written)).accessToken == "a2")
     }
 
     @Test("Claude OAuth lock paths match the CLI secure-storage contract")

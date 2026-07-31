@@ -9,6 +9,26 @@ extension ClaudeCodeProvider {
         return try encodeCredentials(credentials)
     }
 
+    /// Writes a refreshed OAuth pair back into Claude Code's live keychain. Used after
+    /// `refreshSecretIfNeeded` rotates a single-use refresh token so the CLI and QuotaBar keep
+    /// sharing the same surviving grant.
+    func updateCurrentCredentials(_ secret: String) async throws {
+        let stored = try parseCredentials(secret)
+        guard let keychainCredentials = stored.keychainCredentials?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !keychainCredentials.isEmpty else {
+            return
+        }
+        if let live = try? await readClaudeCodeCredentials(),
+           live.loggedIn,
+           claudeCredentialsRepresentDifferentAccounts(live, stored) {
+            // Never overwrite a different account the CLI has switched to.
+            return
+        }
+        try writeClaudeCodeKeychainCredentials(keychainCredentials)
+        try writeClaudeOAuthAccount(from: stored)
+    }
+
     func authenticateViaBrowser() async throws -> String {
         do {
             let previous = try? await readClaudeCodeCredentials()

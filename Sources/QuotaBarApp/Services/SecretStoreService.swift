@@ -279,11 +279,12 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
     /// `/usr/bin/security`. Those items are created with `security add-generic-password`, so
     /// their decrypt ACL trusts ONLY `/usr/bin/security` (with `don't-require-password`) and
     /// carries no on-disk fallback on macOS. QuotaBar's own process is not in that ACL, so a
-    /// direct `SecItemCopyMatching` fails closed with errSecInteractionNotAllowed and reports
-    /// the account as signed-out. Delegating the read to the one binary the item trusts returns
-    /// the value without ever raising the keychain authorization dialog. An item QuotaBar has
-    /// rewritten under the open ACL is likewise readable this way, so this is safe for every
-    /// tool-owned item regardless of who last wrote it.
+    /// direct `SecItemCopyMatching` fails closed with errSecAuthFailed /
+    /// errSecInteractionNotAllowed and reports the account as signed-out. Delegating the read
+    /// to the one binary the item trusts returns the value without ever raising the keychain
+    /// authorization dialog. An item QuotaBar has rewritten under the open ACL is likewise
+    /// readable this way, so this is safe for every tool-owned item regardless of who last
+    /// wrote it.
     func readGenericPasswordUsingSecurityTool(service: String) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
@@ -308,10 +309,82 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Writes/updates a CLI-owned generic password through `/usr/bin/security`.
+    ///
+    /// `-U` upserts in place. Do **not** pass `-A`: rewriting the ACL to "allow all apps"
+    /// can itself raise a SecurityAgent password dialog, and third-party apps that rely on
+    /// Always Allow lose that grant when Claude Code later refreshes the item. QuotaBar never
+    /// needs the open ACL — it only reads/writes through `/usr/bin/security`, whose
+    /// `apple-tool:` partition matches the item Claude Code creates, so no authorization UI
+    /// appears. Direct `SecItemAdd`/`SecItemUpdate` still cannot touch these items.
+    func writeGenericPasswordUsingSecurityTool(
+        _ password: String,
+        service: String,
+        account: String
+    ) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = [
+            "add-generic-password",
+            "-U",
+            "-s",
+            service,
+            "-a",
+            account,
+            "-w",
+            password
+        ]
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
+            throw SecretStoreError.keychain(errSecAuthFailed)
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw SecretStoreError.keychain(errSecAuthFailed)
+        }
+    }
+
+    /// Compare-and-swap for CLI-owned items: read and write exclusively through
+    /// `/usr/bin/security` so ACL-restricted credentials can still be rotated. Returns false
+    /// when the live value no longer matches `expected` or the write cannot be verified —
+    /// never raises SecurityAgent UI and never throws for a failed swap (callers treat false
+    /// as "another maintainer owns this pair; try again later").
+    func compareAndSwapGenericPasswordUsingSecurityTool(
+        expected: String,
+        replacement: String,
+        service: String,
+        account: String
+    ) -> Bool {
+        guard let current = readGenericPasswordUsingSecurityTool(service: service),
+              current == expected else {
+            return false
+        }
+        do {
+            try writeGenericPasswordUsingSecurityTool(
+                replacement,
+                service: service,
+                account: account
+            )
+        } catch {
+            return false
+        }
+        return readGenericPasswordUsingSecurityTool(service: service) == replacement
+    }
+
     /// Updates an existing item only when it still contains `expected`, then reads it back.
     /// Every operation runs with SecurityAgent UI disabled. Unlike `saveSecret`, this never
     /// deletes and recreates the item, so a failed live-token rotation cannot erase Claude
     /// Code's credential or replace its ACL.
+    ///
+    /// Prefer `compareAndSwapGenericPasswordUsingSecurityTool` for Claude Code / Cursor items
+    /// whose ACL trusts only `/usr/bin/security`; this Security.framework path returns false
+    /// for those without throwing.
     func compareAndSwapGenericPassword(
         expected: Data,
         replacement: Data,
@@ -415,7 +488,13 @@ struct SystemSecretKeychainClient: SecretKeychainClient {
         let query = readQuery(service: service, account: account)
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound || status == errSecInteractionNotAllowed {
+        // ACL-restricted CLI items (Claude Code, Cursor) answer errSecAuthFailed when this
+        // process is not trusted and UI is disabled — same fail-closed class as
+        // errSecInteractionNotAllowed. Treat both as "not readable here" so callers can fall
+        // back to `/usr/bin/security` instead of surfacing SecretStoreError to the UI.
+        if status == errSecItemNotFound
+            || status == errSecInteractionNotAllowed
+            || status == errSecAuthFailed {
             return nil
         }
         guard status == errSecSuccess else {

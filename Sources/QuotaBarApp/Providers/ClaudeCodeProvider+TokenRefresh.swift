@@ -334,10 +334,16 @@ extension ClaudeCodeProvider {
             },
             compareAndSwapLiveKeychain: { expected, replacement in
                 guard lease.isValid else { return false }
-                return try compareAndSwapClaudeCodeKeychainCredentials(
+                return compareAndSwapClaudeCodeKeychainCredentials(
                     expected: expected,
                     replacement: replacement
                 )
+            },
+            writeLiveKeychain: { replacement in
+                guard lease.isValid else {
+                    throw OAuthUsageFetchError.invalidResponse
+                }
+                try writeClaudeCodeKeychainCredentials(replacement)
             },
             requestRefresh: { refreshToken, scopes in
                 guard lease.isValid else {
@@ -355,7 +361,8 @@ extension ClaudeCodeProvider {
         failedAccessToken: String?,
         now: Date,
         readLiveKeychain: () throws -> String?,
-        compareAndSwapLiveKeychain: (_ expected: String, _ replacement: String) throws -> Bool,
+        compareAndSwapLiveKeychain: (_ expected: String, _ replacement: String) -> Bool,
+        writeLiveKeychain: (_ replacement: String) throws -> Void,
         requestRefresh: (_ refreshToken: String, _ scopes: [String]?) async throws -> RefreshedOAuthToken
     ) async throws -> ClaudeCodeCredentials? {
         guard shouldFetchOAuthUsage(stored),
@@ -375,7 +382,7 @@ extension ClaudeCodeProvider {
 
         // Do not consume the shared, single-use refresh token unless this process can silently
         // update the exact live Keychain item while the CLI's refresh locks are held.
-        guard try compareAndSwapLiveKeychain(liveKeychain, liveKeychain) else {
+        guard compareAndSwapLiveKeychain(liveKeychain, liveKeychain) else {
             return nil
         }
 
@@ -395,9 +402,30 @@ extension ClaudeCodeProvider {
             claudeAuthJSON: liveStored.claudeAuthJSON
         )
         guard let updated = replacingOAuthToken(in: liveStored, with: refreshed),
-              let replacement = updated.keychainCredentials,
-              try compareAndSwapLiveKeychain(liveKeychain, replacement) else {
+              let replacement = updated.keychainCredentials else {
             throw OAuthUsageFetchError.invalidResponse
+        }
+        // The refresh grant is already consumed. Persist the rotated pair to the keychain so
+        // Claude Code and QuotaBar stay in sync; retry briefly if another writer raced us.
+        for attempt in 0 ..< 3 {
+            if compareAndSwapLiveKeychain(liveKeychain, replacement) {
+                return updated
+            }
+            if let latest = try? readLiveKeychain(),
+               let latestToken = parseOAuthToken(fromJSONText: latest),
+               latestToken.accessToken == refreshed.accessToken {
+                return updated
+            }
+            if attempt < 2 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        // Last resort: upsert without the expected-value check. The old refresh token is dead;
+        // leaving it in the keychain forces Claude Code to demand a fresh login.
+        do {
+            try writeLiveKeychain(replacement)
+        } catch {
+            AppLog.account.error("Claude Code keychain write-back failed after token refresh; keeping rotated pair in QuotaBar store")
         }
         return updated
     }

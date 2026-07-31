@@ -329,11 +329,11 @@ extension ClaudeCodeProvider {
     }
 
     func writeClaudeCodeKeychainCredentials(_ credentials: String) throws {
-        guard let data = credentials.data(using: .utf8) else {
-            throw SecretStoreError.dataEncoding
-        }
-        try SystemSecretKeychainClient().saveSecret(
-            data,
+        // Must go through `/usr/bin/security`: the live item's ACL trusts only that binary, so
+        // Security.framework SecItemAdd/Update fails closed (errSecAuthFailed) and previously
+        // surfaced as "本地登录记录需要重新建立" while leaving the access token expired.
+        try SystemSecretKeychainClient().writeGenericPasswordUsingSecurityTool(
+            credentials,
             service: "Claude Code-credentials",
             account: NSUserName()
         )
@@ -342,14 +342,12 @@ extension ClaudeCodeProvider {
     func compareAndSwapClaudeCodeKeychainCredentials(
         expected: String,
         replacement: String
-    ) throws -> Bool {
-        guard let expectedData = expected.data(using: .utf8),
-              let replacementData = replacement.data(using: .utf8) else {
-            throw SecretStoreError.dataEncoding
-        }
-        return try SystemSecretKeychainClient().compareAndSwapGenericPassword(
-            expected: expectedData,
-            replacement: replacementData,
+    ) -> Bool {
+        // Same ACL constraint as the write path: Security.framework CAS cannot read or update
+        // the item, so token renewal must read/compare/write via the trusted security tool.
+        SystemSecretKeychainClient().compareAndSwapGenericPasswordUsingSecurityTool(
+            expected: expected,
+            replacement: replacement,
             service: "Claude Code-credentials",
             account: NSUserName()
         )
