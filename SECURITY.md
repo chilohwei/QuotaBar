@@ -22,7 +22,7 @@ QuotaBar supports in-app self-update for convenience. Because this project curre
 - The app inside the DMG must have the expected bundle identifier, version, executable, and a valid code-signing state.
 - QuotaBar does not remove the macOS quarantine attribute automatically.
 
-Developer ID signing and notarization should be added before treating update verification as publisher-identity verification.
+Developer ID signing and notarization should be added before treating update verification as publisher-identity verification. A step-by-step enablement runbook (CI secrets, workflow/build-script changes, updater Team ID pinning, and keychain ACL tightening) is documented in [docs/signing-and-notarization.md](docs/signing-and-notarization.md).
 
 ## Reporting Issues
 

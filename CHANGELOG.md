@@ -18,6 +18,7 @@
 
 ### 文档
 - 更正 README 关于签名/公证的描述，使其与 `SECURITY.md` 及实际发布产物（社区分发、即席签名、来源 + SHA256 完整性校验）保持一致。
+- 新增 `docs/signing-and-notarization.md`：Developer ID 签名 + 公证 + 收紧密钥串 ACL + 更新锚定发布者身份的完整启用手册（需你在 CI 配置 Apple 凭据后受控启用），并从 `SECURITY.md` 链接。
 
 ## [1.3.1] - 2026-07-31
 - 修复 Claude Code token 续期写回钥匙串，消除误报与授权弹窗。
