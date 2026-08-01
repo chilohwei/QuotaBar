@@ -33,7 +33,7 @@ swift test             # 运行单元测试
 
 ## 代码约定
 
-- 遵循仓库根目录的 `.editorconfig`（4 空格缩进、LF、文件末尾换行、去除行尾空白）。
+- 遵循仓库根目录的 `.editorconfig`（4 空格缩进、LF、文件末尾换行、去除行尾空白）。提交前可运行 `bash scripts/check_style.sh` 校验，CI 也会执行同一检查。项目**不使用** swift-format 全量重排——其默认风格与既有约定冲突，请保持与周边代码一致的手写风格。
 - 保持零第三方依赖；新增能力优先使用系统框架。
 - 日志统一使用 `AppLog`（`os.Logger`），并按敏感度标注 `privacy:`——账号 ID/工具名用 `.public`，错误描述用 `.private`，切勿把 token/secret 写入日志。
 - 外部命令一律通过 `Process` 的参数数组调用，禁止拼接 shell 字符串。

@@ -29,6 +29,9 @@ jobs:
       - name: Lint shell scripts
         run: bash -n scripts/*.sh
 
+      - name: Style hygiene
+        run: bash scripts/check_style.sh
+
       - name: Build
         run: swift build
 
