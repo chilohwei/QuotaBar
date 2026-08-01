@@ -10,6 +10,9 @@
 - 新增 `CONTRIBUTING.md`、本 `CHANGELOG.md`，并在 README 增加开发章节。
 - 新增 `.swift-version` 记录工具链版本。
 
+### 重构
+- `AppState`：将 8 个分散的宿主回调闭包（更新流程、开机自启、关闭面板、重启工具、重启提示）收敛为显式的 `AppHostActions` 契约，降低上帝对象的隐式耦合。行为、`@Published` 接口与 UI 绑定均不变。
+
 ### 优化
 - `QuotaHTTPClient` 默认会话与 Codex 会话增加显式请求超时（20s/40s），避免慢端点长时间挂起菜单栏刷新。
 

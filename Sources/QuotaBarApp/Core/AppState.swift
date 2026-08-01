@@ -50,14 +50,7 @@ final class AppState: ObservableObject {
     let refreshBackoffPolicy = RefreshBackoffPolicy()
     let refreshIntervalPolicy = RefreshIntervalPolicy()
     let notificationService = QuotaNotificationService()
-    private var checkForUpdatesAction: (() -> Void)?
-    private var installAvailableUpdateAction: (() -> Void)?
-    private var ignoreAvailableUpdateAction: (() -> Void)?
-    private var launchAtLoginEnabledProvider: (() -> Bool)?
-    private var setLaunchAtLoginEnabledAction: ((Bool) -> Void)?
-    private var closeDashboardAction: (() -> Void)?
-    private var toolRestartAction: ((ToolKind) -> Void)?
-    private var restartPromptPresenter: ((ToolKind, String) -> Void)?
+    private var hostActions = AppHostActions()
 
     var refreshTask: Task<Void, Never>?
     var dashboardRefreshTask: Task<Void, Never>?
@@ -476,7 +469,7 @@ final class AppState: ObservableObject {
                 // Codex gets a dialog with a working "restart now" button as the only prompt —
                 // the panel's notice bar stays hidden so the two never show together.
                 if account.tool == .codex {
-                    restartPromptPresenter?(account.tool, message)
+                    hostActions.presentRestartPrompt?(account.tool, message)
                 } else {
                     restartRequiredMessage = message
                     restartRequiredTool = account.tool
@@ -670,38 +663,38 @@ final class AppState: ObservableObject {
         installAvailableUpdate: @escaping () -> Void,
         ignoreAvailableUpdate: @escaping () -> Void
     ) {
-        checkForUpdatesAction = checkForUpdates
-        installAvailableUpdateAction = installAvailableUpdate
-        ignoreAvailableUpdateAction = ignoreAvailableUpdate
+        hostActions.checkForUpdates = checkForUpdates
+        hostActions.installAvailableUpdate = installAvailableUpdate
+        hostActions.ignoreAvailableUpdate = ignoreAvailableUpdate
     }
 
     func checkForUpdatesFromDashboard() {
-        checkForUpdatesAction?()
+        hostActions.checkForUpdates?()
     }
 
     func installAvailableUpdateFromDashboard() {
-        installAvailableUpdateAction?()
+        hostActions.installAvailableUpdate?()
     }
 
     func ignoreAvailableUpdateFromDashboard() {
-        ignoreAvailableUpdateAction?()
+        hostActions.ignoreAvailableUpdate?()
     }
 
     func registerLaunchAtLoginActions(
         isEnabled: @escaping () -> Bool,
         setEnabled: @escaping (Bool) -> Void
     ) {
-        launchAtLoginEnabledProvider = isEnabled
-        setLaunchAtLoginEnabledAction = setEnabled
+        hostActions.isLaunchAtLoginEnabled = isEnabled
+        hostActions.setLaunchAtLoginEnabled = setEnabled
         refreshLaunchAtLoginState()
     }
 
     func refreshLaunchAtLoginState() {
-        isLaunchAtLoginEnabled = launchAtLoginEnabledProvider?() ?? false
+        isLaunchAtLoginEnabled = hostActions.isLaunchAtLoginEnabled?() ?? false
     }
 
     func setLaunchAtLoginEnabledFromDashboard(_ enabled: Bool) {
-        setLaunchAtLoginEnabledAction?(enabled)
+        hostActions.setLaunchAtLoginEnabled?(enabled)
     }
 
     func setRefreshOnOpenEnabled(_ enabled: Bool) {
@@ -723,38 +716,38 @@ final class AppState: ObservableObject {
     }
 
     func registerDashboardCloseAction(_ action: @escaping () -> Void) {
-        closeDashboardAction = action
+        hostActions.closeDashboard = action
     }
 
     func closeDashboard() {
-        closeDashboardAction?()
+        hostActions.closeDashboard?()
     }
 
     func registerToolRestartAction(_ action: @escaping (ToolKind) -> Void) {
-        toolRestartAction = action
+        hostActions.restartTool = action
     }
 
     func registerRestartPromptPresenter(_ action: @escaping (ToolKind, String) -> Void) {
-        restartPromptPresenter = action
+        hostActions.presentRestartPrompt = action
     }
 
     var canRestartTool: Bool {
         // Only Cursor's restart is offered from the notice bar — Codex prompts via a dialog
         // (see activateAccount) and Claude Code remains a terminal session only the user
         // can restart.
-        restartRequiredTool == .cursor && toolRestartAction != nil
+        restartRequiredTool == .cursor && hostActions.restartTool != nil
     }
 
     func restartRequiredToolNow() {
         guard let tool = restartRequiredTool, canRestartTool else { return }
-        toolRestartAction?(tool)
+        hostActions.restartTool?(tool)
         dismissRestartRequiredMessage()
     }
 
     /// Direct restart for dialog-driven prompts, which carry their own tool context instead
     /// of going through the notice-bar state.
     func restartToolNow(_ tool: ToolKind) {
-        toolRestartAction?(tool)
+        hostActions.restartTool?(tool)
     }
 
     func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {
