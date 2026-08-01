@@ -164,6 +164,7 @@ struct QuotaHTTPClient: Sendable {
     }
 }
 
+// @unchecked Sendable: the shared non-Sendable `DateFormatter` is only touched under `lock`.
 private final class HTTPDateFormatter: @unchecked Sendable {
     static let shared = HTTPDateFormatter()
 

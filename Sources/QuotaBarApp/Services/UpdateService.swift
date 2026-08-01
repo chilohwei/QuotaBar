@@ -511,6 +511,9 @@ struct GitHubRelease: Decodable {
     }
 }
 
+// @unchecked Sendable: `continuation`/`session` are assigned before the download task is resumed
+// and afterward touched only from URLSession's serial delegate callbacks; `finish` clears and
+// resumes the continuation exactly once.
 private final class UpdateAssetDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let progress: (@Sendable (UpdateDownloadProgress) -> Void)?
     private var continuation: CheckedContinuation<(URL, URLResponse), Error>?

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 
+// @unchecked Sendable: the mutable `text` is only ever read or written under `lock`.
 final class LoginOutputBuffer: @unchecked Sendable {
     let lock = NSLock()
     var text = ""

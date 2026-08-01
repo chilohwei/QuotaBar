@@ -11,6 +11,7 @@ struct CodexDeviceAuthPrompt: Sendable {
     let code: String
 }
 
+// @unchecked Sendable: `buffer`/`didFindURL` are only mutated or read under `lock`.
 final class CodexLoginFallbackURLScanner: @unchecked Sendable {
     let lock = NSLock()
     var buffer = ""
@@ -91,6 +92,7 @@ final class CodexLoginFallbackURLScanner: @unchecked Sendable {
     }
 }
 
+// @unchecked Sendable: `buffer`/`didPresent` are only mutated or read under `lock`.
 final class CodexDeviceAuthPromptScanner: @unchecked Sendable {
     let lock = NSLock()
     var buffer = ""

@@ -79,6 +79,7 @@ struct SecretStoreService {
 
     private static let aclMigrationRegistry = ACLMigrationRegistry()
 
+    // @unchecked Sendable: the `claimed` set is only mutated or read under `lock`.
     private final class ACLMigrationRegistry: @unchecked Sendable {
         private let lock = NSLock()
         private var claimed: Set<String> = []

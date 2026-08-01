@@ -574,6 +574,8 @@ extension ClaudeCodeProvider {
 
 }
 
+// @unchecked Sendable: `ownedLocks` and `heartbeatTimer` are immutable after init; the only
+// mutable field, `isReleased`, is read and written under `stateLock`.
 final class ClaudeOAuthRefreshLease: @unchecked Sendable {
     private struct OwnedLock {
         let url: URL

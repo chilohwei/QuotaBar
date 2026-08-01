@@ -16,6 +16,10 @@
 ### 优化
 - `QuotaHTTPClient` 默认会话与 Codex 会话增加显式请求超时（20s/40s），避免慢端点长时间挂起菜单栏刷新。
 
+### 测试与维护
+- 新增 `QuotaHTTPClient` 的 `Retry-After` 解析测试（数值秒、HTTP-date、缺失/空白、过期时间钳制到当前时刻）。
+- 为 8 处 `@unchecked Sendable` 类型补充线程安全说明注释，明确各自的同步机制（`NSLock` 保护 / 初始化后不可变 / `@MainActor` 跳转 / URLSession 串行回调）。
+
 ### 文档
 - 更正 README 关于签名/公证的描述，使其与 `SECURITY.md` 及实际发布产物（社区分发、即席签名、来源 + SHA256 完整性校验）保持一致。
 - 新增 `docs/signing-and-notarization.md`：Developer ID 签名 + 公证 + 收紧密钥串 ACL + 更新锚定发布者身份的完整启用手册（需你在 CI 配置 Apple 凭据后受控启用），并从 `SECURITY.md` 链接。

@@ -874,6 +874,8 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 }
 
+// @unchecked Sendable: its only stored property is a weak controller reference set at init and
+// read solely inside a `@MainActor` hop, so there is no cross-thread mutable state.
 private final class UpdateProgressRelay: @unchecked Sendable {
     weak var controller: StatusBarController?
 
