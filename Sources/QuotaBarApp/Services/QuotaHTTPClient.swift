@@ -33,7 +33,19 @@ struct QuotaHTTPClient: Sendable {
     private let session: URLSession
     private let maxAttempts: Int
 
-    init(session: URLSession = .shared, maxAttempts: Int = 3) {
+    /// Shared session with a bounded per-request timeout. `URLSession.shared` leaves the request
+    /// timeout at 60s — long enough to stall a menu-bar refresh on a hung provider endpoint — so
+    /// a 20s cap fails fast into the existing retry/backoff path instead. Cookie and cache
+    /// behaviour matches the process default, so this only tightens timeouts; callers that need
+    /// isolation (Codex) still inject their own session.
+    static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 40
+        return URLSession(configuration: configuration)
+    }()
+
+    init(session: URLSession = QuotaHTTPClient.defaultSession, maxAttempts: Int = 3) {
         self.session = session
         self.maxAttempts = max(maxAttempts, 1)
     }

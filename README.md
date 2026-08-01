@@ -35,8 +35,8 @@ QuotaBar 是一款 macOS 菜单栏工具，帮助你集中查看 Codex、Cursor�
 1. 下载并打开 DMG 文件。
 2. 将 `QuotaBar.app` 拖入 `Applications`。
 3. 从“应用程序”文件夹启动 QuotaBar。
-4. QuotaBar 的正式版本已使用 Developer ID 签名并通过 Apple 公证，macOS 会自动验证应用来源。
-5. 如果你已经确认下载来源和 SHA256，但 macOS 仍阻止启动，可以手动移除 quarantine 标记：
+4. 当前版本为社区分发，采用即席（ad-hoc）签名、未经 Apple 公证，因此首次启动会被 Gatekeeper 拦截。这是预期行为，安全性由「官方 Release 来源校验 + SHA256 完整性校验」保证（详见 [SECURITY.md](./SECURITY.md)）。
+5. 核对下载来源与每个 Release 附带的 SHA256 无误后，移除 quarantine 标记再启动：
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/QuotaBar.app
@@ -69,6 +69,20 @@ brew upgrade --cask quotabar
 5. 查看账号卡片上的额度、状态和更新时间。
 6. 需要切换账号时，点击对应账号的“切换”。
 7. 按提示重启对应应用，让账号切换生效。
+
+## 开发
+
+QuotaBar 使用 Swift Package Manager 构建，无第三方依赖。环境要求：macOS 13+、Xcode 26.x（Swift 6.1+）。
+
+```bash
+swift build            # 构建
+swift run QuotaBar     # 本地运行（图标出现在菜单栏，而非 Dock）
+swift test             # 运行单元测试
+```
+
+主要目录：`Sources/QuotaBar/`（入口）、`Sources/QuotaBarApp/App`（生命周期与状态栏）、`Core`（`AppState` 状态中枢与刷新策略）、`Providers`（Codex/Cursor/Claude Code）、`Services`（Keychain/HTTP/通知/更新）、`UI`（SwiftUI 面板）、`Tests/`（单元测试）。
+
+构建、发布与贡献规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)，版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 隐私说明
 

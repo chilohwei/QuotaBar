@@ -35,8 +35,8 @@ Install from the DMG:
 1. Download and open the DMG file.
 2. Drag `QuotaBar.app` into `Applications`.
 3. Launch QuotaBar from the Applications folder.
-4. QuotaBar releases are signed with Developer ID and notarized by Apple, so macOS can verify the app automatically.
-5. If you have verified the download source and SHA256 but macOS still blocks launch, remove the quarantine attribute manually:
+4. Current builds are community-distributed: ad-hoc signed and not notarized by Apple, so Gatekeeper blocks the first launch. This is expected; integrity is guaranteed by official-release source checks plus SHA256 verification (see [SECURITY.md](./SECURITY.md)).
+5. After verifying the download source and the SHA256 shipped with each release, remove the quarantine attribute and launch:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/QuotaBar.app
@@ -70,6 +70,20 @@ System requirement: macOS Ventura 13 or later.
 6. Use the available account filter when you only want accounts that can still be used.
 7. Choose consume-first or availability-first sorting to find the recommended account.
 8. Click `Switch` on an account, then restart the corresponding tool when prompted.
+
+## Development
+
+QuotaBar is built with Swift Package Manager and has no third-party dependencies. Requirements: macOS 13+, Xcode 26.x (Swift 6.1+).
+
+```bash
+swift build            # build
+swift run QuotaBar     # run locally (icon appears in the menu bar, not the Dock)
+swift test             # run unit tests
+```
+
+Layout: `Sources/QuotaBar/` (entry point), `Sources/QuotaBarApp/App` (lifecycle & status bar), `Core` (the `AppState` hub and refresh policies), `Providers` (Codex/Cursor/Claude Code), `Services` (Keychain/HTTP/notifications/updates), `UI` (SwiftUI panels), and `Tests/`.
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for build, release, and contribution guidelines, and [CHANGELOG.md](./CHANGELOG.md) for the version history.
 
 ## Privacy
 

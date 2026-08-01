@@ -74,6 +74,8 @@ struct CodexProvider: Provider {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 40
         return URLSession(configuration: configuration)
     }()
 
