@@ -24,6 +24,18 @@ dist/
 *.app
 *.xcarchive
 
+# Signing / notarization material — NEVER commit (enforced by scripts/check_no_signing_material.sh).
+# Certs and keys belong in GitHub Actions Secrets or the local keychain, never in this public repo.
+*.p12
+*.pfx
+*.p8
+*.cer
+*.der
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+
 # Local config and logs
 .env
 .env.*

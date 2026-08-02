@@ -32,6 +32,9 @@ jobs:
       - name: Style hygiene
         run: bash scripts/check_style.sh
 
+      - name: Guard against committed signing material
+        run: bash scripts/check_no_signing_material.sh
+
       - name: Build
         run: swift build
 
