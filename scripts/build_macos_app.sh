@@ -499,6 +499,83 @@ create_app() {
     echo "$app_dir"
 }
 
+# Notarizes and staples a signed DMG when NOTARIZE=true; a strict no-op otherwise, so ad-hoc builds
+# are left exactly as before. ALL progress is written to stderr because create_dmg's stdout is its
+# return value (the DMG path). Requires a real Developer ID SIGNING_IDENTITY plus App Store Connect
+# API credentials: AC_API_KEY_ID, AC_API_ISSUER_ID, and either AC_API_KEY_P8_BASE64 or
+# AC_API_KEY_PATH.
+#
+# Callers MUST invoke this as `notarize_and_staple "$dmg" || return 1` BEFORE writing the .sha256
+# sidecar, because: (1) stapling rewrites the DMG bytes, so the checksum must describe the stapled
+# file; and (2) create_dmg runs inside a command substitution where bash does NOT inherit errexit,
+# so this function guards every failure explicitly and the caller must forward the non-zero return —
+# otherwise a notarization failure would ship an un-notarized DMG with a valid-looking checksum.
+#
+# Only the DMG is stapled (not the inner .app) — deliberate: the Homebrew cask (primary channel)
+# strips quarantine on install, and direct-DMG users are online at first launch, where Gatekeeper
+# does a live notary lookup. Staple the .app too if offline first-launch of an extracted copy must
+# be supported.
+notarize_and_staple() {
+    local dmg_path="$1"
+    if [[ "${NOTARIZE:-false}" != "true" ]]; then
+        return 0
+    fi
+
+    if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+        echo "notarize: NOTARIZE=true requires a Developer ID SIGNING_IDENTITY (got ad-hoc '-')." >&2
+        return 1
+    fi
+    if [[ -z "${AC_API_KEY_ID:-}" || -z "${AC_API_ISSUER_ID:-}" ]]; then
+        echo "notarize: AC_API_KEY_ID and AC_API_ISSUER_ID are required." >&2
+        return 1
+    fi
+
+    # Decode the private key to a temp file that is removed on every path below. A RETURN trap is
+    # deliberately NOT used: in bash it is not function-scoped and would re-fire (referencing an
+    # out-of-scope key_file under set -u) on later function returns.
+    local key_path=""
+    local key_file=""
+    if [[ -n "${AC_API_KEY_P8_BASE64:-}" ]]; then
+        key_file="$(mktemp "${TMPDIR:-/tmp}/quotabar-ac-key.XXXXXX")"
+        if ! printf '%s' "$AC_API_KEY_P8_BASE64" | base64 --decode > "$key_file"; then
+            rm -f "$key_file"
+            echo "notarize: could not decode AC_API_KEY_P8_BASE64." >&2
+            return 1
+        fi
+        key_path="$key_file"
+    elif [[ -n "${AC_API_KEY_PATH:-}" ]]; then
+        key_path="$AC_API_KEY_PATH"
+    else
+        echo "notarize: provide AC_API_KEY_P8_BASE64 or AC_API_KEY_PATH." >&2
+        return 1
+    fi
+
+    echo "notarize: submitting $(basename "$dmg_path") to Apple (this can take a few minutes)..." >&2
+    # Gate on the reported status, not just the exit code: some notarytool versions exit 0 even when
+    # the final status is Invalid.
+    local submit_out=""
+    submit_out="$(xcrun notarytool submit "$dmg_path" \
+        --key "$key_path" \
+        --key-id "$AC_API_KEY_ID" \
+        --issuer "$AC_API_ISSUER_ID" \
+        --wait 2>&1)" || true
+    # The decoded private key is only needed for submission; remove it before doing anything else.
+    if [[ -n "$key_file" ]]; then
+        rm -f "$key_file"
+    fi
+    printf '%s\n' "$submit_out" >&2
+    if ! grep -qiE 'status:[[:space:]]*Accepted' <<<"$submit_out"; then
+        local sub_id=""
+        sub_id="$(grep -oiE 'id: [0-9a-f-]{36}' <<<"$submit_out" | head -1 | awk '{print $2}')" || true
+        echo "notarize: submission was NOT Accepted for $dmg_path (id=${sub_id:-unknown}); debug with 'xcrun notarytool log ${sub_id:-<id>} --key-id $AC_API_KEY_ID --issuer $AC_API_ISSUER_ID --key <p8>'." >&2
+        return 1
+    fi
+
+    xcrun stapler staple "$dmg_path" >&2 || return 1
+    xcrun stapler validate "$dmg_path" >&2 || return 1
+    echo "notarize: notarized and stapled $(basename "$dmg_path")." >&2
+}
+
 create_dmg() {
     local app_dir="$1"
     local flavor="$2"
@@ -539,6 +616,7 @@ create_dmg() {
         fi
 
         rm -rf "$staging_dir"
+        notarize_and_staple "$dmg_path" || return 1
         shasum -a 256 "$dmg_path" | awk '{print $1}' > "$dmg_path.sha256"
         echo "$dmg_path"
         return
@@ -605,6 +683,7 @@ create_dmg() {
 
     rm -rf "$staging_dir"
     rm -f "$temp_dmg"
+    notarize_and_staple "$dmg_path" || return 1
     shasum -a 256 "$dmg_path" | awk '{print $1}' > "$dmg_path.sha256"
     echo "$dmg_path"
 }
