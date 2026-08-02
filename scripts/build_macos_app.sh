@@ -501,9 +501,10 @@ create_app() {
 
 # Notarizes and staples a signed DMG when NOTARIZE=true; a strict no-op otherwise, so ad-hoc builds
 # are left exactly as before. ALL progress is written to stderr because create_dmg's stdout is its
-# return value (the DMG path). Requires a real Developer ID SIGNING_IDENTITY plus App Store Connect
-# API credentials: AC_API_KEY_ID, AC_API_ISSUER_ID, and either AC_API_KEY_P8_BASE64 or
-# AC_API_KEY_PATH.
+# return value (the DMG path). Requires a real Developer ID SIGNING_IDENTITY plus notarization
+# credentials, EITHER a stored notarytool keychain profile (NOTARY_KEYCHAIN_PROFILE — created once
+# with `xcrun notarytool store-credentials`) OR an App Store Connect API key (AC_API_KEY_ID +
+# AC_API_ISSUER_ID + either AC_API_KEY_P8_BASE64 or AC_API_KEY_PATH).
 #
 # Callers MUST invoke this as `notarize_and_staple "$dmg" || return 1` BEFORE writing the .sha256
 # sidecar, because: (1) stapling rewrites the DMG bytes, so the checksum must describe the stapled
@@ -525,41 +526,44 @@ notarize_and_staple() {
         echo "notarize: NOTARIZE=true requires a Developer ID SIGNING_IDENTITY (got ad-hoc '-')." >&2
         return 1
     fi
-    if [[ -z "${AC_API_KEY_ID:-}" || -z "${AC_API_ISSUER_ID:-}" ]]; then
-        echo "notarize: AC_API_KEY_ID and AC_API_ISSUER_ID are required." >&2
-        return 1
-    fi
-
-    # Decode the private key to a temp file that is removed on every path below. A RETURN trap is
-    # deliberately NOT used: in bash it is not function-scoped and would re-fire (referencing an
-    # out-of-scope key_file under set -u) on later function returns.
-    local key_path=""
+    # Resolve notarization credentials into notary_auth[]. Prefer a stored notarytool keychain
+    # profile (nothing to decode or clean up); otherwise use an App Store Connect API key given
+    # inline (base64, for CI) or as a file path. A RETURN trap is deliberately NOT used to clean the
+    # temp key: in bash it is not function-scoped and would re-fire (referencing an out-of-scope
+    # key_file under set -u) on later function returns.
+    local -a notary_auth=()
     local key_file=""
-    if [[ -n "${AC_API_KEY_P8_BASE64:-}" ]]; then
-        key_file="$(mktemp "${TMPDIR:-/tmp}/quotabar-ac-key.XXXXXX")"
-        if ! printf '%s' "$AC_API_KEY_P8_BASE64" | base64 --decode > "$key_file"; then
-            rm -f "$key_file"
-            echo "notarize: could not decode AC_API_KEY_P8_BASE64." >&2
+    if [[ -n "${NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+        notary_auth=(--keychain-profile "$NOTARY_KEYCHAIN_PROFILE")
+    else
+        if [[ -z "${AC_API_KEY_ID:-}" || -z "${AC_API_ISSUER_ID:-}" ]]; then
+            echo "notarize: set NOTARY_KEYCHAIN_PROFILE, or AC_API_KEY_ID + AC_API_ISSUER_ID (with a key)." >&2
             return 1
         fi
-        key_path="$key_file"
-    elif [[ -n "${AC_API_KEY_PATH:-}" ]]; then
-        key_path="$AC_API_KEY_PATH"
-    else
-        echo "notarize: provide AC_API_KEY_P8_BASE64 or AC_API_KEY_PATH." >&2
-        return 1
+        local key_path=""
+        if [[ -n "${AC_API_KEY_P8_BASE64:-}" ]]; then
+            key_file="$(mktemp "${TMPDIR:-/tmp}/quotabar-ac-key.XXXXXX")"
+            if ! printf '%s' "$AC_API_KEY_P8_BASE64" | base64 --decode > "$key_file"; then
+                rm -f "$key_file"
+                echo "notarize: could not decode AC_API_KEY_P8_BASE64." >&2
+                return 1
+            fi
+            key_path="$key_file"
+        elif [[ -n "${AC_API_KEY_PATH:-}" ]]; then
+            key_path="$AC_API_KEY_PATH"
+        else
+            echo "notarize: provide AC_API_KEY_P8_BASE64 or AC_API_KEY_PATH (or NOTARY_KEYCHAIN_PROFILE)." >&2
+            return 1
+        fi
+        notary_auth=(--key "$key_path" --key-id "$AC_API_KEY_ID" --issuer "$AC_API_ISSUER_ID")
     fi
 
     echo "notarize: submitting $(basename "$dmg_path") to Apple (this can take a few minutes)..." >&2
     # Gate on the reported status, not just the exit code: some notarytool versions exit 0 even when
     # the final status is Invalid.
     local submit_out=""
-    submit_out="$(xcrun notarytool submit "$dmg_path" \
-        --key "$key_path" \
-        --key-id "$AC_API_KEY_ID" \
-        --issuer "$AC_API_ISSUER_ID" \
-        --wait 2>&1)" || true
-    # The decoded private key is only needed for submission; remove it before doing anything else.
+    submit_out="$(xcrun notarytool submit "$dmg_path" "${notary_auth[@]}" --wait 2>&1)" || true
+    # The decoded private key (if any) is only needed for submission; remove it before anything else.
     if [[ -n "$key_file" ]]; then
         rm -f "$key_file"
     fi
@@ -567,7 +571,7 @@ notarize_and_staple() {
     if ! grep -qiE 'status:[[:space:]]*Accepted' <<<"$submit_out"; then
         local sub_id=""
         sub_id="$(grep -oiE 'id: [0-9a-f-]{36}' <<<"$submit_out" | head -1 | awk '{print $2}')" || true
-        echo "notarize: submission was NOT Accepted for $dmg_path (id=${sub_id:-unknown}); debug with 'xcrun notarytool log ${sub_id:-<id>} --key-id $AC_API_KEY_ID --issuer $AC_API_ISSUER_ID --key <p8>'." >&2
+        echo "notarize: submission was NOT Accepted for $dmg_path (id=${sub_id:-unknown}); inspect with 'xcrun notarytool log ${sub_id:-<id>}' using the same credentials." >&2
         return 1
     fi
 

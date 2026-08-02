@@ -19,6 +19,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # CI publishes a GitHub Release only when it can sign+notarize itself (MACOS_SIGNING_IDENTITY set).
+  # Without that secret, releases are cut locally via scripts/release_local.sh — so CI must NOT
+  # publish, or its ad-hoc DMGs would clobber the locally notarized ones.
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+    steps:
+      - name: Decide whether CI should publish
+        id: decide
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ -n "$SIGNING_IDENTITY" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "CI will sign, notarize and publish this tag."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "CI will NOT publish (no MACOS_SIGNING_IDENTITY secret). Releases are cut locally via scripts/release_local.sh."
+          fi
+
   build:
     name: Build (${{ matrix.arch }})
     runs-on: macos-latest
@@ -166,8 +188,8 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
-    if: github.ref_type == 'tag'
+    needs: [gate, build]
+    if: needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

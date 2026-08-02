@@ -8,6 +8,22 @@
 >
 > 说明：签名/公证/自动更新是不可回滚、无法本地端到端验证的关键路径，依赖只有你能提供的 Apple 凭据，因此在一次**受控的测试发布**中启用，而非无人值守直接开。
 
+## 本地发布（推荐，凭据不离开本机）
+
+除了「配 GitHub Secrets 让 CI 公证」外，现已支持**本地一键发布**——证书和公证密钥全程只在你 Mac 上：
+
+```bash
+# 一次性：把公证凭据存进钥匙串 profile（之后不用再管 .p8）
+xcrun notarytool store-credentials QuotaBarNotary \
+  --key ~/keys/AuthKey_XXXXXXXXXX.p8 --key-id XXXXXXXXXX --issuer <issuer-uuid>
+
+# 每次发版：本机构建+签名+公证+装订 → 上传 Release → 更新 cask
+export NOTARY_KEYCHAIN_PROFILE=QuotaBarNotary
+scripts/release_local.sh --version 1.3.2            # 先 --dry-run 看预检
+```
+
+`release_local.sh` 会自动从钥匙串取 Developer ID 身份、校验版本号/工作区干净/已推送，再调用 `build_macos_app.sh`（`NOTARIZE=true`）产出公证 DMG，用 `gh` 建 Release 上传，最后跑 `update_homebrew_cask.sh` + tap 同步。此模式下 CI 的 `gate` 任务会自动**不发布**（只做构建/测试），因此不会覆盖你的公证包。选择本地发布时，下文「阶段 B 配置 Secrets」可跳过，只需完成阶段 A（申请/导出凭据）。
+
 ## 背景与现状
 
 - 当前发布产物为**即席（ad-hoc）签名、未公证**：`codesign -dv` 显示 `Signature=adhoc`、`TeamIdentifier=not set`，`spctl -a` 拒绝。

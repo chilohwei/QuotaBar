@@ -7,6 +7,8 @@
 ### 新增
 - 发布流水线支持 Developer ID 签名 + Apple 公证：`build_macos_app.sh` 新增 `notarize_and_staple`（`NOTARIZE=true` 时 `notarytool submit --wait → stapler staple → validate`，在两处 `.sha256` 写入前调用，因装订会改写 DMG 字节），发布工作流按需导入证书、传签名/公证凭据并校验产物。**未配 `MACOS_SIGNING_IDENTITY` secret 时严格回退到现有 ad-hoc 构建**，配置后自动激活；每次发版即 `git tag && git push` 全自动签名+公证+分发。签名凭据只存 GitHub Actions Secrets 或本机钥匙串，**绝不进仓库**。
 - 新增 `scripts/check_no_signing_material.sh` 并接入 CI：仓库一旦出现证书/私钥文件（`.p12/.p8/.cer/...`）或 PEM 私钥块即让构建失败，防止把签名私钥误提交进这个公开仓库；配套在 `.gitignore` 忽略证书/密钥类文件。
+- 新增 `scripts/release_local.sh`：在本机用钥匙串里的 Developer ID 身份构建+签名+公证+装订，再用 `gh` 上传到 GitHub Release 并更新 Homebrew cask/tap——凭据全程只在本机，不进 Secrets 也不进仓库。`build_macos_app.sh` 的公证支持新增 `NOTARY_KEYCHAIN_PROFILE`（`xcrun notarytool store-credentials` 存一次即可，无需管理 `.p8`）。
+- 发布工作流新增 `gate` 任务：**仅当 CI 配置了签名密钥时才发布 Release**；未配置时（本地发布模式）CI 只构建/测试、不发布，避免 ad-hoc 包覆盖本地公证包。
 - 新增 PR 与推送触发的 CI 工作流（`ci.yml`）：构建、运行全部单元测试、校验脚本语法与 house-style 卫生。
 - 新增 `scripts/check_style.sh`：校验 Swift 源码的缩进（禁止制表符）、行尾空白与文件末换行，并接入 CI。经评估**未采用** swift-format 全量重排——其默认换行/花括号风格与项目既有约定冲突，且会产生约 5000 行破坏 git blame 的改动。
 - 新增 `CONTRIBUTING.md`、本 `CHANGELOG.md`，并在 README 增加开发章节。
