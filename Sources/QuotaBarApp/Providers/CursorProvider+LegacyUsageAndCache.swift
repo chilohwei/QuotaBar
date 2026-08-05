@@ -25,21 +25,6 @@ extension CursorProvider {
         )
     }
 
-    func parsePlanWindow(_ dict: [String: Any]?, resetAt: Date?) -> QuotaWindow? {
-        guard let dict else { return nil }
-        let used = firstDouble(in: dict, keys: Self.usedAmountKeys)
-        let limit = firstDouble(in: dict, keys: Self.limitAmountKeys)
-        let remaining = firstDouble(in: dict, keys: Self.remainingAmountKeys)
-
-        if let used, let limit, limit > 0 {
-            return QuotaWindow(label: "Total", used: used, limit: limit, resetAt: resetAt)
-        }
-        if let remaining, let limit, limit > 0 {
-            return QuotaWindow(label: "Total", used: max(limit - remaining, 0), limit: limit, resetAt: resetAt)
-        }
-        return nil
-    }
-
     func parsePercentWindow(label: String, usedPercent: Double?, resetAt: Date?) -> QuotaWindow? {
         guard var usedPercent else { return nil }
         if usedPercent <= 1 {

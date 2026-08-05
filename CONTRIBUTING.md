@@ -46,18 +46,10 @@ swift test             # 运行单元测试
 
 ## 发布流程
 
-发布由标签驱动，无需手动上传产物：
+有两种模式，细节见单一事实来源 [docs/signing-and-notarization.md](docs/signing-and-notarization.md)：
 
-1. 确认 `main` 为待发布状态且 CI 通过。
-2. 选择新版本号（必须高于远程最新的 `vX.Y.Z` 标签；`scripts/release_version.sh next` 可给出建议）。
-3. 打带注释的签名标签并推送：
-
-   ```bash
-   git tag -a v1.3.2 -m "版本说明"
-   git push origin v1.3.2
-   ```
-
-4. [`build-macos-packages.yml`](.github/workflows/build-macos-packages.yml) 会自动：三架构（arm64 / x86_64 / universal）构建 DMG → 校验 SHA256 → 发布 GitHub Release → 更新 Homebrew cask 与独立 tap → 将 cask 变更提交回 `main`。
+- **本地签名发布（当前默认）**：`scripts/release_local.sh --version X.Y.Z` 在本机构建+签名+公证+装订，用 `gh` 上传 Release 并更新 Homebrew cask/tap。凭据只在本机。
+- **标签驱动的 CI 发布**：仅在配置了 `MACOS_SIGNING_IDENTITY` 等签名 Secret 后启用——此时 `git tag vX.Y.Z && git push` 触发 [`build-macos-packages.yml`](.github/workflows/build-macos-packages.yml) 自动签名+公证+发布 Release+更新 cask。**未配置签名 Secret 时其 `gate` 任务不发布**（避免覆盖本地公证包）。
 
 本地打包（自测用）：
 

@@ -11,10 +11,6 @@ struct QuotaSnapshotCacheStore: Sendable {
         return try JSONDecoder().decode(QuotaSnapshot.self, from: data)
     }
 
-    func load(accountID: UUID) throws -> QuotaSnapshot {
-        try load(accountID: accountID, tool: .codex)
-    }
-
     func save(_ snapshot: QuotaSnapshot, accountID: UUID) throws {
         try fileService.createDirectoryIfNeeded(at: AppPaths.accountQuotaSnapshotsDirectory.path)
         let encoder = JSONEncoder()

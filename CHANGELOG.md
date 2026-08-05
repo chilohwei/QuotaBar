@@ -21,6 +21,8 @@
 - `QuotaHTTPClient` 默认会话与 Codex 会话增加显式请求超时（20s/40s），避免慢端点长时间挂起菜单栏刷新。
 
 ### 测试与维护
+- 清理：移除全仓引用计数确认无用的死代码——`CursorProvider.parsePlanWindow`（已被 `parseTeamDollarPlanWindow` + `parseIndividualPercentPlanWindow` 取代）与 `QuotaSnapshotCacheStore.load(accountID:)` 单参冗余重载（仅两参版本被调用）；构建与 185 项测试均不受影响。
+- 文档：整合 `docs/signing-and-notarization.md`（去掉过时的阶段/步骤编号与两段「已实现」的粘贴代码，把一次性 Apple 设置合并为「阶段 A」，本地/CI 两条发布路径各归一处），并修正 `CONTRIBUTING.md` 发布流程与 `SECURITY.md` 中与当前 `gate` 行为不一致的表述。
 - 新增 `QuotaHTTPClient` 的 `Retry-After` 解析测试（数值秒、HTTP-date、缺失/空白、过期时间钳制到当前时刻）。
 - 为 8 处 `@unchecked Sendable` 类型补充线程安全说明注释，明确各自的同步机制（`NSLock` 保护 / 初始化后不可变 / `@MainActor` 跳转 / URLSession 串行回调）。
 
