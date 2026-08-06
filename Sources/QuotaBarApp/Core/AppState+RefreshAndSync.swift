@@ -10,7 +10,14 @@ extension AppState {
                 let delay = automaticRefreshInterval() + Double.random(in: 0 ... autoRefreshJitter)
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard !Task.isCancelled else { break }
-                await refreshActiveAccounts()
+                // Gate the periodic tick on freshness so it skips accounts a foreground / dashboard /
+                // wake refresh just fetched, instead of re-hitting Codex/Cursor over the network every
+                // cycle. The interval equals the (quota-adaptive) sleep interval, so an account's own
+                // scheduled refresh — one full interval old — still fires on cadence.
+                await refreshActiveAccountsIfNeeded(
+                    freshnessInterval: automaticRefreshInterval(),
+                    intent: .background
+                )
             }
         }
     }

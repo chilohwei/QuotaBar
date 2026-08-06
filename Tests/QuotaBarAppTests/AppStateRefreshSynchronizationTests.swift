@@ -49,6 +49,46 @@ struct AppStateRefreshSynchronizationTests {
     }
 
     @MainActor
+    @Test("the freshness gate skips a just-loaded account and refreshes a stale one")
+    func freshnessGateSkipsFreshRefreshesStale() {
+        let state = AppState()
+        let account = Account(tool: .codex, name: "Codex")
+        state.accounts = [account]
+
+        func snapshot(ageSeconds: TimeInterval) -> QuotaSnapshot {
+            QuotaSnapshot(
+                source: "Test",
+                primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil),
+                secondary: nil,
+                creditsRemaining: nil,
+                creditsTotal: nil,
+                updatedAt: Date(timeIntervalSinceNow: -ageSeconds),
+                note: nil
+            )
+        }
+
+        // Just loaded → within the freshness window → the periodic tick skips it (no redundant fetch).
+        state.quotaByAccount[account.id] = snapshot(ageSeconds: 0)
+        state.loadStateByAccount[account.id] = .loaded
+        #expect(state.shouldRefreshAccount(account, freshnessInterval: 150) == false)
+
+        // Older than the window → refreshed on cadence.
+        state.quotaByAccount[account.id] = snapshot(ageSeconds: 200)
+        state.loadStateByAccount[account.id] = .loaded
+        #expect(state.shouldRefreshAccount(account, freshnessInterval: 150) == true)
+
+        // A refresh already in flight is never re-entered.
+        state.refreshingAccountIDs.insert(account.id)
+        #expect(state.shouldRefreshAccount(account, freshnessInterval: 150) == false)
+        state.refreshingAccountIDs.remove(account.id)
+
+        // No snapshot yet → always refresh.
+        state.quotaByAccount[account.id] = nil
+        state.loadStateByAccount[account.id] = .idle
+        #expect(state.shouldRefreshAccount(account, freshnessInterval: 150) == true)
+    }
+
+    @MainActor
     @Test("both credential sync entries absorb a pending-deletion account")
     func credentialSyncEntriesAbsorbPendingDeletion() async throws {
         let pendingIdentity = "claude-code:account:8FF17EA7-CE42-4001-AAAA-000000000001"
