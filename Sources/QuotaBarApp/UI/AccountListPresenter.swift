@@ -159,8 +159,15 @@ struct AccountListPresenter {
                 return lhs.account.createdAt < rhs.account.createdAt
             }
 
-            if lhs.isActive != rhs.isActive {
-                return lhs.isActive
+            // Pin the active account to the top ONLY while it is still usable, so the list
+            // does not shuffle under an account you are actively working on. Once the active
+            // account is exhausted/blocked it drops into the normal strategy ranking, letting
+            // the best available account — the one worth switching to — lead. The user still
+            // switches manually; this only makes the better choice the first thing they see.
+            let lhsPinned = lhs.isActive && lhs.isAvailable
+            let rhsPinned = rhs.isActive && rhs.isAvailable
+            if lhsPinned != rhsPinned {
+                return lhsPinned
             }
 
             return recommendationPrecedes(lhs, rhs, strategy: recommendationStrategy)

@@ -157,6 +157,28 @@ struct AccountListPresenterTests {
         #expect(recommendedID == recommended.id)
     }
 
+    @Test("exhausted active account yields the top spot to the recommended account")
+    func exhaustedActiveAccountYieldsTopSpotToRecommended() {
+        let recommended = Account(id: UUID(), tool: .codex, name: "recommended", createdAt: Date(timeIntervalSince1970: 1))
+        let active = Account(id: UUID(), tool: .codex, name: "active", createdAt: Date(timeIntervalSince1970: 2))
+        let quotaByAccount = [
+            recommended.id: snapshot(remaining: 95),
+            active.id: snapshot(remaining: 0)
+        ]
+
+        let result = AccountListPresenter.visibleAccounts(
+            accounts: [recommended, active],
+            filter: .all,
+            activeID: active.id,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:],
+            frozenOrder: nil
+        )
+
+        // The current account is used up, so the account worth switching to leads.
+        #expect(result.map(\.id) == [recommended.id, active.id])
+    }
+
     @Test("recommended account falls back to more quota when no deadline is known")
     func recommendedAccountFallsBackToMoreQuotaWhenNoDeadlineIsKnown() {
         let lowQuota = Account(id: UUID(), tool: .codex, name: "low", createdAt: Date(timeIntervalSince1970: 1))

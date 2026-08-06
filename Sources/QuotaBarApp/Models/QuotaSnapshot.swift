@@ -224,6 +224,14 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         return .window(tertiary)
     }
 
+    /// The "extra usage" credit balance as its own metric, when the plan grants one.
+    /// Kept separate from the window slots so it can ride in an extra tile alongside the
+    /// 5h/weekly windows (Codex) rather than replacing one of them.
+    var creditsMetric: QuotaDisplayMetric? {
+        guard let creditsRemaining, let creditsTotal, creditsTotal > 0 else { return nil }
+        return .credits(remaining: creditsRemaining, total: creditsTotal, periodEnd: periodEnd)
+    }
+
     var secondaryPanelTitle: String {
         secondaryPanelMetric?.title ?? "Weekly"
     }

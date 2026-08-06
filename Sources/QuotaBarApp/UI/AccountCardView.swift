@@ -436,13 +436,23 @@ struct AccountCardView: View {
         if useRingMetricLayout {
             return cursorRingTiles
         }
-        if visibleMetrics.isEmpty {
-            return [
-                (quota?.primary?.label ?? "5h", quota?.primaryPanelMetric),
-                (secondaryPanelTitle, quota?.secondaryPanelMetric)
-            ]
+        // Codex and Claude Code always keep their session (5h) and weekly windows in
+        // fixed slots: a window that is missing or sitting at 0% still shows as its own
+        // tile ("--"/"0%") instead of collapsing the strip to a single column.
+        var tiles: [(title: String, metric: QuotaDisplayMetric?)] = [
+            (quota?.primary?.label ?? "5h", quota?.primaryPanelMetric),
+            (secondaryPanelTitle, quota?.secondaryPanelMetric)
+        ]
+        if let tertiary = quota?.tertiaryPanelMetric {
+            // Claude's model-scoped weekly window (e.g. "7d·Opus").
+            tiles.append((tertiary.title, tertiary))
+        } else if let quota, quota.secondary != nil, let credits = quota.creditsMetric {
+            // Codex "extra usage" credits ride in a third slot next to the two windows.
+            // When there is no weekly window, `secondaryPanelMetric` already surfaces the
+            // credits in the second slot, so only add them here to avoid duplication.
+            tiles.append((credits.title, credits))
         }
-        return visibleMetrics.map { ($0.title, $0) }
+        return tiles
     }
 
     private var metricFallbackDetail: String? {
