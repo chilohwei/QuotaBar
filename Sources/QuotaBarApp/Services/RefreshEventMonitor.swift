@@ -5,6 +5,9 @@ import Network
 enum RefreshEventReason: Hashable {
     case claudeStatusLineChanged
     case credentialsChanged(ToolKind)
+    // A tool's local activity file changed — the user is using it, so its server-side quota may have
+    // moved. Triggers a throttled live refresh so the menu bar stays near-real-time during use.
+    case usageMayHaveChanged(ToolKind)
     case appForegrounded
     case systemWoke
     case networkRestored

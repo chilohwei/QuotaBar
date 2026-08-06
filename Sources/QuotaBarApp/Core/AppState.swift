@@ -78,11 +78,19 @@ final class AppState: ObservableObject {
     var credentialSyncCountByTool: [ToolKind: Int] = [:]
     var refreshFailureCountByAccount: [UUID: Int] = [:]
     var refreshBackoffUntilByAccount: [UUID: Date] = [:]
+    var lastUsageRefreshByTool: [ToolKind: Date] = [:]
+    var resetRefreshTasks: [UUID: Task<Void, Never>] = [:]
     let maxConcurrentRefreshes = 4
     let autoRefreshJitter = RefreshIntervalPolicy.jitterInterval
     let foregroundRefreshFreshnessInterval: TimeInterval = 30
     let dashboardOpenRefreshFreshnessInterval: TimeInterval = 25
     let dashboardVisibleRefreshInterval: TimeInterval = 30
+    // Coalesce usage-triggered refreshes: while a tool is actively used, its activity file changes
+    // constantly, so cap live fetches to at most one per this interval (near-real-time, API-safe).
+    let usageSignalMinRefreshInterval: TimeInterval = 10
+    // A quota window flips back to full at a known instant; refresh just after it so the reset shows
+    // immediately instead of waiting for the next periodic tick. The leeway lets the server flip first.
+    let resetBoundaryRefreshLeeway: TimeInterval = 10
     var supportedTools: [ToolKind] { providerRegistry.supportedTools }
 
     init(
@@ -149,6 +157,8 @@ final class AppState: ObservableObject {
         transientNoticeTask?.cancel()
         refreshEventTasks.values.forEach { $0.cancel() }
         refreshEventTasks.removeAll()
+        resetRefreshTasks.values.forEach { $0.cancel() }
+        resetRefreshTasks.removeAll()
         refreshEventMonitor?.stop()
         refreshEventMonitor = nil
     }

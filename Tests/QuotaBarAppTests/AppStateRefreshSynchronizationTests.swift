@@ -89,6 +89,56 @@ struct AppStateRefreshSynchronizationTests {
     }
 
     @MainActor
+    @Test("usage-triggered refresh is coalesced per tool")
+    func usageSignalThrottlePerTool() {
+        let state = AppState()
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+
+        // First activity signal is accepted; record it as the periodic path would.
+        #expect(state.shouldAcceptUsageSignal(for: .cursor, now: t0))
+        state.lastUsageRefreshByTool[.cursor] = t0
+
+        // A burst of further signals within the window is coalesced away.
+        #expect(state.shouldAcceptUsageSignal(for: .cursor, now: t0.addingTimeInterval(5)) == false)
+        // After the interval, the next signal is accepted again.
+        #expect(state.shouldAcceptUsageSignal(for: .cursor, now: t0.addingTimeInterval(11)))
+        // The throttle is per-tool: Codex activity is independent of Cursor's.
+        #expect(state.shouldAcceptUsageSignal(for: .codex, now: t0.addingTimeInterval(5)))
+    }
+
+    @MainActor
+    @Test("reset-boundary refresh schedules just after the nearest future window reset")
+    func resetBoundaryRefreshDate() {
+        let state = AppState()
+        let now = Date(timeIntervalSince1970: 1_000_000)
+
+        // Two windows: the sooner reset (5h) drives the schedule, plus the leeway.
+        let snapshot = QuotaSnapshot(
+            source: "Test",
+            primary: QuotaWindow(label: "5h", used: 50, limit: 100, resetAt: now.addingTimeInterval(3600)),
+            secondary: QuotaWindow(label: "Weekly", used: 50, limit: 100, resetAt: now.addingTimeInterval(86_400)),
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: now,
+            note: nil
+        )
+        let fire = state.nextResetBoundaryRefreshDate(for: snapshot, now: now)
+        #expect(fire == now.addingTimeInterval(3600 + state.resetBoundaryRefreshLeeway))
+
+        // Already-passed resets are ignored; with no future reset there is nothing to schedule.
+        let expired = QuotaSnapshot(
+            source: "Test",
+            primary: QuotaWindow(label: "5h", used: 50, limit: 100, resetAt: now.addingTimeInterval(-10)),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: now,
+            note: nil
+        )
+        #expect(state.nextResetBoundaryRefreshDate(for: expired, now: now) == nil)
+    }
+
+    @MainActor
     @Test("both credential sync entries absorb a pending-deletion account")
     func credentialSyncEntriesAbsorbPendingDeletion() async throws {
         let pendingIdentity = "claude-code:account:8FF17EA7-CE42-4001-AAAA-000000000001"

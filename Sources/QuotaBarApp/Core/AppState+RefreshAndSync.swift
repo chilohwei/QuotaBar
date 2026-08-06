@@ -111,10 +111,64 @@ extension AppState {
             await refreshActiveAccount(for: .claudeCode, syncInstalled: true, intent: .local)
         case .credentialsChanged(let tool):
             await refreshAfterCredentialChange(for: tool)
+        case .usageMayHaveChanged(let tool):
+            await refreshOnUsageSignal(for: tool)
         case .appForegrounded:
             await refreshActiveAccountsIfNeeded(freshnessInterval: foregroundRefreshFreshnessInterval, intent: .visible)
         case .systemWoke, .networkRestored:
             await refreshActiveAccounts(intent: .visible)
+        }
+    }
+
+    /// True when a usage-activity signal for `tool` should trigger a live refresh now, given the
+    /// per-tool coalescing throttle. Pure and injectable for testing.
+    func shouldAcceptUsageSignal(for tool: ToolKind, now: Date = Date()) -> Bool {
+        guard supportedTools.contains(tool) else { return false }
+        if let last = lastUsageRefreshByTool[tool],
+           now.timeIntervalSince(last) < usageSignalMinRefreshInterval {
+            return false
+        }
+        return true
+    }
+
+    /// The user is actively using `tool` (its local activity file changed), so its server-side quota
+    /// may have moved — fetch a fresh snapshot, throttled to keep the menu bar near-real-time without
+    /// hammering the API. Credentials are not re-synced here; that is the credentials-changed path.
+    func refreshOnUsageSignal(for tool: ToolKind) async {
+        let now = Date()
+        guard shouldAcceptUsageSignal(for: tool, now: now) else { return }
+        lastUsageRefreshByTool[tool] = now
+        await refreshActiveAccount(for: tool, syncInstalled: false, intent: .visible)
+    }
+
+    /// The instant to fire a reset-boundary refresh for `snapshot`: just after its earliest future
+    /// window reset, or nil when no window resets in the future. Pure and injectable for testing.
+    func nextResetBoundaryRefreshDate(for snapshot: QuotaSnapshot, now: Date = Date()) -> Date? {
+        let futureResets = snapshot.orderedMetrics
+            .compactMap { $0.resetAt }
+            .filter { $0 > now }
+        guard let nextReset = futureResets.min() else { return nil }
+        return nextReset.addingTimeInterval(resetBoundaryRefreshLeeway)
+    }
+
+    /// Schedule a one-shot refresh just after the account's nearest window reset so the recovered
+    /// quota shows immediately instead of waiting for the next periodic tick. Replaces any reset
+    /// refresh already scheduled for the account.
+    func scheduleResetBoundaryRefresh(for account: Account) {
+        let accountID = account.id
+        resetRefreshTasks[accountID]?.cancel()
+        resetRefreshTasks[accountID] = nil
+        guard let snapshot = quotaByAccount[accountID],
+              let fireDate = nextResetBoundaryRefreshDate(for: snapshot) else {
+            return
+        }
+        let delay = max(fireDate.timeIntervalSinceNow, 0)
+        resetRefreshTasks[accountID] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            // Clear our own slot before refreshing so the refresh's re-schedule cannot cancel us.
+            await MainActor.run { self?.resetRefreshTasks[accountID] = nil }
+            await self?.refreshQuota(for: account, intent: .visible)
         }
     }
 
@@ -528,11 +582,13 @@ extension AppState {
                 if renamed || settingsChanged || readableNameUpdated {
                     try await persistState()
                 }
+                scheduleResetBoundaryRefresh(for: account)
                 AppLog.refresh.info("Preserved existing Claude Code quota for account \(account.id.uuidString, privacy: .public) while waiting for statusLine data")
                 return
             }
             evaluateQuotaNotifications(for: account, previous: quotaByAccount[account.id], current: snapshot)
             quotaByAccount[account.id] = snapshot
+            scheduleResetBoundaryRefresh(for: account)
             errorByAccount[account.id] = nil
             errorRequiresUserActionByAccount[account.id] = nil
             loadStateByAccount[account.id] = .loaded

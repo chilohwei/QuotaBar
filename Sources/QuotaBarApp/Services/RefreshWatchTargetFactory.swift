@@ -17,14 +17,25 @@ struct RefreshWatchTargetFactory {
             RefreshWatchTarget(url: AppPaths.claudeCodeStatusFile, reason: .claudeStatusLineChanged),
             RefreshWatchTarget(url: codexAuthURL(), reason: .credentialsChanged(.codex)),
             RefreshWatchTarget(url: claudeCodeAuthURL(), reason: .credentialsChanged(.claudeCode)),
-            RefreshWatchTarget(url: claudeIdentityURL(), reason: .credentialsChanged(.claudeCode))
+            RefreshWatchTarget(url: claudeIdentityURL(), reason: .credentialsChanged(.claudeCode)),
+            // Codex/Cursor keep quota server-side, so watch each tool's local activity file: when it
+            // changes the user is using the tool and its quota may have moved — fetch fresh (throttled).
+            RefreshWatchTarget(url: codexGlobalStateURL(), reason: .usageMayHaveChanged(.codex))
         ]
 
-        targets.append(contentsOf: cursorStateDatabaseURLs().map {
-            RefreshWatchTarget(url: $0, reason: .credentialsChanged(.cursor))
-        })
+        for stateDatabaseURL in cursorStateDatabaseURLs() {
+            targets.append(RefreshWatchTarget(url: stateDatabaseURL, reason: .credentialsChanged(.cursor)))
+            targets.append(RefreshWatchTarget(url: stateDatabaseURL, reason: .usageMayHaveChanged(.cursor)))
+        }
 
         return Array(Set(targets))
+    }
+
+    func codexGlobalStateURL() -> URL {
+        let raw = environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = raw?.isEmpty == false ? raw! : "~/.codex"
+        return URL(fileURLWithPath: (base as NSString).expandingTildeInPath)
+            .appendingPathComponent(".codex-global-state.json")
     }
 
     func codexAuthURL() -> URL {
