@@ -442,6 +442,47 @@ struct ClaudeQuotaStalenessTests {
         #expect(reused.primary?.used == 40)
     }
 
+    @Test("opening the panel fetches live usage the periodic cadence would have served from cache")
+    func dashboardOpenShortensTheProviderCacheFloor() throws {
+        let provider = ClaudeCodeProvider()
+        let now = Date()
+
+        func preflight(cacheAge: TimeInterval, intent: RefreshIntent) -> ClaudeCodeProvider.OAuthUsagePreflight {
+            let cachedAt = now.addingTimeInterval(-cacheAge)
+            return provider.oauthUsagePreflight(
+                cached: ClaudeCodeProvider.CachedClaudeUsage(
+                    schemaVersion: 1,
+                    cachedAt: cachedAt,
+                    snapshot: snapshot(
+                        primary: QuotaWindow(label: "5h", used: 40, limit: 100, resetAt: now.addingTimeInterval(3600)),
+                        updatedAt: cachedAt
+                    )
+                ),
+                rateLimitMarkerIsFresh: false,
+                intent: intent,
+                now: now
+            )
+        }
+
+        // 90s old: the background cadence still reuses its cache, the panel goes to the network.
+        #expect(!preflight(cacheAge: 90, intent: .background).shouldRequestNetwork)
+        #expect(!preflight(cacheAge: 90, intent: .visible).shouldRequestNetwork)
+        #expect(preflight(cacheAge: 90, intent: .dashboardOpen).shouldRequestNetwork)
+
+        // The panel floor is short, not absent — reopening seconds later must not re-hit `/usage`,
+        // which 429s hard enough that hammering it leaves the panel showing older data.
+        #expect(!preflight(cacheAge: 20, intent: .dashboardOpen).shouldRequestNetwork)
+
+        // A throttled endpoint still wins over the panel; only an explicit manual refresh retries.
+        let throttled = provider.oauthUsagePreflight(
+            cached: nil,
+            rateLimitMarkerIsFresh: true,
+            intent: .dashboardOpen,
+            now: now
+        )
+        #expect(!throttled.shouldRequestNetwork)
+    }
+
     @Test("only a fresh usable statusLine skips OAuth usage")
     func freshUsableStatusLineSkipsOAuthUsage() {
         let provider = ClaudeCodeProvider()

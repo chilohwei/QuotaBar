@@ -3,20 +3,38 @@ import Foundation
 
 // Refresh scheduling, quota fetching, and installed-tool credential sync.
 extension AppState {
+    /// This loop is the refresh mechanism for the "app is just sitting in the menu bar" case: it
+    /// runs whether or not the panel is open and whether or not the tools are being used.
     func startAutoRefreshLoop() {
         refreshTask?.cancel()
         refreshTask = Task {
+            // Wall-clock, not a summed-delay counter: the loop sleeps through system suspend, where
+            // real elapsed time can run far ahead of the sum of intended delays.
+            var nextCredentialSyncAt = Date()
             while !Task.isCancelled {
-                let delay = automaticRefreshInterval() + Double.random(in: 0 ... autoRefreshJitter)
+                let interval = automaticRefreshInterval()
+                // Poll on a fraction of the cadence. The per-account freshness gate — not this tick —
+                // decides what actually goes to the network, so the extra wake-ups cost a timestamp
+                // comparison each while letting an account that comes due mid-interval refresh near
+                // its own deadline instead of up to a full interval late. That gap is real: Claude's
+                // 180s provider floor against a 150s tick used to push its true cadence past 300s.
+                let delay = max(interval / 3, Self.minimumAutoRefreshTick)
+                    + Double.random(in: 0 ... autoRefreshJitter)
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard !Task.isCancelled else { break }
-                // Gate the periodic tick on freshness so it skips accounts a foreground / dashboard /
-                // wake refresh just fetched, instead of re-hitting Codex/Cursor over the network every
-                // cycle. The interval equals the (quota-adaptive) sleep interval, so an account's own
-                // scheduled refresh — one full interval old — still fires on cadence.
+
+                // Re-reading every tool's installed credentials touches files and the keychain, and
+                // the file watcher already reports real switches, so keep that on the full cadence.
+                let now = Date()
+                let syncsInstalledCredentials = now >= nextCredentialSyncAt
+                if syncsInstalledCredentials {
+                    nextCredentialSyncAt = now.addingTimeInterval(interval)
+                }
+
                 await refreshActiveAccountsIfNeeded(
-                    freshnessInterval: automaticRefreshInterval(),
-                    intent: .background
+                    freshnessInterval: interval,
+                    intent: .background,
+                    syncInstalledCredentials: syncsInstalledCredentials
                 )
             }
         }
@@ -30,11 +48,17 @@ extension AppState {
         )
     }
 
-    func refreshActiveAccountsIfNeeded(freshnessInterval: TimeInterval, intent: RefreshIntent) async {
-        await syncInstalledCurrentAccounts()
+    func refreshActiveAccountsIfNeeded(
+        freshnessInterval: TimeInterval,
+        intent: RefreshIntent,
+        syncInstalledCredentials: Bool = true
+    ) async {
+        if syncInstalledCredentials {
+            await syncInstalledCurrentAccounts()
+        }
         let targetAccounts = supportedToolsPrioritizingSelectedTool
             .compactMap { activeAccount(for: $0) }
-            .filter { shouldRefreshAccount($0, freshnessInterval: freshnessInterval) }
+            .filter { shouldRefreshAccount($0, freshnessInterval: freshnessInterval, intent: intent) }
         await refreshAccounts(targetAccounts, intent: intent)
     }
 
@@ -207,12 +231,13 @@ extension AppState {
             }
             credentialSignatureByTool[tool] = signature
 
+            let treatsAsActiveSelection = importedCredentialsSelectActiveAccount(for: tool, provider: provider)
             let account = try await addAccount(
                 tool: tool,
                 name: "",
                 secret: secret,
-                makeActive: provider.treatsImportedCredentialsAsActiveSelection,
-                useAsDefaultActive: provider.treatsImportedCredentialsAsActiveSelection,
+                makeActive: treatsAsActiveSelection,
+                useAsDefaultActive: treatsAsActiveSelection,
                 applyToTool: false,
                 refreshAfterAdd: false
             )
@@ -330,12 +355,13 @@ extension AppState {
             }
             credentialSignatureByTool[tool] = credentialEventSignature(secret: secret, provider: provider)
 
+            let treatsAsActiveSelection = importedCredentialsSelectActiveAccount(for: tool, provider: provider)
             let account = try await addAccount(
                 tool: tool,
                 name: "",
                 secret: secret,
-                makeActive: provider.treatsImportedCredentialsAsActiveSelection,
-                useAsDefaultActive: provider.treatsImportedCredentialsAsActiveSelection,
+                makeActive: treatsAsActiveSelection,
+                useAsDefaultActive: treatsAsActiveSelection,
                 applyToTool: false,
                 refreshAfterAdd: false
             )
@@ -345,6 +371,16 @@ extension AppState {
             AppLog.account.debug("No current credentials imported for \(tool.rawValue, privacy: .public): \(String(describing: error), privacy: .private)")
             return nil
         }
+    }
+
+    /// Whether whatever the tool is currently signed into should become QuotaBar's active account.
+    /// Normally yes — for Codex and Cursor the installed credentials *are* the selection. The one
+    /// exception is the window around a restart QuotaBar triggered: a bounced process writing the
+    /// previous account back is not the user choosing it, and letting it win would both undo the
+    /// switch and make the pending re-assertion stand down. The imported account is still recorded,
+    /// it just does not take the active slot.
+    func importedCredentialsSelectActiveAccount(for tool: ToolKind, provider: any Provider) -> Bool {
+        provider.treatsImportedCredentialsAsActiveSelection && restartReassertionByTool[tool] == nil
     }
 
     func credentialEventSignature(secret: String, provider: any Provider) -> String {
@@ -421,17 +457,31 @@ extension AppState {
         shouldRefreshAccounts(targetAccounts, freshnessInterval: foregroundRefreshFreshnessInterval)
     }
 
-    func shouldRefreshAccounts(_ targetAccounts: [Account], freshnessInterval: TimeInterval) -> Bool {
-        targetAccounts.contains { shouldRefreshAccount($0, freshnessInterval: freshnessInterval) }
+    func shouldRefreshAccounts(
+        _ targetAccounts: [Account],
+        freshnessInterval: TimeInterval,
+        intent: RefreshIntent = .background
+    ) -> Bool {
+        targetAccounts.contains {
+            shouldRefreshAccount($0, freshnessInterval: freshnessInterval, intent: intent)
+        }
     }
 
-    func shouldRefreshAccount(_ account: Account, freshnessInterval: TimeInterval) -> Bool {
+    func shouldRefreshAccount(
+        _ account: Account,
+        freshnessInterval: TimeInterval,
+        intent: RefreshIntent = .background
+    ) -> Bool {
         guard supportedTools.contains(account.tool) else { return false }
         if refreshingAccountIDs.contains(account.id) {
             return false
         }
 
-        let effectiveFreshnessInterval = effectiveFreshnessInterval(for: account, default: freshnessInterval)
+        let effectiveFreshnessInterval = effectiveFreshnessInterval(
+            for: account,
+            default: freshnessInterval,
+            intent: intent
+        )
 
         switch loadStateByAccount[account.id] {
         case .loadingInitial, .refreshing:
@@ -450,13 +500,25 @@ extension AppState {
         }
     }
 
-    func effectiveFreshnessInterval(for account: Account, default freshnessInterval: TimeInterval) -> TimeInterval {
-        guard account.tool == .claudeCode,
-              let snapshot = quotaByAccount[account.id],
-              QuotaFreshness.isStale(snapshot) else {
-            return freshnessInterval
+    func effectiveFreshnessInterval(
+        for account: Account,
+        default freshnessInterval: TimeInterval,
+        intent: RefreshIntent = .background
+    ) -> TimeInterval {
+        // Stale Claude data recovers as fast as it can; that path deliberately ignores the floor
+        // below, because the provider itself has fallbacks for a throttled `/usage`.
+        if account.tool == .claudeCode,
+           let snapshot = quotaByAccount[account.id],
+           QuotaFreshness.isStale(snapshot) {
+            return min(freshnessInterval, 30)
         }
-        return min(freshnessInterval, 30)
+
+        // A refresh the provider would answer from its own cache costs a round of work and leaves
+        // `updatedAt` untouched, so the account reads as "due" again on the very next tick. Treat
+        // the provider's floor as the real cadence instead of retrying against it.
+        let providerFloor = provider(for: account.tool).cacheFloor(for: intent)
+        guard providerFloor > 0 else { return freshnessInterval }
+        return max(freshnessInterval, providerFloor)
     }
 
     func loadStateAfterFailedRefresh(for account: Account) -> AccountLoadState {

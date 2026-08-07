@@ -3,6 +3,10 @@ import Foundation
 protocol Provider: Sendable {
     var tool: ToolKind { get }
     var treatsImportedCredentialsAsActiveSelection: Bool { get }
+    /// Shortest gap between real network fetches this provider will honour; below it `fetchQuota`
+    /// answers from its own cache. Zero when the provider always goes to the network. The refresh
+    /// scheduler reads it so a tick the provider would swallow is skipped rather than burned.
+    var minimumLiveFetchInterval: TimeInterval { get }
     func importCurrentCredentials() async throws -> String
     func updateCurrentCredentials(_ secret: String) async throws
     func authenticateViaBrowser() async throws -> String
@@ -28,6 +32,25 @@ protocol Provider: Sendable {
 extension Provider {
     var treatsImportedCredentialsAsActiveSelection: Bool {
         true
+    }
+
+    var minimumLiveFetchInterval: TimeInterval {
+        0
+    }
+
+    /// The provider's live-fetch floor for `intent`: zero for a provider with no cache-floor
+    /// concept at all (`minimumLiveFetchInterval == 0`), otherwise that floor with
+    /// `intent.providerCacheFloorOverride` (e.g. the panel's shorter dashboard-open window)
+    /// substituted in when it applies. The one formula behind both gates that ask "is this fetch
+    /// too soon?": the app-level freshness check that decides whether to call `fetchQuota` at
+    /// all, and the provider's own preflight that decides whether to actually hit the network
+    /// once called. Keeping them as two independent reads of this property, rather than two
+    /// copies of the formula, is what keeps them agreeing — a provider that overrides
+    /// `minimumLiveFetchInterval` doesn't have to remember to update a second inlined calculation
+    /// to match.
+    func cacheFloor(for intent: RefreshIntent) -> TimeInterval {
+        guard minimumLiveFetchInterval > 0 else { return 0 }
+        return intent.providerCacheFloorOverride ?? minimumLiveFetchInterval
     }
 
     func updateCurrentCredentials(_ secret: String) async throws {

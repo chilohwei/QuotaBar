@@ -11,20 +11,27 @@ struct StatusBarQuotaPresenter {
     static func entries(for inputs: [StatusBarQuotaInput]) -> [StatusBarQuotaEntry] {
         inputs.map { input in
             // Two stacked lines next to the logo: top = primary window (e.g. 5h),
-            // bottom = secondary window (e.g. weekly). Fall back to any other real
-            // metric, and keep the tool visible with an honest placeholder while
-            // Claude Code is still waiting for its first rate-limit payload.
-            var lines = [
-                input.quota?.primaryPanelMetric,
-                input.quota?.secondaryPanelMetric
-            ].compactMap(quotaLine(for:))
-            if lines.isEmpty,
-               let tertiaryLine = quotaLine(for: input.quota?.tertiaryPanelMetric) {
-                lines = [tertiaryLine]
+            // bottom = secondary window (e.g. weekly). Plans that are known to meter both
+            // always keep both slots; everything else collapses to whatever real metric
+            // exists, and falls back to an honest placeholder so the tool stays visible
+            // while it waits for its first payload.
+            let displayLines: [StatusBarQuotaLine]
+            if metersBothSubscriptionWindows(input) {
+                displayLines = [
+                    quotaLine(for: input.quota?.primaryPanelMetric) ?? placeholderLine,
+                    quotaLine(for: input.quota?.secondaryPanelMetric) ?? placeholderLine
+                ]
+            } else {
+                var lines = [
+                    input.quota?.primaryPanelMetric,
+                    input.quota?.secondaryPanelMetric
+                ].compactMap(quotaLine(for:))
+                if lines.isEmpty,
+                   let tertiaryLine = quotaLine(for: input.quota?.tertiaryPanelMetric) {
+                    lines = [tertiaryLine]
+                }
+                displayLines = lines.isEmpty ? [placeholderLine] : lines
             }
-            let displayLines = lines.isEmpty
-                ? [StatusBarQuotaLine(text: "--", level: .normal)]
-                : lines
 
             let remainingPercent = input.quota?.statusBarMetric?.ratio.map {
                 Int((min(max($0, 0), 1) * 100).rounded())
@@ -86,6 +93,19 @@ struct StatusBarQuotaPresenter {
 
     // Same thresholds as the dashboard cards: ≤20% is a warning, 0% is exhausted.
     static let lowRemainingThresholdPercent = 20
+
+    private static let placeholderLine = StatusBarQuotaLine(text: "--", level: .normal)
+
+    /// A paid Claude Code subscription is always metered on both a 5-hour and a weekly window, even
+    /// when a payload has only reported one of them yet (a fresh session, an OAuth cache captured
+    /// before the first weekly reading, a window pruned for having expired). Reserve both lines for
+    /// those accounts: one lone percentage is ambiguous — the user cannot tell which window it is —
+    /// and the menu-bar item would jump in width once the missing window finally lands. Free plans,
+    /// API keys and third-party providers have no such pair and keep the compact form.
+    private static func metersBothSubscriptionWindows(_ input: StatusBarQuotaInput) -> Bool {
+        input.tool == .claudeCode
+            && ClaudeCodeProvider.isPaidSubscriptionPlanName(input.quota?.planName)
+    }
 
     private static func quotaLine(for metric: QuotaDisplayMetric?) -> StatusBarQuotaLine? {
         guard let ratio = metric?.ratio else { return nil }

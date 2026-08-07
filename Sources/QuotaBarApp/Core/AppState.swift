@@ -80,8 +80,26 @@ final class AppState: ObservableObject {
     var refreshBackoffUntilByAccount: [UUID: Date] = [:]
     var lastUsageRefreshByTool: [ToolKind: Date] = [:]
     var resetRefreshTasks: [UUID: Task<Void, Never>] = [:]
+    struct PendingRestartReassertion: Equatable {
+        let accountID: UUID
+        // Distinguishes successive restarts of the same tool so a superseded watcher finishing late
+        // cannot tear down the window its replacement just opened.
+        let token: UUID
+    }
+    // The account each tool must still be signed into once the restart QuotaBar just triggered has
+    // settled. Non-nil only inside that short window; see reassertActiveSelectionAfterRestart.
+    var restartReassertionByTool: [ToolKind: PendingRestartReassertion] = [:]
+    var restartReassertionTasks: [ToolKind: Task<Void, Never>] = [:]
+    // Processes bounced by a restart rewrite their credential files at wildly different moments: a
+    // terminal `codex` flushes on SIGTERM, a host app only once it has quit (CodexRestartService
+    // waits up to 10s for that), relaunched, and restored its own session. Re-check across that
+    // whole spread — gaps between successive checks, ~25s in total — instead of sampling once.
+    let restartReassertionCheckpoints: [TimeInterval] = [1.5, 2, 3, 4, 6, 8]
     let maxConcurrentRefreshes = 4
     let autoRefreshJitter = RefreshIntervalPolicy.jitterInterval
+    // Floor for the background loop's polling tick. The tick only re-evaluates freshness; it is the
+    // per-account gate that decides what reaches the network.
+    static let minimumAutoRefreshTick: TimeInterval = 45
     let foregroundRefreshFreshnessInterval: TimeInterval = 30
     let dashboardOpenRefreshFreshnessInterval: TimeInterval = 25
     let dashboardVisibleRefreshInterval: TimeInterval = 30
@@ -159,6 +177,9 @@ final class AppState: ObservableObject {
         refreshEventTasks.removeAll()
         resetRefreshTasks.values.forEach { $0.cancel() }
         resetRefreshTasks.removeAll()
+        restartReassertionTasks.values.forEach { $0.cancel() }
+        restartReassertionTasks.removeAll()
+        restartReassertionByTool.removeAll()
         refreshEventMonitor?.stop()
         refreshEventMonitor = nil
     }
@@ -516,6 +537,13 @@ final class AppState: ObservableObject {
             }
             try await provider.activate(account: account, secret: refreshedSecret)
             activeAccountByTool[account.tool] = account.id
+            // Activation rewrites the tool's credential file, which the watcher reports right back.
+            // Record the signature we just installed so that echo is recognised as our own work
+            // rather than an external switch worth re-importing.
+            credentialSignatureByTool[account.tool] = credentialEventSignature(
+                secret: refreshedSecret,
+                provider: provider
+            )
             try await persistState()
             return
         }
@@ -602,10 +630,17 @@ final class AppState: ObservableObject {
 
         let targetAccounts = accounts(for: tool)
         guard !targetAccounts.isEmpty else { return }
-        guard shouldRefreshAccounts(targetAccounts, freshnessInterval: dashboardOpenRefreshFreshnessInterval) else { return }
+        // `.dashboardOpen` carries its own, much shorter provider-cache floor, so this is a real
+        // fetch rather than a cache read — opening the panel is when the numbers have to be live.
+        // The app-level gate below still skips accounts refreshed seconds ago (rapid open/close).
+        guard shouldRefreshAccounts(
+            targetAccounts,
+            freshnessInterval: dashboardOpenRefreshFreshnessInterval,
+            intent: .dashboardOpen
+        ) else { return }
 
         primeRefreshState(for: targetAccounts)
-        await refreshAccounts(targetAccounts, intent: .visible)
+        await refreshAccounts(targetAccounts, intent: .dashboardOpen)
     }
 
     func handleAppBecameActive() {
@@ -750,7 +785,7 @@ final class AppState: ObservableObject {
 
     func restartRequiredToolNow() {
         guard let tool = restartRequiredTool, canRestartTool else { return }
-        hostActions.restartTool?(tool)
+        restartToolNow(tool)
         dismissRestartRequiredMessage()
     }
 
@@ -758,6 +793,79 @@ final class AppState: ObservableObject {
     /// of going through the notice-bar state.
     func restartToolNow(_ tool: ToolKind) {
         hostActions.restartTool?(tool)
+        scheduleActiveSelectionReassertion(for: tool)
+    }
+
+    /// A restart is exactly when the tool's credential file is most likely to be rewritten behind
+    /// QuotaBar's back: a terminal `codex` flushes its in-memory auth on SIGTERM, and a relaunched
+    /// host app (the ChatGPT desktop app, an IDE extension) restores the account *it* was signed
+    /// into. Either one silently reverts the switch the user just made, so the restarted tool comes
+    /// back on the previous account. Watch the file across the restart and put the selection back.
+    func scheduleActiveSelectionReassertion(for tool: ToolKind) {
+        // Claude Code has no app to restart, and its credentials live in a shared keychain entry
+        // guarded by the activation transaction — re-writing them here would race that.
+        guard tool != .claudeCode, let account = activeAccount(for: tool) else { return }
+
+        let token = UUID()
+        restartReassertionTasks[tool]?.cancel()
+        restartReassertionByTool[tool] = PendingRestartReassertion(accountID: account.id, token: token)
+        restartReassertionTasks[tool] = Task { [weak self] in
+            await self?.reassertActiveSelectionAfterRestart(for: tool, account: account)
+            await MainActor.run {
+                guard let self, self.restartReassertionByTool[tool]?.token == token else { return }
+                self.restartReassertionByTool.removeValue(forKey: tool)
+                self.restartReassertionTasks.removeValue(forKey: tool)
+            }
+        }
+    }
+
+    private func reassertActiveSelectionAfterRestart(for tool: ToolKind, account: Account) async {
+        let provider = provider(for: tool)
+        var didReassert = false
+
+        for checkpoint in restartReassertionCheckpoints {
+            try? await Task.sleep(nanoseconds: UInt64(checkpoint * 1_000_000_000))
+            guard !Task.isCancelled, activeAccountByTool[tool] == account.id else { return }
+
+            guard let installed = try? await provider.importCurrentCredentials(),
+                  !installed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !installedCredentials(installed, belongTo: account, provider: provider) else {
+                continue
+            }
+
+            do {
+                let secret = try await resolveSecret(for: account, provider: provider)
+                try await provider.activate(account: account, secret: secret)
+                // Our own write must not read back as an external account change.
+                credentialSignatureByTool[tool] = credentialEventSignature(secret: secret, provider: provider)
+                didReassert = true
+                AppLog.account.info("Restarted \(tool.rawValue, privacy: .public) came back on a different account; restored \(account.id.uuidString, privacy: .public)")
+            } catch {
+                AppLog.account.error("Failed to restore \(account.id.uuidString, privacy: .public) after \(tool.rawValue, privacy: .public) restart: \(String(describing: error), privacy: .private)")
+                return
+            }
+        }
+
+        if didReassert {
+            await refreshQuota(for: account, intent: .manual)
+        }
+    }
+
+    /// True when the tool's installed credentials still describe `account`. Accounts stored before
+    /// identity metadata existed carry no key; treat those as a match so the re-assertion stays
+    /// silent instead of rewriting credentials it cannot actually verify.
+    func installedCredentials(
+        _ secret: String,
+        belongTo account: Account,
+        provider: any Provider
+    ) -> Bool {
+        guard account.settings.identityKey != nil else { return true }
+        let aliases = provider.accountIdentityAliases(from: secret)
+        let detected = aliases.isEmpty
+            ? provider.accountIdentity(from: secret).map { [$0] } ?? []
+            : aliases
+        guard !detected.isEmpty else { return true }
+        return Self.accountIdentity(account.settings.identityKey, matchesAny: detected)
     }
 
     func setRecommendationStrategy(_ strategy: AccountRecommendationStrategy) {

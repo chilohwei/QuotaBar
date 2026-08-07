@@ -4,6 +4,8 @@ import Foundation
 struct ClaudeCodeProvider: Provider {
     let tool: ToolKind = .claudeCode
 
+    var minimumLiveFetchInterval: TimeInterval { Self.liveUsageMinFetchInterval }
+
     static let oauthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     // Claude Code CLI ≥2.1.x rotates tokens against platform.claude.com; the old
     // console.anthropic.com host now answers every refresh with HTTP 429.

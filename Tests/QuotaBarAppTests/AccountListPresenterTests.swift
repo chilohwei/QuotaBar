@@ -474,6 +474,86 @@ struct AccountListPresenterTests {
         #expect(result.map(\.id) == [lowSoon.id, highLater.id])
     }
 
+    @Test("a window resetting soon does not promote an account that is nearly empty")
+    func nearlyEmptyAccountDoesNotWinOnImminentWindowReset() {
+        let thinButSoon = Account(id: UUID(), tool: .codex, name: "thin-soon", createdAt: Date(timeIntervalSince1970: 1))
+        let healthyLater = Account(id: UUID(), tool: .codex, name: "healthy-later", createdAt: Date(timeIntervalSince1970: 2))
+        let quotaByAccount = [
+            thinButSoon.id: snapshot(remaining: 5, resetAt: Date(timeIntervalSince1970: 1_200)),
+            healthyLater.id: snapshot(remaining: 90, resetAt: Date(timeIntervalSince1970: 18_000))
+        ]
+
+        let result = AccountListPresenter.visibleAccounts(
+            accounts: [thinButSoon, healthyLater],
+            filter: .all,
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:],
+            frozenOrder: nil
+        )
+        let recommended = AccountListPresenter.recommendedAccountID(
+            accounts: [thinButSoon, healthyLater],
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:]
+        )
+
+        // The 5% window rolls over in 20 minutes and refills, so spending it first buys nothing —
+        // switching there would hit the wall immediately.
+        #expect(result.map(\.id) == [healthyLater.id, thinButSoon.id])
+        #expect(recommended == healthyLater.id)
+    }
+
+    @Test("a nearly empty account still wins when the account itself expires soon")
+    func nearlyEmptyAccountWinsWhenAccountExpiresSoon() {
+        let thinButExpiring = Account(id: UUID(), tool: .codex, name: "thin-expiring", createdAt: Date(timeIntervalSince1970: 1))
+        let healthyLater = Account(id: UUID(), tool: .codex, name: "healthy-later", createdAt: Date(timeIntervalSince1970: 2))
+        let quotaByAccount = [
+            thinButExpiring.id: snapshot(remaining: 5, accountValidUntil: Date(timeIntervalSince1970: 1_200)),
+            healthyLater.id: snapshot(remaining: 90, accountValidUntil: Date(timeIntervalSince1970: 18_000))
+        ]
+
+        let recommended = AccountListPresenter.recommendedAccountID(
+            accounts: [thinButExpiring, healthyLater],
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:]
+        )
+
+        // Expiry is not a rollover: whatever is left is lost for good, so burning it first is right.
+        #expect(recommended == thinButExpiring.id)
+    }
+
+    @Test("maximize availability ignores an imminent reset entirely")
+    func maximizeAvailabilityIgnoresImminentReset() {
+        let lowerButSoon = Account(id: UUID(), tool: .codex, name: "lower-soon", createdAt: Date(timeIntervalSince1970: 1))
+        let highButFar = Account(id: UUID(), tool: .codex, name: "high-far", createdAt: Date(timeIntervalSince1970: 2))
+        let quotaByAccount = [
+            lowerButSoon.id: snapshot(remaining: 40, resetAt: Date(timeIntervalSince1970: 36_000)),
+            highButFar.id: snapshot(remaining: 90, resetAt: Date(timeIntervalSince1970: 1_800_000))
+        ]
+
+        let preventWaste = AccountListPresenter.recommendedAccountID(
+            accounts: [lowerButSoon, highButFar],
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:],
+            recommendationStrategy: .preventWaste
+        )
+        let maximizeAvailability = AccountListPresenter.visibleAccounts(
+            accounts: [lowerButSoon, highButFar],
+            filter: .all,
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: [:],
+            frozenOrder: nil,
+            recommendationStrategy: .maximizeAvailability
+        )
+
+        #expect(preventWaste == lowerButSoon.id)
+        #expect(maximizeAvailability.map(\.id) == [highButFar.id, lowerButSoon.id])
+    }
+
     @Test("available accounts with equal utilization fall back to freshest snapshot")
     func availableAccountsPreferFresherSnapshotsAsTieBreaker() {
         let stale = Account(id: UUID(), tool: .codex, name: "stale", createdAt: Date(timeIntervalSince1970: 1))

@@ -11,6 +11,11 @@ struct AccountListPresenter {
     private enum RecommendationPolicy {
         static let expiringSoonInterval: TimeInterval = 30 * 24 * 60 * 60
         static let deadlineBucketInterval: TimeInterval = 60 * 60
+        // A window reset refills the quota, so "spend it before it rolls over" only pays off while
+        // the account still holds enough to work with. Below this share the account is a dead end
+        // you would bounce off within minutes, and it must not outrank a healthy one just because
+        // its window happens to reset sooner. Account expiry is different — see wasteDeadlineDate.
+        static let minimumUsableRemainingRatio: Double = 0.2
     }
 
     static func visibleAccounts(
@@ -80,7 +85,11 @@ struct AccountListPresenter {
             return .maximizeAvailability
         }
 
-        let wasteDeadline = wasteDeadlineDate(account, quotaByAccount: quotaByAccount)
+        let wasteDeadline = wasteDeadlineDate(
+            account,
+            quotaByAccount: quotaByAccount,
+            bottleneckRatio: bottleneckRemainingRatio(account, quotaByAccount: quotaByAccount)
+        )
         let snapshotUpdatedAt = snapshotUpdatedAtDate(account, quotaByAccount: quotaByAccount)
         let secondsUntilDeadline = secondsUntilWasteDeadline(
             wasteDeadline: wasteDeadline,
@@ -186,7 +195,11 @@ struct AccountListPresenter {
         )
         let entries = accounts.map { account in
             let bottleneckRatio = bottleneckRemainingRatio(account, quotaByAccount: quotaByAccount)
-            let wasteDeadline = wasteDeadlineDate(account, quotaByAccount: quotaByAccount)
+            let wasteDeadline = wasteDeadlineDate(
+                account,
+                quotaByAccount: quotaByAccount,
+                bottleneckRatio: bottleneckRatio
+            )
             let snapshotUpdatedAt = snapshotUpdatedAtDate(account, quotaByAccount: quotaByAccount)
             let secondsUntilWasteDeadline = secondsUntilWasteDeadline(
                 wasteDeadline: wasteDeadline,
@@ -319,15 +332,28 @@ struct AccountListPresenter {
         return lhs.account.createdAt < rhs.account.createdAt
     }
 
+    /// The instant this account's remaining quota stops being worth spending — the ordering key
+    /// behind "消耗优先". Two very different deadlines feed it:
+    ///
+    /// - **Account expiry** (`accountValidUntil`): whatever is left is lost for good, so even a
+    ///   nearly-empty account is worth burning first. Always counted.
+    /// - **Window reset** (`resetAt`): the counter merely rolls over and the quota comes back, so
+    ///   spending it first is only a win while the account still has enough left to be worth
+    ///   switching to. Counted only above `minimumUsableRemainingRatio`; otherwise recommending it
+    ///   would hand the user an account that runs dry seconds later.
     private static func wasteDeadlineDate(
         _ account: Account,
-        quotaByAccount: [UUID: QuotaSnapshot]
+        quotaByAccount: [UUID: QuotaSnapshot],
+        bottleneckRatio: Double
     ) -> Date {
         guard let quota = quotaByAccount[account.id] else { return .distantFuture }
 
-        var dates = quota.orderedMetrics.compactMap { metric -> Date? in
-            guard let ratio = metric.ratio, ratio > 0.001 else { return nil }
-            return metric.resetAt
+        var dates: [Date] = []
+        if bottleneckRatio >= RecommendationPolicy.minimumUsableRemainingRatio {
+            dates.append(contentsOf: quota.orderedMetrics.compactMap { metric -> Date? in
+                guard let ratio = metric.ratio, ratio > 0.001 else { return nil }
+                return metric.resetAt
+            })
         }
         if let accountValidUntil = quota.accountValidUntil {
             dates.append(accountValidUntil)

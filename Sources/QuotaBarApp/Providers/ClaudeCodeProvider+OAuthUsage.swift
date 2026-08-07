@@ -204,9 +204,10 @@ extension ClaudeCodeProvider {
             )
         }
 
+        let floor = cacheFloor(for: intent)
         if !intent.bypassesProviderCache,
            let cached,
-           now.timeIntervalSince(cached.cachedAt) < Self.liveUsageMinFetchInterval {
+           now.timeIntervalSince(cached.cachedAt) < floor {
             return OAuthUsagePreflight(
                 shouldRequestNetwork: false,
                 snapshot: cached.snapshot.replacing(

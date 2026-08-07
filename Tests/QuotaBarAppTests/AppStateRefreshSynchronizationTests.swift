@@ -49,6 +49,43 @@ struct AppStateRefreshSynchronizationTests {
     }
 
     @MainActor
+    @Test("the freshness gate follows each provider's own live-fetch floor")
+    func freshnessGateFollowsProviderFloor() {
+        let state = AppState()
+        let claude = Account(tool: .claudeCode, name: "Claude")
+        let codex = Account(tool: .codex, name: "Codex")
+        state.accounts = [claude, codex]
+
+        // Claude's `/usage` cache floor is 180s, so a 150s background tick would only have been
+        // answered from that cache — the gate now waits for the floor instead of burning the tick.
+        #expect(state.effectiveFreshnessInterval(for: claude, default: 150) == 180)
+        // Opening the panel shortens the floor rather than removing it.
+        #expect(state.effectiveFreshnessInterval(for: claude, default: 25, intent: .dashboardOpen) == 60)
+        // Providers that always go to the network keep the caller's interval, panel open included.
+        #expect(state.effectiveFreshnessInterval(for: codex, default: 150) == 150)
+        #expect(state.effectiveFreshnessInterval(for: codex, default: 25, intent: .dashboardOpen) == 25)
+    }
+
+    @MainActor
+    @Test("stale Claude data still recovers faster than the provider floor")
+    func staleClaudeDataBypassesProviderFloor() {
+        let state = AppState()
+        let claude = Account(tool: .claudeCode, name: "Claude")
+        state.accounts = [claude]
+        state.quotaByAccount[claude.id] = QuotaSnapshot(
+            source: "Claude Code OAuth Cache",
+            primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSinceNow: -QuotaFreshness.staleWarningAge - 60),
+            note: nil
+        )
+
+        #expect(state.effectiveFreshnessInterval(for: claude, default: 150) == 30)
+    }
+
+    @MainActor
     @Test("the freshness gate skips a just-loaded account and refreshes a stale one")
     func freshnessGateSkipsFreshRefreshesStale() {
         let state = AppState()

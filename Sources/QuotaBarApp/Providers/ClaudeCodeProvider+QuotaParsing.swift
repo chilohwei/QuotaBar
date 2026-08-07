@@ -139,6 +139,18 @@ extension ClaudeCodeProvider {
         )
     }
 
+    /// True for the paid Claude.ai tiers, which always meter *both* a 5-hour and a weekly window.
+    /// Matches the names `claudeSubscriptionDisplayName` produces, so "Claude Free", the generic
+    /// "Claude.ai" fallback, API keys and third-party providers (Bedrock, Vertex, …) stay out.
+    static func isPaidSubscriptionPlanName(_ planName: String?) -> Bool {
+        guard let name = planName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              name.hasPrefix("claude ") else {
+            return false
+        }
+        let tier = name.dropFirst("claude ".count)
+        return ["pro", "max", "team", "enterprise"].contains { tier.hasPrefix($0) }
+    }
+
     func claudeSubscriptionDisplayName(type: String?, tier: String?) -> String? {
         guard let type = type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !type.isEmpty else {
