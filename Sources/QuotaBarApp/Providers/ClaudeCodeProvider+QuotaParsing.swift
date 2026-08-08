@@ -66,6 +66,7 @@ extension ClaudeCodeProvider {
             primary: primary,
             secondary: snapshot.secondary,
             tertiary: snapshot.tertiary,
+            extraWindows: snapshot.extraWindows,
             creditsRemaining: snapshot.creditsRemaining,
             creditsTotal: snapshot.creditsTotal,
             updatedAt: snapshot.updatedAt,

@@ -41,6 +41,7 @@ extension CodexProvider {
             (rateLimit["secondary_window"] as? [String: Any])
                 ?? (rateLimit["secondaryWindow"] as? [String: Any])
         )
+        let extraWindows = parseCodexExtraWindows(from: dict)
         let credits = dict["credits"] as? [String: Any]
         let creditsRemaining = credits.flatMap {
             firstDouble(in: $0, keys: ["balance", "remaining", "available", "total_available", "totalAvailable"])
@@ -70,6 +71,7 @@ extension CodexProvider {
             planName: planName,
             primary: primary,
             secondary: secondary,
+            extraWindows: extraWindows,
             creditsRemaining: creditsRemaining,
             creditsTotal: creditsTotal,
             updatedAt: .init(),
@@ -79,12 +81,18 @@ extension CodexProvider {
             subscriptionStatus: fallbackSubscriptionStatus,
             isQuotaBlocked: isBlocked,
             availabilityStatus: isBlocked ? .quotaExhausted : nil,
-            note: (primary == nil && secondary == nil && creditsRemaining == nil) ? QuotaNoteCatalog.codexEmptyQuotaFields : nil
+            note: (primary == nil && secondary == nil && extraWindows.isEmpty && creditsRemaining == nil)
+                ? QuotaNoteCatalog.codexEmptyQuotaFields
+                : nil
         )
         return snapshot
     }
 
-    func parseCodexWindow(_ dict: [String: Any]?) -> QuotaWindow? {
+    func parseCodexWindow(
+        _ dict: [String: Any]?,
+        labelPrefix: String? = nil,
+        fallbackWindowSeconds: Int = 0
+    ) -> QuotaWindow? {
         guard let dict else { return nil }
 
         guard var usedPercent = firstDouble(in: dict, keys: ["used_percent", "usedPercent"]) else { return nil }
@@ -93,20 +101,98 @@ extension CodexProvider {
         }
         usedPercent = min(max(usedPercent, 0), 100)
 
-        let windowSeconds = firstInt(in: dict, keys: ["limit_window_seconds", "limitWindowSeconds", "reset_after_seconds", "resetAfterSeconds"])
+        let windowSeconds = firstInt(in: dict, keys: ["limit_window_seconds", "limitWindowSeconds"])
             ?? firstInt(in: dict, keys: ["window_minutes", "windowMinutes"]).map { $0 * 60 }
-            ?? 0
+            ?? fallbackWindowSeconds
         let resetAt = parseFlexibleDate(firstValue(in: dict, keys: ["reset_at", "resetAt", "resets_at", "resetsAt"]))
             ?? firstDouble(in: dict, keys: ["reset_after_seconds", "resetAfterSeconds"]).map {
                 Date().addingTimeInterval($0)
             }
+        let label = prefixedCodexWindowLabel(labelForWindow(seconds: windowSeconds), prefix: labelPrefix)
 
         return QuotaWindow(
-            label: labelForWindow(seconds: windowSeconds),
+            label: label,
             used: usedPercent,
             limit: 100,
             resetAt: resetAt
         )
+    }
+
+    func parseCodexExtraWindows(from dict: [String: Any]) -> [QuotaWindow] {
+        uniqueCodexWindows(
+            parseAdditionalCodexRateLimitWindows(from: dict)
+                + parseCodexCodeReviewWindows(from: dict)
+        )
+    }
+
+    func parseAdditionalCodexRateLimitWindows(from dict: [String: Any]) -> [QuotaWindow] {
+        guard let entries = dict["additional_rate_limits"] as? [[String: Any]] else {
+            return []
+        }
+        return entries.flatMap { entry in
+            guard let rateLimit = (entry["rate_limit"] as? [String: Any])
+                ?? (entry["rateLimit"] as? [String: Any]) else {
+                return [QuotaWindow]()
+            }
+            return parseCodexNamedRateLimitWindows(
+                rateLimit,
+                prefix: codexAdditionalLimitDisplayName(from: entry)
+            )
+        }
+    }
+
+    func parseCodexCodeReviewWindows(from dict: [String: Any]) -> [QuotaWindow] {
+        guard let rateLimit = (dict["code_review_rate_limit"] as? [String: Any])
+            ?? (dict["codeReviewRateLimit"] as? [String: Any]) else {
+            return []
+        }
+        return parseCodexNamedRateLimitWindows(rateLimit, prefix: "Code Review")
+    }
+
+    func parseCodexNamedRateLimitWindows(_ rateLimit: [String: Any], prefix: String) -> [QuotaWindow] {
+        [
+            parseCodexWindow(
+                (rateLimit["primary_window"] as? [String: Any])
+                    ?? (rateLimit["primaryWindow"] as? [String: Any]),
+                labelPrefix: prefix,
+                fallbackWindowSeconds: 18_000
+            ),
+            parseCodexWindow(
+                (rateLimit["secondary_window"] as? [String: Any])
+                    ?? (rateLimit["secondaryWindow"] as? [String: Any]),
+                labelPrefix: prefix,
+                fallbackWindowSeconds: 604_800
+            )
+        ].compactMap { $0 }
+    }
+
+    func codexAdditionalLimitDisplayName(from entry: [String: Any]) -> String {
+        let rawName = firstString(in: entry, keys: ["limit_name", "limitName", "name", "metered_feature", "meteredFeature"])
+            ?? "Extra"
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.localizedCaseInsensitiveContains("spark") {
+            return "Spark"
+        }
+        if trimmed.localizedCaseInsensitiveContains("bengalfox") {
+            return "Spark"
+        }
+        return trimmed.isEmpty ? "Extra" : trimmed
+    }
+
+    func prefixedCodexWindowLabel(_ label: String, prefix: String?) -> String {
+        guard let prefix = prefix?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !prefix.isEmpty else {
+            return label
+        }
+        return "\(prefix) \(label)"
+    }
+
+    func uniqueCodexWindows(_ windows: [QuotaWindow]) -> [QuotaWindow] {
+        var seen = Set<String>()
+        return windows.filter { window in
+            let reset = window.resetAt.map { String(Int64($0.timeIntervalSince1970)) } ?? "none"
+            return seen.insert("\(window.label)-\(window.used)-\(window.limit)-\(reset)").inserted
+        }
     }
 
     func firstValue(in dict: [String: Any], keys: [String]) -> Any? {

@@ -247,10 +247,12 @@ extension ClaudeCodeProvider {
         let primary = preferred.primary ?? fallback.primary
         let secondary = preferred.secondary ?? fallback.secondary
         let tertiary = preferred.tertiary ?? fallback.tertiary
+        let extraWindows = preferred.extraWindows.isEmpty ? fallback.extraWindows : preferred.extraWindows
 
         guard primary != preferred.primary
             || secondary != preferred.secondary
-            || tertiary != preferred.tertiary else {
+            || tertiary != preferred.tertiary
+            || extraWindows != preferred.extraWindows else {
             return preferred
         }
 
@@ -274,6 +276,7 @@ extension ClaudeCodeProvider {
             primary: primary,
             secondary: secondary,
             tertiary: tertiary,
+            extraWindows: extraWindows,
             creditsRemaining: preferred.creditsRemaining ?? fallback.creditsRemaining,
             creditsTotal: preferred.creditsTotal ?? fallback.creditsTotal,
             updatedAt: preferred.updatedAt,

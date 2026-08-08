@@ -83,6 +83,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
     let primary: QuotaWindow?
     let secondary: QuotaWindow?
     let tertiary: QuotaWindow?
+    let extraWindows: [QuotaWindow]
     let creditsRemaining: Double?
     let creditsTotal: Double?
     let updatedAt: Date
@@ -101,6 +102,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         primary: QuotaWindow?,
         secondary: QuotaWindow?,
         tertiary: QuotaWindow? = nil,
+        extraWindows: [QuotaWindow] = [],
         creditsRemaining: Double?,
         creditsTotal: Double?,
         updatedAt: Date,
@@ -118,10 +120,14 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         self.primary = primary
         self.secondary = secondary
         self.tertiary = tertiary
+        self.extraWindows = extraWindows
         self.creditsRemaining = creditsRemaining
         self.creditsTotal = creditsTotal
         self.updatedAt = updatedAt
-        self.periodEnd = periodEnd ?? [primary?.resetAt, secondary?.resetAt, tertiary?.resetAt].compactMap { $0 }.max()
+        self.periodEnd = periodEnd ?? ([primary?.resetAt, secondary?.resetAt, tertiary?.resetAt]
+            + extraWindows.map(\.resetAt))
+            .compactMap { $0 }
+            .max()
         self.accountValidUntil = accountValidUntil
         self.subscriptionWillRenew = subscriptionWillRenew
         self.subscriptionStatus = subscriptionStatus
@@ -139,6 +145,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
             primary: try container.decodeIfPresent(QuotaWindow.self, forKey: .primary),
             secondary: try container.decodeIfPresent(QuotaWindow.self, forKey: .secondary),
             tertiary: try container.decodeIfPresent(QuotaWindow.self, forKey: .tertiary),
+            extraWindows: try container.decodeIfPresent([QuotaWindow].self, forKey: .extraWindows) ?? [],
             creditsRemaining: try container.decodeIfPresent(Double.self, forKey: .creditsRemaining),
             creditsTotal: try container.decodeIfPresent(Double.self, forKey: .creditsTotal),
             updatedAt: try container.decode(Date.self, forKey: .updatedAt),
@@ -201,39 +208,8 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         if let creditsRemaining, let creditsTotal, creditsTotal > 0 {
             items.append(.credits(remaining: creditsRemaining, total: creditsTotal, periodEnd: periodEnd))
         }
+        items.append(contentsOf: extraWindows.filter { $0.limit > 0 }.map(QuotaDisplayMetric.window))
         return items
-    }
-
-    var primaryPanelMetric: QuotaDisplayMetric? {
-        guard let primary else { return nil }
-        return .window(primary)
-    }
-
-    var secondaryPanelMetric: QuotaDisplayMetric? {
-        if let secondary {
-            return .window(secondary)
-        }
-        if let creditsRemaining, let creditsTotal, creditsTotal > 0 {
-            return .credits(remaining: creditsRemaining, total: creditsTotal, periodEnd: periodEnd)
-        }
-        return nil
-    }
-
-    var tertiaryPanelMetric: QuotaDisplayMetric? {
-        guard let tertiary else { return nil }
-        return .window(tertiary)
-    }
-
-    /// The "extra usage" credit balance as its own metric, when the plan grants one.
-    /// Kept separate from the window slots so it can ride in an extra tile alongside the
-    /// 5h/weekly windows (Codex) rather than replacing one of them.
-    var creditsMetric: QuotaDisplayMetric? {
-        guard let creditsRemaining, let creditsTotal, creditsTotal > 0 else { return nil }
-        return .credits(remaining: creditsRemaining, total: creditsTotal, periodEnd: periodEnd)
-    }
-
-    var secondaryPanelTitle: String {
-        secondaryPanelMetric?.title ?? "Weekly"
     }
 
     /// Drops quota windows whose reset time has already passed: their counters have
@@ -250,12 +226,15 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         let activePrimary = active(primary)
         let activeSecondary = active(secondary)
         let activeTertiary = active(tertiary)
-        guard activePrimary != primary || activeSecondary != secondary || activeTertiary != tertiary else {
+        let activeExtraWindows = extraWindows.compactMap(active)
+        guard activePrimary != primary
+            || activeSecondary != secondary
+            || activeTertiary != tertiary
+            || activeExtraWindows != extraWindows else {
             return self
         }
 
-        let remainingWindowsExhausted = [activePrimary, activeSecondary, activeTertiary]
-            .compactMap { $0 }
+        let remainingWindowsExhausted = ([activePrimary, activeSecondary, activeTertiary].compactMap { $0 } + activeExtraWindows)
             .contains { $0.limit > 0 && $0.remaining / $0.limit <= 0.001 }
         let prunedBlocked = remainingWindowsExhausted ? isQuotaBlocked : nil
         let prunedAvailability = (availabilityStatus == .quotaExhausted && !remainingWindowsExhausted)
@@ -269,6 +248,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
             primary: activePrimary,
             secondary: activeSecondary,
             tertiary: activeTertiary,
+            extraWindows: activeExtraWindows,
             creditsRemaining: creditsRemaining,
             creditsTotal: creditsTotal,
             updatedAt: updatedAt,
@@ -295,6 +275,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
             primary: primary,
             secondary: secondary,
             tertiary: tertiary,
+            extraWindows: extraWindows,
             creditsRemaining: creditsRemaining,
             creditsTotal: creditsTotal,
             updatedAt: updatedAt ?? self.updatedAt,

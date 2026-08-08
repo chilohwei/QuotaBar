@@ -76,6 +76,66 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.isQuotaBlocked == true)
     }
 
+    @Test("Codex payload maps supplemental model and code review windows")
+    func codexSupplementalWindows() throws {
+        let payload = try jsonObject("""
+        {
+          "rate_limit": {
+            "allowed": true,
+            "limit_reached": false,
+            "primary_window": {
+              "used_percent": 81,
+              "limit_window_seconds": 604800,
+              "reset_after_seconds": 423581
+            },
+            "secondary_window": null
+          },
+          "additional_rate_limits": [
+            {
+              "limit_name": "GPT-5.3-Codex-Spark",
+              "metered_feature": "codex_bengalfox",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 0,
+                  "reset_at": 1786718196
+                },
+                "secondary_window": {
+                  "used_percent": 100,
+                  "limit_window_seconds": 604800,
+                  "reset_at": 1786718196
+                }
+              }
+            }
+          ],
+          "code_review_rate_limit": {
+            "secondary_window": {
+              "used_percent": 9,
+              "limit_window_seconds": 604800
+            }
+          },
+          "plan_type": "prolite"
+        }
+        """)
+
+        let snapshot = try #require(CodexProvider().parseRateLimitPayloadForTesting(payload))
+
+        #expect(snapshot.planName == "Pro")
+        #expect(snapshot.primary?.label == "Weekly")
+        #expect(snapshot.secondary == nil)
+        #expect(snapshot.extraWindows.map(\.label) == [
+            "Spark 5h",
+            "Spark Weekly",
+            "Code Review Weekly"
+        ])
+        #expect(snapshot.extraWindows.map(\.used) == [0, 100, 9])
+        #expect(Array(snapshot.orderedMetrics.map(\.title).prefix(4)) == [
+            "Weekly",
+            "Spark 5h",
+            "Spark Weekly",
+            "Code Review Weekly"
+        ])
+    }
+
     @Test("Codex paid plan payload maps team and pro names without dropping quota")
     func codexPaidPlanPayloads() throws {
         let teamPayload = try jsonObject("""

@@ -1105,6 +1105,14 @@ struct AppText {
                     return "\(quotaLabel(parts[0]))·\(parts[1])"
                 }
             }
+            for suffix in [" 5h", " Weekly", " 7d"] where raw.hasSuffix(suffix) {
+                let suffixStart = raw.index(raw.endIndex, offsetBy: -suffix.count)
+                let prefix = String(raw[..<suffixStart]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let window = String(raw[suffixStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !prefix.isEmpty {
+                    return "\(prefix) \(quotaLabel(window))"
+                }
+            }
             return raw
         }
     }

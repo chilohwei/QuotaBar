@@ -249,13 +249,6 @@ struct AccountCardView: View {
     }
 
     private var cursorRingTiles: [(title: String, metric: QuotaDisplayMetric?)] {
-        if visibleMetrics.isEmpty {
-            return [
-                (quota?.primary?.label ?? "Total", quota?.primaryPanelMetric),
-                ("Auto", quota?.secondaryPanelMetric),
-                ("API", quota?.tertiaryPanelMetric)
-            ]
-        }
         return visibleMetrics.map { ($0.title, $0) }
     }
 
@@ -428,31 +421,16 @@ struct AccountCardView: View {
         footerMessage != nil
     }
 
-    private var secondaryPanelTitle: String {
-        quota?.secondaryPanelTitle ?? "Weekly"
-    }
-
     private var metricTiles: [(title: String, metric: QuotaDisplayMetric?)] {
         if useRingMetricLayout {
-            return cursorRingTiles
+            return cursorRingTiles.isEmpty ? missingMetricTiles : cursorRingTiles
         }
-        // Codex and Claude Code always keep their session (5h) and weekly windows in
-        // fixed slots: a window that is missing or sitting at 0% still shows as its own
-        // tile ("--"/"0%") instead of collapsing the strip to a single column.
-        var tiles: [(title: String, metric: QuotaDisplayMetric?)] = [
-            (quota?.primary?.label ?? "5h", quota?.primaryPanelMetric),
-            (secondaryPanelTitle, quota?.secondaryPanelMetric)
-        ]
-        if let tertiary = quota?.tertiaryPanelMetric {
-            // Claude's model-scoped weekly window (e.g. "7d·Opus").
-            tiles.append((tertiary.title, tertiary))
-        } else if let quota, quota.secondary != nil, let credits = quota.creditsMetric {
-            // Codex "extra usage" credits ride in a third slot next to the two windows.
-            // When there is no weekly window, `secondaryPanelMetric` already surfaces the
-            // credits in the second slot, so only add them here to avoid duplication.
-            tiles.append((credits.title, credits))
-        }
-        return tiles
+        let tiles = visibleMetrics.map { ($0.title, $0) }
+        return tiles.isEmpty ? missingMetricTiles : tiles
+    }
+
+    private var missingMetricTiles: [(title: String, metric: QuotaDisplayMetric?)] {
+        [("Usage", nil)]
     }
 
     private var metricFallbackDetail: String? {

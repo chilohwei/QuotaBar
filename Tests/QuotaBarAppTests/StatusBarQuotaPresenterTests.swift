@@ -129,8 +129,8 @@ struct StatusBarQuotaPresenterTests {
         #expect(!tooltip.contains("0%"))
     }
 
-    @Test("paid claude code keeps both window lines while the weekly one is missing")
-    func paidClaudeCodeAlwaysShowsBothWindows() throws {
+    @Test("paid claude code shows only returned windows while the weekly one is missing")
+    func paidClaudeCodeShowsOnlyReturnedWindows() throws {
         let entries = StatusBarQuotaPresenter.entries(for: [
             StatusBarQuotaInput(
                 tool: .claudeCode,
@@ -148,11 +148,11 @@ struct StatusBarQuotaPresenterTests {
             )
         ])
 
-        #expect(try #require(entries.first).lines.map(\.text) == ["70%", "--"])
+        #expect(try #require(entries.first).lines.map(\.text) == ["70%"])
     }
 
-    @Test("paid claude code labels the weekly line even without a 5h reading")
-    func paidClaudeCodeReservesTheFiveHourLine() throws {
+    @Test("paid claude code does not reserve the 5h line without a 5h reading")
+    func paidClaudeCodeDoesNotReserveTheFiveHourLine() throws {
         let entries = StatusBarQuotaPresenter.entries(for: [
             StatusBarQuotaInput(
                 tool: .claudeCode,
@@ -171,8 +171,29 @@ struct StatusBarQuotaPresenterTests {
         ])
 
         let entry = try #require(entries.first)
-        #expect(entry.lines.map(\.text) == ["--", "10%"])
-        #expect(entry.lines.map(\.level) == [.normal, .low])
+        #expect(entry.lines.map(\.text) == ["10%"])
+        #expect(entry.lines.map(\.level) == [.low])
+    }
+
+    @Test("codex does not reserve a 5h line when only weekly quota is returned")
+    func codexDoesNotReserveFiveHourLine() throws {
+        let entries = StatusBarQuotaPresenter.entries(for: [
+            StatusBarQuotaInput(
+                tool: .codex,
+                accountName: "Work",
+                quota: QuotaSnapshot(
+                    source: "Codex OAuth",
+                    primary: nil,
+                    secondary: QuotaWindow(label: "Weekly", used: 21, limit: 100, resetAt: nil),
+                    creditsRemaining: nil,
+                    creditsTotal: nil,
+                    updatedAt: Date(timeIntervalSince1970: 1),
+                    note: nil
+                )
+            )
+        ])
+
+        #expect(try #require(entries.first).lines.map(\.text) == ["79%"])
     }
 
     @Test("unpaid claude code setups keep the compact single line")
