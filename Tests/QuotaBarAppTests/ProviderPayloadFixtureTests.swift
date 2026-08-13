@@ -123,15 +123,11 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.primary?.label == "Weekly")
         #expect(snapshot.secondary == nil)
         #expect(snapshot.extraWindows.map(\.label) == [
-            "Spark 5h",
-            "Spark Weekly",
             "Code Review Weekly"
         ])
-        #expect(snapshot.extraWindows.map(\.used) == [0, 100, 9])
-        #expect(Array(snapshot.orderedMetrics.map(\.title).prefix(4)) == [
+        #expect(snapshot.extraWindows.map(\.used) == [9])
+        #expect(Array(snapshot.orderedMetrics.map(\.title).prefix(2)) == [
             "Weekly",
-            "Spark 5h",
-            "Spark Weekly",
             "Code Review Weekly"
         ])
     }

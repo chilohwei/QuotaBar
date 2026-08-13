@@ -129,14 +129,18 @@ extension CodexProvider {
         guard let entries = dict["additional_rate_limits"] as? [[String: Any]] else {
             return []
         }
-        return entries.flatMap { entry in
+        return entries.flatMap { entry -> [QuotaWindow] in
             guard let rateLimit = (entry["rate_limit"] as? [String: Any])
                 ?? (entry["rateLimit"] as? [String: Any]) else {
                 return [QuotaWindow]()
             }
+            let displayName = codexAdditionalLimitDisplayName(from: entry)
+            if displayName == "Spark" {
+                return [QuotaWindow]()
+            }
             return parseCodexNamedRateLimitWindows(
                 rateLimit,
-                prefix: codexAdditionalLimitDisplayName(from: entry)
+                prefix: displayName
             )
         }
     }
