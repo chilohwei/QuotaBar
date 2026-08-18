@@ -1,3 +1,5 @@
+
+
 # QuotaBar
 
 [English](./README.en.md) | 简体中文
@@ -48,6 +50,8 @@ xattr -dr com.apple.quarantine /Applications/QuotaBar.app
 brew tap chilohwei/quotabar
 brew install --cask quotabar
 ```
+
+Homebrew cask 安装的是 `universal` 版本，适用于 Apple Silicon 与 Intel Mac。
 
 使用 Homebrew 升级：
 
