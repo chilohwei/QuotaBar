@@ -92,6 +92,21 @@ enum AccountCardStatusPresenter {
         return .healthy
     }
 
+    /// Detail line for a card whose metric strip has nothing to plot.
+    ///
+    /// A card-worthy note is already rendered in the footer, so repeating it under the
+    /// empty tile printed the same sentence twice. Freshness notes, which the footer
+    /// deliberately filters out, are still worth surfacing here.
+    static func metricFallbackDetail(
+        quota: QuotaSnapshot?,
+        hasVisibleMetrics: Bool,
+        text: AppText
+    ) -> String? {
+        guard !hasVisibleMetrics, let quota else { return nil }
+        if text.shouldDisplayNoteOnCard(quota.note) { return nil }
+        return text.localizedNote(quota.note)
+    }
+
     // Claude Code reports informational windows beyond the ones that actually
     // gate usage; only primary/secondary/credits count toward availability.
     static func quotaLimitingMetrics(tool: ToolKind, quota: QuotaSnapshot?) -> [QuotaDisplayMetric] {

@@ -434,11 +434,11 @@ struct AccountCardView: View {
     }
 
     private var metricFallbackDetail: String? {
-        guard visibleMetrics.isEmpty,
-              let quota else {
-            return nil
-        }
-        return text.localizedNote(quota.note)
+        AccountCardStatusPresenter.metricFallbackDetail(
+            quota: quota,
+            hasVisibleMetrics: !visibleMetrics.isEmpty,
+            text: text
+        )
     }
 
     private var contentSpacing: CGFloat {

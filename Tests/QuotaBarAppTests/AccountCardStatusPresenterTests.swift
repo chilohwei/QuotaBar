@@ -10,7 +10,8 @@ struct AccountCardStatusPresenterTests {
         creditsRemaining: Double? = nil,
         creditsTotal: Double? = nil,
         updatedAt: Date = Date(),
-        availabilityStatus: QuotaAvailabilityStatus? = nil
+        availabilityStatus: QuotaAvailabilityStatus? = nil,
+        note: String? = nil
     ) -> QuotaSnapshot {
         QuotaSnapshot(
             source: "Fixture",
@@ -20,7 +21,7 @@ struct AccountCardStatusPresenterTests {
             creditsTotal: creditsTotal,
             updatedAt: updatedAt,
             availabilityStatus: availabilityStatus,
-            note: nil
+            note: note
         )
     }
 
@@ -125,6 +126,37 @@ struct AccountCardStatusPresenterTests {
         #expect(AccountCardStatusPresenter.quotaLimitingMetrics(tool: .claudeCode, quota: quota).isEmpty)
         #expect(status(tool: .claudeCode, quota: quota) == .healthy)
         #expect(status(tool: .cursor, quota: quota) == .warning)
+    }
+
+    @Test("a card-worthy note is left to the footer instead of being printed twice")
+    func metricFallbackDetailSkipsFooterNotes() {
+        let text = AppText(language: .simplifiedChinese)
+        for note in [
+            QuotaNoteCatalog.claudeApiKeyNoWindows,
+            QuotaNoteCatalog.codexEmptyQuotaFields,
+            QuotaNoteCatalog.cursorLegacyNoStandardFields
+        ] {
+            #expect(text.shouldDisplayNoteOnCard(note))
+            let quota = snapshot(primary: nil, note: note)
+            #expect(AccountCardStatusPresenter.metricFallbackDetail(quota: quota, hasVisibleMetrics: false, text: text) == nil)
+        }
+    }
+
+    @Test("a freshness note the footer hides still labels the empty metric strip")
+    func metricFallbackDetailKeepsFreshnessNotes() {
+        let text = AppText(language: .simplifiedChinese)
+        let note = QuotaNoteCatalog.codexLiveUnavailableCache
+        #expect(!text.shouldDisplayNoteOnCard(note))
+        let quota = snapshot(primary: nil, note: note)
+        #expect(AccountCardStatusPresenter.metricFallbackDetail(quota: quota, hasVisibleMetrics: false, text: text) == text.localizedNote(note))
+    }
+
+    @Test("a strip that has metrics to plot needs no fallback detail")
+    func metricFallbackDetailUnusedWhenMetricsExist() {
+        let text = AppText(language: .simplifiedChinese)
+        let quota = snapshot(primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil), note: QuotaNoteCatalog.codexLiveUnavailableCache)
+        #expect(AccountCardStatusPresenter.metricFallbackDetail(quota: quota, hasVisibleMetrics: true, text: text) == nil)
+        #expect(AccountCardStatusPresenter.metricFallbackDetail(quota: nil, hasVisibleMetrics: false, text: text) == nil)
     }
 }
 

@@ -38,15 +38,21 @@ struct CompactQuotaMetricStrip: View {
     let language: AppLanguage
     var fallbackDetail: String?
 
+    /// Three tiles across a 440pt panel leave each one too narrow for the
+    /// side-by-side label/percentage row, so they switch to a stacked layout
+    /// that gives the label the full tile width.
+    private var isDense: Bool { tiles.count >= 3 }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: isDense ? 9 : 12) {
             ForEach(Array(tiles.enumerated()), id: \.offset) { _, tile in
                 CompactQuotaMetricTile(
                     title: tile.title,
                     metric: tile.metric,
                     fallbackResetAt: fallbackResetAt,
                     language: language,
-                    fallbackDetail: fallbackDetail
+                    fallbackDetail: fallbackDetail,
+                    isDense: isDense
                 )
             }
         }
@@ -98,6 +104,12 @@ private struct RingQuotaMetricTile: View {
         return Branding.quotaFill
     }
 
+    // A used-up window draws no arc at all, which on its own is indistinguishable
+    // from "no data". The track and the number carry the alarm instead.
+    private var isExhausted: Bool {
+        state.isKnown && state.ratio <= 0.001
+    }
+
     var body: some View {
         let resolved = state
 
@@ -106,15 +118,20 @@ private struct RingQuotaMetricTile: View {
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(Branding.inkMuted)
                 .lineLimit(1)
+                .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity, alignment: .center)
 
             ZStack {
-                MetricRing(value: resolved.isKnown ? resolved.ratio : 0, tint: tint)
-                    .frame(width: 38, height: 38)
+                MetricRing(
+                    value: resolved.isKnown ? resolved.ratio : 0,
+                    tint: tint,
+                    track: isExhausted ? Branding.dangerSoft : Branding.track
+                )
+                .frame(width: 38, height: 38)
 
                 Text(resolved.isKnown ? "\(Int((resolved.ratio * 100).rounded()))%" : "--")
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(resolved.isKnown ? Branding.inkStrong : Branding.inkSubtle)
+                    .foregroundStyle(isExhausted ? Branding.danger : (resolved.isKnown ? Branding.inkStrong : Branding.inkSubtle))
                     .monospacedDigit()
             }
 
@@ -145,6 +162,7 @@ private struct CompactQuotaMetricTile: View {
     let fallbackResetAt: Date?
     let language: AppLanguage
     let fallbackDetail: String?
+    var isDense = false
 
     private var text: AppText { AppText(language: language) }
 
@@ -163,43 +181,90 @@ private struct CompactQuotaMetricTile: View {
         return Branding.quotaFill
     }
 
+    // A used-up window draws a zero-width bar, which on its own is
+    // indistinguishable from "no data". The track and the number carry the alarm.
+    private var isExhausted: Bool {
+        state.isKnown && state.ratio <= 0.001
+    }
+
     private var percentTextColor: Color {
         guard state.isKnown else { return Branding.inkSubtle }
-        return Branding.inkStrong
+        return isExhausted ? Branding.danger : Branding.inkStrong
+    }
+
+    private var localizedTitle: String { text.quotaLabel(title) }
+
+    private func percentText(resolved: (ratio: Double, resetAt: Date?, isKnown: Bool)) -> String {
+        resolved.isKnown ? "\(Int((resolved.ratio * 100).rounded()))%" : "--"
     }
 
     var body: some View {
         let resolved = state
 
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(text.quotaLabel(title))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Branding.inkMuted)
+        VStack(alignment: .leading, spacing: isDense ? 4 : 5) {
+            if isDense {
+                Text(localizedTitle)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(Branding.inkMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(localizedTitle)
+
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(percentText(resolved: resolved))
+                        .font(.system(size: 15.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(percentTextColor)
+                        .monospacedDigit()
                         .lineLimit(1)
 
                     Text(text.string(.remaining))
-                        .font(.system(size: 10, weight: .light))
+                        .font(.system(size: 9.5, weight: .light))
                         .foregroundStyle(Branding.inkSubtle)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+
+                    Spacer(minLength: 0)
                 }
+            } else {
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(localizedTitle)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Branding.inkMuted)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .truncationMode(.tail)
+                            .help(localizedTitle)
 
-                Spacer(minLength: 8)
+                        Text(text.string(.remaining))
+                            .font(.system(size: 10, weight: .light))
+                            .foregroundStyle(Branding.inkSubtle)
+                            .lineLimit(1)
+                    }
 
-                Text(resolved.isKnown ? "\(Int((resolved.ratio * 100).rounded()))%" : "--")
-                    .font(.system(size: 17, weight: .semibold, design: .rounded))
-                    .foregroundStyle(percentTextColor)
-                    .monospacedDigit()
-                    .lineLimit(1)
+                    Spacer(minLength: 8)
+
+                    Text(percentText(resolved: resolved))
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .foregroundStyle(percentTextColor)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
             }
 
-            RatioBar(value: resolved.isKnown ? resolved.ratio : 0, tint: tint)
+            RatioBar(
+                value: resolved.isKnown ? resolved.ratio : 0,
+                tint: tint,
+                track: isExhausted ? Branding.dangerSoft : Branding.track
+            )
 
             Text(detailText(resolved: resolved))
-                .font(.system(size: 10, weight: .light))
+                .font(.system(size: isDense ? 9.5 : 10, weight: .light))
                 .foregroundStyle(Branding.inkSubtle.opacity(0.90))
                 .lineLimit(1)
+                .minimumScaleFactor(isDense ? 0.85 : 1)
                 .frame(minHeight: 13, alignment: .leading)
         }
         .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
@@ -219,11 +284,12 @@ private struct CompactQuotaMetricTile: View {
 private struct MetricRing: View {
     let value: Double
     let tint: Color
+    var track: Color = Branding.track
 
     var body: some View {
         ZStack {
             Circle()
-                .stroke(Branding.track, lineWidth: 3.6)
+                .stroke(track, lineWidth: 3.6)
             Circle()
                 .trim(from: 0, to: min(max(value, 0), 1))
                 .stroke(tint, style: StrokeStyle(lineWidth: 3.6, lineCap: .round))
@@ -236,12 +302,13 @@ private struct MetricRing: View {
 private struct RatioBar: View {
     let value: Double
     let tint: Color
+    var track: Color = Branding.track
 
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Branding.track)
+                    .fill(track)
                     .overlay(
                         Capsule()
                             .stroke(Branding.iconHighlight, lineWidth: 0.5)
