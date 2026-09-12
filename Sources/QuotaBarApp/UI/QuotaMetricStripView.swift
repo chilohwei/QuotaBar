@@ -1,37 +1,62 @@
 import SwiftUI
 
+struct QuotaMetricTile: Identifiable {
+    let title: String
+    let metric: QuotaDisplayMetric?
+
+    var id: String { title }
+}
+
 struct LoadingQuotaPlaceholder: View {
     let language: AppLanguage
-    var useRingLayout = false
+    let metricTitles: [String]
 
     private var text: AppText { AppText(language: language) }
 
     var body: some View {
-        if useRingLayout {
-            RingQuotaMetricStrip(
-                tiles: [
-                    ("Total", nil),
-                    ("Auto", nil),
-                    ("API", nil)
-                ],
+        AdaptiveQuotaMetricStrip(
+            tiles: metricTitles.map { QuotaMetricTile(title: $0, metric: nil) },
+            language: language,
+            fallbackDetail: text.string(.refreshing)
+        )
+    }
+}
+
+/// Keeps one visual language while allowing providers to expose different
+/// numbers of primary limits. One limit gets the full width, two compare side
+/// by side, and three or more use compact rings.
+struct AdaptiveQuotaMetricStrip: View {
+    let tiles: [QuotaMetricTile]
+    let language: AppLanguage
+    var fallbackDetail: String?
+
+    @ViewBuilder
+    var body: some View {
+        if tiles.count == 1, let tile = tiles.first {
+            SingleQuotaMetricTile(
+                title: tile.title,
+                metric: tile.metric,
                 language: language,
-                fallbackDetail: text.string(.refreshing)
+                fallbackDetail: fallbackDetail
+            )
+        } else if tiles.count <= 2 {
+            CompactQuotaMetricStrip(
+                tiles: tiles,
+                language: language,
+                fallbackDetail: fallbackDetail
             )
         } else {
-            CompactQuotaMetricStrip(
-                tiles: [
-                    ("5h", nil),
-                    ("Weekly", nil)
-                ],
+            RingQuotaMetricStrip(
+                tiles: tiles,
                 language: language,
-                fallbackDetail: text.string(.refreshing)
+                fallbackDetail: fallbackDetail
             )
         }
     }
 }
 
 struct CompactQuotaMetricStrip: View {
-    let tiles: [(title: String, metric: QuotaDisplayMetric?)]
+    let tiles: [QuotaMetricTile]
     let language: AppLanguage
     var fallbackDetail: String?
 
@@ -41,8 +66,8 @@ struct CompactQuotaMetricStrip: View {
     private var isDense: Bool { tiles.count >= 3 }
 
     var body: some View {
-        HStack(alignment: .top, spacing: isDense ? 9 : 12) {
-            ForEach(Array(tiles.enumerated()), id: \.offset) { _, tile in
+        HStack(alignment: .top, spacing: isDense ? 10 : 16) {
+            ForEach(tiles) { tile in
                 CompactQuotaMetricTile(
                     title: tile.title,
                     metric: tile.metric,
@@ -56,13 +81,13 @@ struct CompactQuotaMetricStrip: View {
 }
 
 struct RingQuotaMetricStrip: View {
-    let tiles: [(title: String, metric: QuotaDisplayMetric?)]
+    let tiles: [QuotaMetricTile]
     let language: AppLanguage
     var fallbackDetail: String?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            ForEach(Array(tiles.enumerated()), id: \.offset) { _, tile in
+        HStack(alignment: .top, spacing: 12) {
+            ForEach(tiles) { tile in
                 RingQuotaMetricTile(
                     title: tile.title,
                     metric: tile.metric,
@@ -71,6 +96,77 @@ struct RingQuotaMetricStrip: View {
                 )
             }
         }
+    }
+}
+
+private struct SingleQuotaMetricTile: View {
+    let title: String
+    let metric: QuotaDisplayMetric?
+    let language: AppLanguage
+    let fallbackDetail: String?
+
+    private var text: AppText { AppText(language: language) }
+
+    private var state: (ratio: Double, resetAt: Date?, isKnown: Bool) {
+        guard let metric, let ratio = metric.ratio else {
+            return (0, nil, false)
+        }
+        return (ratio, metric.resetAt, true)
+    }
+
+    private var tint: Color {
+        guard state.isKnown else { return Branding.inkSubtle }
+        if state.ratio <= 0.001 { return Branding.danger }
+        if state.ratio <= 0.20 { return Branding.warning }
+        return Branding.quotaFill
+    }
+
+    private var valueTint: Color {
+        guard state.isKnown else { return Branding.inkSubtle }
+        if state.ratio <= 0.001 { return Branding.danger }
+        if state.ratio <= 0.20 { return Branding.warning }
+        return Branding.inkStrong
+    }
+
+    var body: some View {
+        let resolved = state
+
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(text.quotaLabel(title))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(Branding.inkMuted)
+
+                    Text(text.string(.remaining))
+                        .font(.system(size: 10.2, weight: .regular))
+                        .foregroundStyle(Branding.inkSubtle)
+                }
+
+                Spacer(minLength: 12)
+
+                Text(resolved.isKnown ? "\(Int((resolved.ratio * 100).rounded()))%" : "--")
+                    .font(.system(size: 26, weight: .semibold, design: .rounded))
+                    .foregroundStyle(valueTint)
+                    .monospacedDigit()
+            }
+
+            RatioBar(
+                value: resolved.isKnown ? resolved.ratio : 0,
+                tint: tint,
+                track: resolved.isKnown && resolved.ratio <= 0.001 ? Branding.dangerSoft : Branding.track
+            )
+
+            QuotaResetDetail(
+                resetAt: resolved.resetAt,
+                language: language,
+                isKnown: resolved.isKnown,
+                fallbackDetail: fallbackDetail,
+                usesInlineLayout: true
+            )
+        }
+        .frame(maxWidth: .infinity, minHeight: 68, alignment: .topLeading)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -106,9 +202,9 @@ private struct RingQuotaMetricTile: View {
     var body: some View {
         let resolved = state
 
-        VStack(alignment: .center, spacing: 3) {
+        VStack(alignment: .center, spacing: 3.5) {
             Text("\(text.quotaLabel(title)) · \(text.string(.remaining))")
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.system(size: 10.8, weight: .medium))
                 .foregroundStyle(Branding.inkMuted)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -123,7 +219,7 @@ private struct RingQuotaMetricTile: View {
                 .frame(width: 38, height: 38)
 
                 Text(resolved.isKnown ? "\(Int((resolved.ratio * 100).rounded()))%" : "--")
-                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(isExhausted ? Branding.danger : (resolved.isKnown ? Branding.inkStrong : Branding.inkSubtle))
                     .monospacedDigit()
             }
@@ -180,7 +276,7 @@ private struct CompactQuotaMetricTile: View {
     var body: some View {
         let resolved = state
 
-        VStack(alignment: .leading, spacing: isDense ? 4 : 5) {
+        VStack(alignment: .leading, spacing: isDense ? 4.5 : 6) {
             if isDense {
                 Text(localizedTitle)
                     .font(.system(size: 10.5, weight: .medium))
@@ -207,10 +303,10 @@ private struct CompactQuotaMetricTile: View {
                     Spacer(minLength: 0)
                 }
             } else {
-                HStack(alignment: .top, spacing: 8) {
+                HStack(alignment: .top, spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(localizedTitle)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: 11.2, weight: .semibold))
                             .foregroundStyle(Branding.inkMuted)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
@@ -218,7 +314,7 @@ private struct CompactQuotaMetricTile: View {
                             .help(localizedTitle)
 
                         Text(text.string(.remaining))
-                            .font(.system(size: 10, weight: .light))
+                            .font(.system(size: 10.2, weight: .regular))
                             .foregroundStyle(Branding.inkSubtle)
                             .lineLimit(1)
                     }
@@ -226,7 +322,7 @@ private struct CompactQuotaMetricTile: View {
                     Spacer(minLength: 8)
 
                     Text(percentText(resolved: resolved))
-                        .font(.system(size: 21, weight: .semibold, design: .rounded))
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
                         .foregroundStyle(percentTextColor)
                         .monospacedDigit()
                         .lineLimit(1)

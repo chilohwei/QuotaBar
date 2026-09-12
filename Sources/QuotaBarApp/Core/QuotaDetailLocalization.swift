@@ -19,7 +19,7 @@ extension AppText {
     var resetCreditsUnavailable: String { quotaDetailText("Reset inventory unavailable. Refresh to retry.", "未能获取重置次数，请刷新重试。", "未能取得重置次數，請重新整理重試。") }
     var expiryUnknown: String { quotaDetailText("Expiry not provided", "未提供到期时间", "未提供到期時間") }
     func resetCreditsCount(_ count: Int) -> String {
-        quotaDetailText("\(count) reset\(count == 1 ? "" : "s")", "重置 \(count) 次", "重置 \(count) 次")
+        quotaDetailText("\(count) reset\(count == 1 ? "" : "s")", "可重置 \(count) 次", "可重置 \(count) 次")
     }
     func creditExpiry(_ date: Date) -> String {
         quotaDetailText("Expires \(exactReset(date))", "到期 \(exactReset(date))", "到期 \(exactReset(date))")
@@ -30,7 +30,7 @@ extension AppText {
     }
 
     var otherQuotaTitle: String {
-        quotaDetailText("Other quotas", "其他额度", "其他額度")
+        quotaDetailText("More quotas", "更多额度", "更多額度")
     }
 
     var resetUnavailable: String {

@@ -120,7 +120,7 @@ struct AccountCardView: View {
         return MetadataItem(
             text: type.label,
             tint: type.tint,
-            weight: .medium
+            weight: .semibold
         )
     }
 
@@ -140,7 +140,7 @@ struct AccountCardView: View {
         return MetadataItem(
             text: text.billingCycle(cycle),
             tint: Branding.inkSubtle,
-            weight: .light
+            weight: .regular
         )
     }
 
@@ -213,14 +213,6 @@ struct AccountCardView: View {
         quota?.mainMetrics(for: account.tool) ?? []
     }
 
-    private var useRingMetricLayout: Bool {
-        account.tool == .cursor
-    }
-
-    private var cursorRingTiles: [(title: String, metric: QuotaDisplayMetric?)] {
-        return visibleMetrics.map { ($0.title, $0) }
-    }
-
     private var isInitialLoadingWithoutQuota: Bool {
         quota == nil && (isRefreshing || loadState == .loadingInitial || loadState == .refreshing)
     }
@@ -254,6 +246,9 @@ struct AccountCardView: View {
     }
 
     private var shouldShowStatusBadge: Bool {
+        // The footer already explains a failed refresh and whether another
+        // attempt is in progress. A second "Refreshing" badge is contradictory.
+        if errorMessage != nil { return false }
         if shouldHideRefreshingStatusBadge {
             return false
         }
@@ -303,7 +298,7 @@ struct AccountCardView: View {
         }
 
         if let subscriptionDateText {
-            items.append(MetadataItem(text: subscriptionDateText, tint: Branding.inkSubtle, weight: .light))
+            items.append(MetadataItem(text: subscriptionDateText, tint: Branding.inkSubtle, weight: .regular))
         }
 
         if isActive {
@@ -316,7 +311,7 @@ struct AccountCardView: View {
 
         if let quota,
            let freshnessBadge = text.quotaFreshnessBadge(quota) {
-            items.append(MetadataItem(text: freshnessBadge, tint: Branding.inkSubtle, weight: .light))
+            items.append(MetadataItem(text: freshnessBadge, tint: Branding.inkSubtle, weight: .regular))
         }
 
         if isRecommended, !isActive {
@@ -348,11 +343,23 @@ struct AccountCardView: View {
 
     private var footerMessage: FooterContent? {
         if let errorMessage {
+            let localizedMessage = text.localizedStoredErrorMessage(errorMessage)
+            let summary = text.accountErrorSummary(
+                localizedMessage,
+                isRetrying: isRefreshing,
+                hasCachedQuota: quota != nil
+            )
             if errorRequiresUserAction {
                 // The card shows only the actionable gist; the full how-to stays on hover.
-                return FooterContent(display: text.compactErrorSummary(errorMessage), tooltip: errorMessage, color: Branding.warning, icon: "exclamationmark.circle.fill", weight: .medium)
+                return FooterContent(display: summary, tooltip: localizedMessage, color: Branding.warning, icon: "exclamationmark.circle.fill", weight: .medium)
             }
-            return FooterContent(display: text.compactErrorSummary(errorMessage), tooltip: errorMessage, color: Branding.warning, icon: nil, weight: .regular)
+            return FooterContent(
+                display: summary,
+                tooltip: localizedMessage,
+                color: Branding.warning,
+                icon: isRefreshing ? "arrow.clockwise.circle.fill" : "exclamationmark.circle",
+                weight: .medium
+            )
         }
         // Structured spend details replace the legacy inline dollar summary, leaving
         // the footer available for freshness and actual errors.
@@ -370,19 +377,23 @@ struct AccountCardView: View {
     }
 
 
-    private var metricTiles: [(title: String, metric: QuotaDisplayMetric?)] {
-        if useRingMetricLayout {
-            return cursorRingTiles.isEmpty ? missingMetricTiles : cursorRingTiles
-        }
-        return ["5h", "Weekly"].map { title in
-            (title, visibleMetrics.first { metric in
-                title == "5h" ? metric.title.lowercased() == "5h" : ["weekly", "7d"].contains(metric.title.lowercased())
-            })
-        }
+    private var metricTiles: [QuotaMetricTile] {
+        visibleMetrics.isEmpty
+            ? missingMetricTiles
+            : visibleMetrics.map { QuotaMetricTile(title: $0.title, metric: $0) }
     }
 
-    private var missingMetricTiles: [(title: String, metric: QuotaDisplayMetric?)] {
-        [("Usage", nil)]
+    private var missingMetricTiles: [QuotaMetricTile] {
+        [QuotaMetricTile(title: "Usage", metric: nil)]
+    }
+
+    private var loadingMetricTitles: [String] {
+        switch account.tool {
+        case .cursor:
+            return ["Total", "Auto", "API"]
+        case .codex, .claudeCode:
+            return ["5h", "Weekly"]
+        }
     }
 
     private var metricFallbackDetail: String? {
@@ -393,7 +404,7 @@ struct AccountCardView: View {
         )
     }
 
-    private let contentSpacing: CGFloat = 6
+    private let contentSpacing: CGFloat = 7
     private let verticalPadding: CGFloat = 10
 
     var body: some View {
@@ -401,15 +412,9 @@ struct AccountCardView: View {
             header
 
             if isInitialLoadingWithoutQuota {
-                LoadingQuotaPlaceholder(language: language, useRingLayout: useRingMetricLayout)
-            } else if useRingMetricLayout {
-                RingQuotaMetricStrip(
-                    tiles: metricTiles,
-                    language: language,
-                    fallbackDetail: metricFallbackDetail
-                )
+                LoadingQuotaPlaceholder(language: language, metricTitles: loadingMetricTitles)
             } else {
-                CompactQuotaMetricStrip(
+                AdaptiveQuotaMetricStrip(
                     tiles: metricTiles,
                     language: language,
                     fallbackDetail: metricFallbackDetail
@@ -421,8 +426,9 @@ struct AccountCardView: View {
                     footer
                 } else if let quota {
                     Text(text.updatedAt(quota.updatedAt))
-                        .font(.system(size: 10))
-                        .foregroundStyle(Branding.inkMuted)
+                        .font(.system(size: 10.2, weight: .regular))
+                        .foregroundStyle(Branding.inkSubtle)
+                        .monospacedDigit()
                         .help(text.quotaSnapshotMeta(quota))
                 }
                 Spacer(minLength: 0)
@@ -473,12 +479,7 @@ struct AccountCardView: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isKeyboardFocused)
         .animation(reduceMotion ? nil : .quotaFluid, value: isActive)
         .contentShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
-        .onTapGesture {
-            guard canActivate, !isActive else { return }
-            onActivate()
-        }
-        .pointingHandCursor(canActivate && !isActive)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(cardAccessibilityLabel)
         .accessibilityHint(cardAccessibilityHint)
         .accessibilityAction(named: Text(text.useAccount(resolvedAccountName))) {
@@ -534,10 +535,10 @@ struct AccountCardView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .center, spacing: 8) {
                 Text(displayName)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .font(.system(size: 15.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(Branding.inkStrong)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -555,7 +556,7 @@ struct AccountCardView: View {
     }
 
     private var metadataRow: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             ForEach(Array(metadataItems.enumerated()), id: \.offset) { index, item in
                 if index > 0 {
                     Circle()
@@ -615,11 +616,11 @@ struct AccountCardView: View {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 if let icon = footerMessage.icon {
                     Image(systemName: icon)
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 10.5, weight: .bold))
                         .foregroundStyle(footerMessage.color)
                 }
                 Text(footerMessage.display)
-                    .font(.system(size: 10.4, weight: footerMessage.weight))
+                    .font(.system(size: 10.8, weight: footerMessage.weight))
                     .foregroundStyle(footerMessage.color)
                     .lineLimit(1)
                     .truncationMode(.tail)

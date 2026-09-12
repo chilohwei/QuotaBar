@@ -28,11 +28,11 @@ struct CardTextActionButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 10.8, weight: .regular))
+                .font(.system(size: 11, weight: .regular))
                 .lineLimit(1)
                 .fixedSize()
-                .padding(.horizontal, 8)
-                .frame(height: 22)
+                .padding(.horizontal, 9)
+                .frame(height: 23)
                 .foregroundStyle(textColor)
                 .background(
                     RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
@@ -56,7 +56,7 @@ struct InlineMetadataLabel: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 10.5, weight: weight))
+            .font(.system(size: 10.8, weight: weight))
             .lineLimit(1)
             .truncationMode(.tail)
             .foregroundStyle(tint)
@@ -70,7 +70,7 @@ struct QuotaDetailButtonLabel: View {
     var showsChevron = false
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Text(title)
                 .lineLimit(1)
                 .monospacedDigit()
@@ -80,10 +80,10 @@ struct QuotaDetailButtonLabel: View {
                     .foregroundStyle(isPresented ? Branding.accentBlueDark : Branding.inkSubtle)
             }
         }
-        .font(.system(size: 10.5, weight: .medium))
+        .font(.system(size: 10.8, weight: .medium))
         .foregroundStyle(isPresented ? Branding.accentBlueDark : Branding.inkMuted)
-        .padding(.horizontal, 8)
-        .frame(height: 22)
+        .padding(.horizontal, 9)
+        .frame(height: 23)
         .background(
             RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
                 .fill(isPresented ? Branding.accentBlueSoft : Branding.controlSurface.opacity(0.65))

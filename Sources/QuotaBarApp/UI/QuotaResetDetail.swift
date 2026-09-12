@@ -6,24 +6,48 @@ struct QuotaResetDetail: View {
     let language: AppLanguage
     var isKnown = true
     var fallbackDetail: String?
+    var usesInlineLayout = false
     private var text: AppText { AppText(language: language) }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            VStack(alignment: .leading, spacing: 2) {
-                if let resetAt {
-                    Text(text.resetCountdown(resetAt, now: context.date))
-                    Text(text.exactReset(resetAt))
-                        .foregroundStyle(Branding.inkSubtle)
+            Group {
+                if usesInlineLayout {
+                    HStack(spacing: 6) {
+                        resetContent(now: context.date)
+                    }
                 } else {
-                    Text(isKnown ? text.resetUnavailable : (fallbackDetail ?? text.string(.waitingData)))
+                    VStack(alignment: .leading, spacing: 2) {
+                        resetContent(now: context.date)
+                    }
                 }
             }
-            .font(.system(size: 10))
-            .foregroundStyle(Branding.inkMuted)
             .lineLimit(1)
             .minimumScaleFactor(0.85)
             .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private func resetContent(now: Date) -> some View {
+        if let resetAt {
+            Text(text.resetCountdown(resetAt, now: now))
+                .font(.system(size: 10.8, weight: .medium))
+                .foregroundStyle(Branding.inkMuted)
+                .monospacedDigit()
+            if usesInlineLayout {
+                Text("·")
+                    .font(.system(size: 10.2, weight: .regular))
+                    .foregroundStyle(Branding.separatorDot)
+            }
+            Text(text.exactReset(resetAt))
+                .font(.system(size: 10.2, weight: .regular))
+                .foregroundStyle(Branding.inkSubtle)
+                .monospacedDigit()
+        } else {
+            Text(isKnown ? text.resetUnavailable : (fallbackDetail ?? text.string(.waitingData)))
+                .font(.system(size: 10.5, weight: .regular))
+                .foregroundStyle(Branding.inkSubtle)
         }
     }
 }

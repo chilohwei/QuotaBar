@@ -18,9 +18,11 @@ extension DashboardView {
                 headerActions
             }
 
-            headerStatus
+            if showsHeaderStatus {
+                headerStatus
+            }
         }
-        .frame(height: DashboardLayout.headerHeight, alignment: .topLeading)
+        .frame(height: dashboardHeaderHeight, alignment: .topLeading)
         .padding(.horizontal, 18)
     }
 
@@ -203,24 +205,6 @@ extension DashboardView {
                     .layoutPriority(1)
             }
 
-            Button {
-                isToolMenuPresented = false
-                setSettingsMenuPresented(!isSettingsMenuPresented)
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(isSettingsMenuPresented ? Branding.accentBlueDark : Branding.inkMuted)
-                    .frame(width: 22, height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous)
-                            .fill(isSettingsMenuPresented ? Branding.accentBlueSoft : Color.clear)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: Branding.radiusSmallControl, style: .continuous))
-            }
-            .buttonStyle(.quotaInteractive())
-            .help(text.string(.settings))
-            .accessibilityLabel(text.string(.settings))
-
             Spacer(minLength: 0)
         }
         .frame(height: 22, alignment: .center)
@@ -256,6 +240,7 @@ extension DashboardView {
     var headerActions: some View {
         HStack(spacing: 6) {
             headerRefreshButton
+            headerSettingsButton
 
             Button {
                 if appState.isAddingAccount {
@@ -300,7 +285,31 @@ extension DashboardView {
             .help(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
             .accessibilityLabel(appState.isAddingAccount ? text.string(.cancelAdding) : text.string(.addAccount))
         }
-        .frame(width: 120, height: 30, alignment: .trailing)
+        .frame(width: 148, height: 30, alignment: .trailing)
+    }
+
+    var headerSettingsButton: some View {
+        Button {
+            isToolMenuPresented = false
+            setSettingsMenuPresented(!isSettingsMenuPresented)
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(isSettingsMenuPresented ? Branding.accentBlueDark : Branding.inkMuted)
+                .frame(width: 22, height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
+                        .fill(isSettingsMenuPresented ? Branding.accentBlueSoft : Branding.controlSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous)
+                        .stroke(isSettingsMenuPresented ? Branding.accentBlue.opacity(0.12) : Branding.controlStroke, lineWidth: 0.75)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: Branding.radiusMenu, style: .continuous))
+        }
+        .buttonStyle(.quotaInteractive())
+        .help(text.string(.settings))
+        .accessibilityLabel(text.string(.settings))
     }
 
     var headerRefreshButton: some View {

@@ -34,6 +34,34 @@ extension AppText {
         return cleaned.isEmpty ? trimmed : cleaned
     }
 
+    /// Error strings can outlive a language change because account state stores
+    /// the rendered message. Re-resolve well-known transport failures at display
+    /// time so a Chinese dashboard never inherits a previous English sentence.
+    func localizedStoredErrorMessage(_ message: String) -> String {
+        let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.hasPrefix("The connection did not finish")
+            || normalized.hasPrefix("这次连接没有完成")
+            || normalized.hasPrefix("這次連線沒有完成") {
+            return serviceUnavailableMessage()
+        }
+        if normalized.hasPrefix("The connection took too long")
+            || normalized.hasPrefix("这次连接用时较长")
+            || normalized.hasPrefix("這次連線用時較長") {
+            return timeoutMessage()
+        }
+        return normalized
+    }
+
+    func accountErrorSummary(_ message: String, isRetrying: Bool, hasCachedQuota: Bool) -> String {
+        let summary = compactErrorSummary(message)
+        guard isRetrying, hasCachedQuota else { return summary }
+        return localized(
+            english: "Showing previous data · Retrying",
+            simplified: "显示上次数据 · 正在重试",
+            traditional: "顯示上次資料 · 正在重試"
+        )
+    }
+
     func loginMethodPhaseText(_ method: LoginMethod) -> String {
         switch method {
         case .browser:

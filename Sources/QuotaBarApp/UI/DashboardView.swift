@@ -21,6 +21,7 @@ enum DashboardLayout {
     static let accountCardSpacing: CGFloat = 10
     static let maxVisibleAccountCards = 3
     static let headerHeight: CGFloat = 60
+    static let compactHeaderHeight: CGFloat = 36
     static let footerHeight: CGFloat = 42
     static let topInset: CGFloat = 8
     static let stackSpacing: CGFloat = 8
@@ -46,9 +47,13 @@ enum DashboardLayout {
     }
 
     /// Reserve controls before allocating the scroll viewport. Card count must not push the footer offscreen.
-    static func listHeight(panelHeight: CGFloat, hasNotice: Bool) -> CGFloat {
+    static func listHeight(
+        panelHeight: CGFloat,
+        hasNotice: Bool,
+        resolvedHeaderHeight: CGFloat = headerHeight
+    ) -> CGFloat {
         let noticeHeight = hasNotice ? updateNoticeHeight + stackSpacing : 0
-        let controls = topInset + headerHeight + headerListSpacing + listFooterSpacing + footerHeight + noticeHeight
+        let controls = topInset + resolvedHeaderHeight + headerListSpacing + listFooterSpacing + footerHeight + noticeHeight
         return min(maxAccountListHeight, max(0, panelHeight - controls))
     }
 
@@ -69,7 +74,6 @@ struct DashboardView: View {
     @State private var highlightedAccountID: UUID?
     @State private var highlightClearTask: Task<Void, Never>?
     @State private var keyboardSelectedAccountID: UUID?
-
     var text: AppText { appState.text }
 
     var toolAccounts: [Account] {
@@ -106,7 +110,19 @@ struct DashboardView: View {
     }
 
     private var accountListHeight: CGFloat {
-        DashboardLayout.listHeight(panelHeight: preferredPanelHeight, hasNotice: topNotice != nil)
+        DashboardLayout.listHeight(
+            panelHeight: preferredPanelHeight,
+            hasNotice: topNotice != nil,
+            resolvedHeaderHeight: dashboardHeaderHeight
+        )
+    }
+
+    var showsHeaderStatus: Bool {
+        appState.isAddingAccount || visibleAccounts.count > 1
+    }
+
+    var dashboardHeaderHeight: CGFloat {
+        showsHeaderStatus ? DashboardLayout.headerHeight : DashboardLayout.compactHeaderHeight
     }
 
     var isRefreshingSelectedTool: Bool {
@@ -481,4 +497,3 @@ struct DashboardView: View {
 private enum AccountListScrollTarget: Hashable {
     case top
 }
-

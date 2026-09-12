@@ -600,6 +600,18 @@ struct ClaudeQuotaStalenessTests {
         #expect(zh.compactErrorSummary("刷新中") == "刷新中")
     }
 
+    @Test("stored transport errors follow the current dashboard language")
+    func storedTransportErrorRelocalizes() {
+        let zh = AppText(language: .simplifiedChinese)
+        let storedEnglish = "The connection did not finish. QuotaBar will try again automatically."
+
+        #expect(zh.localizedStoredErrorMessage(storedEnglish) == "这次连接没有完成，QuotaBar 会稍后自动重试。")
+        #expect(
+            zh.accountErrorSummary(storedEnglish, isRetrying: true, hasCachedQuota: true)
+                == "显示上次数据 · 正在重试"
+        )
+    }
+
     @Test("expired credentials serve cached data with recovery guidance, never a re-login nag")
     func expiredCredentialFallbackGuidance() throws {
         let provider = ClaudeCodeProvider()

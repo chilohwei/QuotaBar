@@ -24,4 +24,5 @@ struct DashboardLayoutTests {
         let withNotice = DashboardLayout.listHeight(panelHeight: 580, hasNotice: true)
         #expect(normal - withNotice == DashboardLayout.updateNoticeHeight + DashboardLayout.stackSpacing)
     }
+
 }
