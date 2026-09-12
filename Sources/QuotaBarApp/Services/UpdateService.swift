@@ -1,0 +1,447 @@
+import CryptoKit
+import Foundation
+
+struct UpdateService: Sendable {
+    private let latestReleaseURL = URL(string: "https://api.github.com/repos/chilohwei/QuotaBar/releases/latest")!
+
+    func checkForUpdates() async throws -> UpdateCheckResult {
+        let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "0.0.0"
+        AppLog.update.info("Checking updates from GitHub Releases, current=\(currentVersion, privacy: .public)")
+        let release = try await fetchLatestRelease()
+        let latestVersion = release.normalizedVersion
+
+        guard AppVersion(latestVersion) > AppVersion(currentVersion) else {
+            AppLog.update.info("No update available, latest=\(latestVersion, privacy: .public)")
+            return .upToDate(currentVersion: currentVersion, latestVersion: latestVersion)
+        }
+
+        guard let releaseURL = URL(string: release.htmlURL) else {
+            throw UpdateServiceError.invalidReleaseURL
+        }
+        guard OfficialReleaseSource.isOfficialReleaseURL(releaseURL, tagName: release.tagName) else {
+            throw UpdateServiceError.untrustedReleaseSource(release.htmlURL)
+        }
+        guard let asset = release.bestAssetForCurrentMac else {
+            throw UpdateServiceError.missingReleaseAsset
+        }
+        guard let assetURL = URL(string: asset.browserDownloadURL) else {
+            throw UpdateServiceError.invalidAssetURL
+        }
+        guard OfficialReleaseSource.isOfficialAssetURL(assetURL, tagName: release.tagName, assetName: asset.name) else {
+            throw UpdateServiceError.untrustedReleaseSource(asset.browserDownloadURL)
+        }
+        let assetDigest: String
+        if let rawDigest = asset.digest {
+            assetDigest = try ReleaseAssetDigest.sha256Hex(from: rawDigest)
+        } else if let digestAsset = release.sha256Asset(for: asset) {
+            assetDigest = try await fetchReleaseAssetDigest(digestAsset, tagName: release.tagName)
+        } else {
+            throw UpdateServiceError.missingAssetDigest(asset.name)
+        }
+        AppLog.update.info("Update available, version=\(latestVersion, privacy: .public), asset=\(asset.name, privacy: .public)")
+
+        return .updateAvailable(UpdateRelease(
+            tagName: release.tagName,
+            version: latestVersion,
+            currentVersion: currentVersion,
+            releaseURL: releaseURL,
+            assetURL: assetURL,
+            assetName: asset.name,
+            assetDigest: assetDigest
+        ))
+    }
+
+    func installAndRelaunch(
+        _ release: UpdateRelease,
+        progress: (@Sendable (UpdateDownloadProgress) -> Void)? = nil
+    ) async throws {
+        AppLog.update.info("Starting update install, version=\(release.version, privacy: .public), asset=\(release.assetName, privacy: .public)")
+        guard OfficialReleaseSource.isOfficialAssetURL(release.assetURL, tagName: release.tagName, assetName: release.assetName) else {
+            throw UpdateServiceError.untrustedReleaseSource(release.assetURL.absoluteString)
+        }
+        let downloadURL = try await downloadReleaseAsset(release, progress: progress)
+        try verifyDownloadedAsset(at: downloadURL, digest: release.assetDigest)
+        let appURL = Bundle.main.bundleURL
+        let destinationURL = installationDestination(for: appURL)
+        try validateInstallDestination(destinationURL)
+        let installerDirectory = try createPrivateTemporaryDirectory(prefix: "quotabar-installer")
+        let logURL = installerDirectory.appendingPathComponent("install-update.log")
+        try createPrivateLog(at: logURL)
+        let scriptURL = try writeInstallerScript(
+            dmgURL: downloadURL,
+            destinationURL: destinationURL,
+            logURL: logURL,
+            expectedVersion: release.version,
+            in: installerDirectory
+        )
+        try launchInstaller(
+            scriptURL: scriptURL,
+            dmgURL: downloadURL,
+            destinationURL: destinationURL,
+            logURL: logURL,
+            expectedVersion: release.version
+        )
+        AppLog.update.info("Launched update installer, log=\(logURL.path, privacy: .public)")
+    }
+
+    private func fetchLatestRelease() async throws -> GitHubRelease {
+        var request = URLRequest(url: latestReleaseURL)
+        request.timeoutInterval = 20
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("QuotaBar", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateServiceError.releaseNotFound
+        }
+        guard http.statusCode != 404 else {
+            throw UpdateServiceError.releaseNotFound
+        }
+        guard 200 ..< 300 ~= http.statusCode else {
+            throw UpdateServiceError.requestFailed(http.statusCode)
+        }
+
+        return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    private func downloadReleaseAsset(
+        _ release: UpdateRelease,
+        progress: (@Sendable (UpdateDownloadProgress) -> Void)?
+    ) async throws -> URL {
+        var request = URLRequest(url: release.assetURL)
+        request.timeoutInterval = 120
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("QuotaBar", forHTTPHeaderField: "User-Agent")
+
+        let downloader = UpdateAssetDownloader(progress: progress)
+        let (downloadedURL, response) = try await downloader.download(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateServiceError.releaseNotFound
+        }
+        guard 200 ..< 300 ~= http.statusCode else {
+            throw UpdateServiceError.requestFailed(http.statusCode)
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quotabar-update-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        let destination = directory.appendingPathComponent(release.assetName)
+        try FileManager.default.moveItem(at: downloadedURL, to: destination)
+        return destination
+    }
+
+    private func fetchReleaseAssetDigest(_ asset: GitHubReleaseAsset, tagName: String) async throws -> String {
+        guard let url = URL(string: asset.browserDownloadURL) else {
+            throw UpdateServiceError.invalidAssetURL
+        }
+        guard OfficialReleaseSource.isOfficialAssetURL(url, tagName: tagName, assetName: asset.name) else {
+            throw UpdateServiceError.untrustedReleaseSource(asset.browserDownloadURL)
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("QuotaBar", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateServiceError.releaseNotFound
+        }
+        guard 200 ..< 300 ~= http.statusCode else {
+            throw UpdateServiceError.requestFailed(http.statusCode)
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw UpdateServiceError.invalidAssetDigest(asset.name)
+        }
+        return try ReleaseAssetDigest.sha256Hex(from: text)
+    }
+
+    private func verifyDownloadedAsset(at url: URL, digest: String?) throws {
+        guard let digest else {
+            throw UpdateServiceError.missingAssetDigest(url.lastPathComponent)
+        }
+        let expected = try ReleaseAssetDigest.sha256Hex(from: digest)
+        let actual = try Self.sha256Hex(of: url)
+        guard actual == expected else {
+            throw UpdateServiceError.digestMismatch(expected: expected, actual: actual)
+        }
+        AppLog.update.info("Verified update SHA256 for \(url.lastPathComponent, privacy: .public)")
+    }
+
+    static func sha256Hex(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer {
+            try? handle.close()
+        }
+
+        var hasher = SHA256()
+        while true {
+            let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
+            if data.isEmpty {
+                break
+            }
+            hasher.update(data: data)
+        }
+        return hasher.finalize()
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private func installationDestination(for appURL: URL) -> URL {
+        let path = appURL.path
+        if path.hasPrefix("/Volumes/") {
+            return URL(fileURLWithPath: "/Applications")
+                .appendingPathComponent(appURL.lastPathComponent, isDirectory: true)
+        }
+        return appURL
+    }
+
+    private func validateInstallDestination(_ destinationURL: URL) throws {
+        let parent = destinationURL.deletingLastPathComponent()
+        guard FileManager.default.isWritableFile(atPath: parent.path) else {
+            throw UpdateServiceError.installLocationNotWritable(parent.path)
+        }
+    }
+
+    private func writeInstallerScript(
+        dmgURL: URL,
+        destinationURL: URL,
+        logURL: URL,
+        expectedVersion: String,
+        in directory: URL
+    ) throws -> URL {
+        let script = #"""
+#!/bin/zsh
+set -euo pipefail
+
+DMG="$1"
+DEST="$2"
+OLD_PID="$3"
+LOG="$4"
+EXPECTED_VERSION="$5"
+MOUNT_DIR=""
+
+exec >>"$LOG" 2>&1
+echo "Starting QuotaBar update install at $(date)"
+
+cleanup() {
+    if [[ -n "${MOUNT_DIR:-}" ]]; then
+        hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || hdiutil detach "$MOUNT_DIR" -force >/dev/null 2>&1 || true
+        rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true
+    fi
+}
+
+finish() {
+    local status=$?
+    cleanup
+    if [[ "$status" -ne 0 && -e "$DEST" ]]; then
+        open "$DEST" >/dev/null 2>&1 || true
+    fi
+    exit "$status"
+}
+trap finish EXIT
+
+for _ in {1..120}; do
+    if ! kill -0 "$OLD_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 0.25
+done
+if kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "Old QuotaBar process did not exit in time"
+    exit 1
+fi
+
+# Mount to a private mountpoint inside our own 0700 temp directory rather than
+# letting the image appear under /Volumes. A DMG surfaced in /Volumes is treated
+# by macOS as a removable volume, so reading the app out of it triggers the
+# "QuotaBar wants to access files on a removable volume" TCC prompt. A private
+# mountpoint keeps the whole update silent.
+MOUNT_DIR="$(dirname "$LOG")/dmg-mount"
+mkdir -p "$MOUNT_DIR"
+if ! hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_DIR" >/dev/null; then
+    echo "Unable to mount DMG at private mountpoint"
+    exit 1
+fi
+if [[ ! -d "$MOUNT_DIR" ]]; then
+    echo "Mounted DMG path missing after attach"
+    exit 1
+fi
+
+APP_SOURCE="$(find "$MOUNT_DIR" -maxdepth 3 -name "QuotaBar.app" -type d | head -1)"
+if [[ -z "$APP_SOURCE" || ! -d "$APP_SOURCE" ]]; then
+    echo "QuotaBar.app not found in DMG"
+    exit 1
+fi
+
+mkdir -p "$(dirname "$DEST")"
+TMP_DEST="${DEST}.update-tmp"
+BACKUP_DEST="${DEST}.previous"
+rm -rf "$TMP_DEST" "$BACKUP_DEST"
+
+ditto "$APP_SOURCE" "$TMP_DEST"
+ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TMP_DEST/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "$ACTUAL_BUNDLE_ID" != "com.chiloh.QuotaBar" ]]; then
+    echo "Unexpected bundle identifier: ${ACTUAL_BUNDLE_ID:-missing}"
+    exit 1
+fi
+ACTUAL_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$TMP_DEST/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]]; then
+    echo "Unexpected bundle version: ${ACTUAL_VERSION:-missing}; expected $EXPECTED_VERSION"
+    exit 1
+fi
+if [[ ! -x "$TMP_DEST/Contents/MacOS/QuotaBar" ]]; then
+    echo "QuotaBar executable missing in update bundle"
+    exit 1
+fi
+codesign --verify --deep --strict "$TMP_DEST"
+echo "Quarantine attributes are preserved for DMG distribution."
+
+if [[ -e "$DEST" ]]; then
+    mv "$DEST" "$BACKUP_DEST"
+fi
+if ! mv "$TMP_DEST" "$DEST"; then
+    echo "Unable to move updated app into place"
+    if [[ -e "$BACKUP_DEST" && ! -e "$DEST" ]]; then
+        mv "$BACKUP_DEST" "$DEST"
+    fi
+    exit 1
+fi
+rm -rf "$BACKUP_DEST"
+
+open "$DEST"
+rm -f "$DMG"
+echo "QuotaBar update install completed at $(date)"
+"""#
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        let scriptURL = directory.appendingPathComponent("install-update.zsh")
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    private func createPrivateTemporaryDirectory(prefix: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        return directory
+    }
+
+    private func createPrivateLog(at url: URL) throws {
+        FileManager.default.createFile(
+            atPath: url.path,
+            contents: Data(),
+            attributes: [.posixPermissions: 0o600]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func launchInstaller(
+        scriptURL: URL,
+        dmgURL: URL,
+        destinationURL: URL,
+        logURL: URL,
+        expectedVersion: String
+    ) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = [
+            scriptURL.path,
+            dmgURL.path,
+            destinationURL.path,
+            String(ProcessInfo.processInfo.processIdentifier),
+            logURL.path,
+            expectedVersion
+        ]
+
+        do {
+            try process.run()
+        } catch {
+            throw UpdateServiceError.installerLaunchFailed(error.localizedDescription)
+        }
+    }
+}
+
+// @unchecked Sendable: `continuation`/`session` are assigned before the download task is resumed
+// and afterward touched only from URLSession's serial delegate callbacks; `finish` clears and
+// resumes the continuation exactly once.
+private final class UpdateAssetDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let progress: (@Sendable (UpdateDownloadProgress) -> Void)?
+    private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
+    private var session: URLSession?
+
+    init(progress: (@Sendable (UpdateDownloadProgress) -> Void)?) {
+        self.progress = progress
+    }
+
+    func download(for request: URLRequest) async throws -> (URL, URLResponse) {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.timeoutIntervalForRequest = request.timeoutInterval
+                configuration.timeoutIntervalForResource = max(request.timeoutInterval, 120)
+                let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+                self.session = session
+                self.continuation = continuation
+                session.downloadTask(with: request).resume()
+            }
+        } onCancel: {
+            session?.invalidateAndCancel()
+        }
+    }
+
+    func urlSession(
+        _: URLSession,
+        downloadTask _: URLSessionDownloadTask,
+        didWriteData _: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        let expected = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil
+        progress?(UpdateDownloadProgress(bytesWritten: totalBytesWritten, totalBytes: expected))
+    }
+
+    func urlSession(
+        _: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        guard let response = downloadTask.response else {
+            finish(.failure(UpdateServiceError.releaseNotFound))
+            return
+        }
+        do {
+            let destination = FileManager.default.temporaryDirectory
+                .appendingPathComponent("quotabar-download-\(UUID().uuidString).dmg")
+            try FileManager.default.moveItem(at: location, to: destination)
+            finish(.success((destination, response)))
+        } catch {
+            finish(.failure(error))
+        }
+    }
+
+    func urlSession(_: URLSession, task _: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            finish(.failure(error))
+        }
+    }
+
+    private func finish(_ result: Result<(URL, URLResponse), Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        session?.finishTasksAndInvalidate()
+        session = nil
+        switch result {
+        case .success(let value):
+            continuation.resume(returning: value)
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
+}

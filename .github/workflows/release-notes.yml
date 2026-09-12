@@ -1,0 +1,41 @@
+name: Sync Release Notes
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/releases/*.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-notes
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Sync published release descriptions
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const directory = 'docs/releases';
+            for (const file of fs.readdirSync(directory)) {
+              if (!/^\d+\.\d+\.\d+\.md$/.test(file)) continue;
+              const tag = `v${file.slice(0, -3)}`;
+              let release;
+              try {
+                release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag })).data;
+              } catch (error) {
+                if (error.status === 404) continue;
+                throw error;
+              }
+              const body = fs.readFileSync(`${directory}/${file}`, 'utf8');
+              if (release.body === body) continue;
+              await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id, body });
+              core.info(`Updated ${tag}`);
+            }

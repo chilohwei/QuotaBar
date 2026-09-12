@@ -1,0 +1,696 @@
+import SwiftUI
+
+struct AccountCardView: View {
+    let account: Account
+    let language: AppLanguage
+    let isActive: Bool
+    let isRecommended: Bool
+    let recommendationReason: String?
+    let isRefreshing: Bool
+    let loadState: AccountLoadState
+    let quota: QuotaSnapshot?
+    let errorMessage: String?
+    let errorRequiresUserAction: Bool
+    let canActivate: Bool
+    var isHighlighted = false
+    var isKeyboardFocused = false
+    let refreshCycleID: Int
+    let onActivate: () -> Void
+    let onRefresh: () -> Void
+    let onDelete: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isConfirmingDelete = false
+    @State private var showsSupplementaryQuota = false
+    @State private var showsResetCredits = false
+    @State private var isHovering = false
+    @State private var refreshFeedback: CardRefreshFeedback = .idle
+    @State private var activeRefreshCycleID: Int = 0
+    @State private var wasRefreshingInActiveCycle = false
+    @State private var hideRefreshFeedbackTask: Task<Void, Never>?
+
+    private let cardCornerRadius: CGFloat = Branding.radiusCard
+
+    private var text: AppText { AppText(language: language) }
+
+    private var resolvedAccountName: String {
+        let trimmed = account.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "\(account.tool.displayName) Account" : trimmed
+    }
+
+    private var displayName: String {
+        resolvedAccountName
+    }
+
+    private enum SubscriptionType: Equatable {
+        case apiKey
+        case free
+        case plus
+        case pro
+        case proPlus
+        case ultra
+        case max
+        case team
+        case enterprise
+        case unlimited
+        case claudeFirstParty
+        case claudeProvider(String)
+        case unknown(String)
+
+        var label: String {
+            switch self {
+            case .apiKey: return "API"
+            case .free: return "Free"
+            case .plus: return "Plus"
+            case .pro: return "Pro"
+            case .proPlus: return "Pro+"
+            case .ultra: return "Ultra"
+            case .max: return "Max"
+            case .team: return "Team"
+            case .enterprise: return "Enterprise"
+            case .unlimited: return "Unlimited"
+            case .claudeFirstParty: return "Claude.ai"
+            case .claudeProvider(let provider): return provider
+            case .unknown(let raw): return raw
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .free:
+                return Branding.inkMuted
+            case .apiKey, .plus, .team:
+                return Branding.accentBlueDark
+            case .pro, .claudeFirstParty:
+                return Branding.success
+            case .proPlus, .ultra, .max, .unlimited, .claudeProvider:
+                return Branding.warning
+            case .enterprise:
+                return Branding.inkStrong
+            case .unknown:
+                return Branding.accentBlueDark
+            }
+        }
+
+        var isPaid: Bool {
+            switch self {
+            case .plus, .pro, .proPlus, .ultra, .max, .team, .enterprise, .unlimited:
+                return true
+            case .claudeFirstParty, .claudeProvider:
+                return true
+            case .apiKey, .free, .unknown:
+                return false
+            }
+        }
+    }
+
+    private struct MetadataItem {
+        let text: String
+        let tint: Color
+        let weight: Font.Weight
+    }
+
+    private var planSummaryItem: MetadataItem? {
+        guard let rawPlan = quota?.planName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawPlan.isEmpty else {
+            return nil
+        }
+
+        let type = subscriptionType(from: rawPlan, tool: account.tool)
+        return MetadataItem(
+            text: type.label,
+            tint: type.tint,
+            weight: .medium
+        )
+    }
+
+    private var billingCycleItem: MetadataItem? {
+        guard let rawPlan = quota?.planName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawPlan.isEmpty else {
+            return nil
+        }
+
+        let type = subscriptionType(from: rawPlan, tool: account.tool)
+        guard type.isPaid,
+              account.tool != .claudeCode,
+              let cycle = actualBillingCycle(from: rawPlan.lowercased()) else {
+            return nil
+        }
+
+        return MetadataItem(
+            text: text.billingCycle(cycle),
+            tint: Branding.inkSubtle,
+            weight: .light
+        )
+    }
+
+    private func subscriptionType(from rawPlan: String, tool: ToolKind) -> SubscriptionType {
+        let lower = rawPlan.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return .unknown(rawPlan) }
+
+        switch tool {
+        case .cursor:
+            if lower.contains("free") || lower.contains("hobby") { return .free }
+            if lower.contains("enterprise") { return .enterprise }
+            if lower.contains("team") || lower.contains("business") { return .team }
+            if lower.contains("ultra") { return .ultra }
+            if lower.contains("pro+") || lower.contains("pro plus") || lower.contains("pro_plus") { return .proPlus }
+            if lower.contains("pro") { return .pro }
+            return .unknown(rawPlan)
+        case .codex:
+            if lower.contains("api key") || lower == "api" { return .apiKey }
+            if lower.contains("free") || lower.contains("hobby") { return .free }
+            if lower.contains("enterprise") { return .enterprise }
+            if lower.contains("team") || lower.contains("business") { return .team }
+            if lower.contains("unlimited") { return .unlimited }
+            if lower.contains("ultra") { return .ultra }
+            if lower.contains("max") { return .max }
+            if lower.contains("pro+") || lower.contains("pro plus") || lower.contains("pro_plus") { return .proPlus }
+            if lower.contains("pro") { return .pro }
+            if lower.contains("plus") { return .plus }
+            return .unknown(rawPlan)
+        case .claudeCode:
+            if lower == "claude.ai" || lower.contains("claude.ai") {
+                return .claudeFirstParty
+            }
+            if lower.contains("api key") || lower == "api" {
+                return .apiKey
+            }
+            return .claudeProvider(rawPlan)
+        }
+    }
+
+    private var subscriptionDateText: String? {
+        guard let quota,
+              let date = quota.accountValidUntil,
+              shouldShowSubscriptionDate(for: quota) else {
+            return nil
+        }
+
+        if quota.subscriptionWillRenew == true {
+            return text.renewsOn(date)
+        }
+        return text.expiresOn(date)
+    }
+
+    private func shouldShowSubscriptionDate(for quota: QuotaSnapshot) -> Bool {
+        switch account.tool {
+        case .codex:
+            guard let rawPlan = quota.planName else { return false }
+            return subscriptionType(from: rawPlan, tool: .codex).isPaid
+        case .cursor:
+            guard let plan = quota.planName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !plan.isEmpty else {
+                return true
+            }
+            return subscriptionType(from: plan, tool: .cursor) != .free
+        case .claudeCode:
+            return true
+        }
+    }
+
+    private var visibleMetrics: [QuotaDisplayMetric] {
+        quota?.mainMetrics(for: account.tool) ?? []
+    }
+
+    private var useRingMetricLayout: Bool {
+        account.tool == .cursor
+    }
+
+    private var cursorRingTiles: [(title: String, metric: QuotaDisplayMetric?)] {
+        return visibleMetrics.map { ($0.title, $0) }
+    }
+
+    private var isInitialLoadingWithoutQuota: Bool {
+        quota == nil && (isRefreshing || loadState == .loadingInitial || loadState == .refreshing)
+    }
+
+    private func actualBillingCycle(from lowercasedPlan: String) -> BillingCycle? {
+        if lowercasedPlan.contains("annual")
+            || lowercasedPlan.contains("yearly")
+            || lowercasedPlan.contains("year")
+            || lowercasedPlan.contains("年度") {
+            return .annual
+        }
+
+        if lowercasedPlan.contains("monthly")
+            || lowercasedPlan.contains("month")
+            || lowercasedPlan.contains("月度") {
+            return .monthly
+        }
+
+        return nil
+    }
+
+    private var status: AccountVisualStatus {
+        AccountCardStatusPresenter.status(
+            tool: account.tool,
+            quota: quota,
+            loadState: loadState,
+            isRefreshing: isRefreshing,
+            errorMessage: errorMessage,
+            errorRequiresUserAction: errorRequiresUserAction
+        )
+    }
+
+    private var shouldShowStatusBadge: Bool {
+        if shouldHideRefreshingStatusBadge {
+            return false
+        }
+        switch status {
+        case .healthy, .warning, .exhausted:
+            return false
+        case .refreshing, .pending, .noQuota, .error:
+            return true
+        case .stale:
+            return false
+        }
+    }
+
+    private var shouldHideRefreshingStatusBadge: Bool {
+        guard refreshBadge != nil else { return false }
+        if case .refreshing = status {
+            return true
+        }
+        return false
+    }
+
+    private var cardFill: Color {
+        if isActive {
+            return isHovering ? Branding.activeHoverCardSurface : Branding.activeCardSurface
+        }
+        if isHovering { return Branding.hoverCardSurface }
+        return Branding.cardSurface
+    }
+
+    private var cardStroke: Color {
+        if isHighlighted { return Branding.accentBlue.opacity(0.66) }
+        if isKeyboardFocused { return Branding.accentBlue.opacity(0.52) }
+        if isActive { return Branding.borderSelected }
+        if isHovering { return Branding.borderSelected.opacity(0.36) }
+        return Branding.controlStroke.opacity(0.52)
+    }
+
+    private var cardStrokeWidth: CGFloat {
+        (isHighlighted || isKeyboardFocused) ? 1.5 : 0.75
+    }
+
+    private var metadataItems: [MetadataItem] {
+        var items: [MetadataItem] = []
+
+        if let planSummaryItem {
+            items.append(planSummaryItem)
+        }
+
+        if let subscriptionDateText {
+            items.append(MetadataItem(text: subscriptionDateText, tint: Branding.inkSubtle, weight: .light))
+        }
+
+        if isActive {
+            items.append(MetadataItem(text: text.string(.currentBadge), tint: Branding.accentBlueDark, weight: .semibold))
+        }
+
+        if let billingCycleItem {
+            items.append(billingCycleItem)
+        }
+
+        if let quota,
+           let freshnessBadge = text.quotaFreshnessBadge(quota) {
+            items.append(MetadataItem(text: freshnessBadge, tint: Branding.inkSubtle, weight: .light))
+        }
+
+        if isRecommended, !isActive {
+            items.append(MetadataItem(text: recommendationReason ?? text.string(.recommendedReason), tint: Branding.success, weight: .semibold))
+        }
+
+        if shouldShowStatusBadge {
+            items.append(MetadataItem(text: status.title(text), tint: status.tint, weight: .semibold))
+        }
+
+        if let refreshBadge {
+            items.append(MetadataItem(text: refreshBadge.text, tint: refreshBadge.tint, weight: .semibold))
+        }
+
+        return items
+    }
+
+    private var hasMetadataRow: Bool {
+        !metadataItems.isEmpty
+    }
+
+    private struct FooterContent {
+        let display: String        // short, one-line text shown on the card
+        let tooltip: String        // full text revealed on hover
+        let color: Color
+        let icon: String?          // SF Symbol for a prominent warning; nil for muted metadata
+        let weight: Font.Weight
+    }
+
+    private var footerMessage: FooterContent? {
+        if let errorMessage {
+            if errorRequiresUserAction {
+                // The card shows only the actionable gist; the full how-to stays on hover.
+                return FooterContent(display: text.compactErrorSummary(errorMessage), tooltip: errorMessage, color: Branding.warning, icon: "exclamationmark.circle.fill", weight: .medium)
+            }
+            return FooterContent(display: text.compactErrorSummary(errorMessage), tooltip: errorMessage, color: Branding.warning, icon: nil, weight: .regular)
+        }
+        // Structured spend details replace the legacy inline dollar summary, leaving
+        // the footer available for freshness and actual errors.
+        if let quota, !quota.spending.isEmpty,
+           quota.note?.hasPrefix("Included ") == true || quota.note?.hasPrefix("On-demand ") == true {
+            return nil
+        }
+        // No hard error: surface the snapshot's own status note as muted metadata.
+        // Transient refresh/freshness notes are filtered out by AppText.
+        guard let quota,
+              text.shouldDisplayNoteOnCard(quota.note),
+              let full = text.localizedNote(quota.note) else { return nil }
+        let isBlocked = quota.isTemporarilyBlocked
+        return FooterContent(display: full, tooltip: full, color: isBlocked ? Branding.warning : Branding.inkSubtle, icon: nil, weight: .regular)
+    }
+
+
+    private var metricTiles: [(title: String, metric: QuotaDisplayMetric?)] {
+        if useRingMetricLayout {
+            return cursorRingTiles.isEmpty ? missingMetricTiles : cursorRingTiles
+        }
+        return ["5h", "Weekly"].map { title in
+            (title, visibleMetrics.first { metric in
+                title == "5h" ? metric.title.lowercased() == "5h" : ["weekly", "7d"].contains(metric.title.lowercased())
+            })
+        }
+    }
+
+    private var missingMetricTiles: [(title: String, metric: QuotaDisplayMetric?)] {
+        [("Usage", nil)]
+    }
+
+    private var metricFallbackDetail: String? {
+        AccountCardStatusPresenter.metricFallbackDetail(
+            quota: quota,
+            hasVisibleMetrics: !visibleMetrics.isEmpty,
+            text: text
+        )
+    }
+
+    private let contentSpacing: CGFloat = 6
+    private let verticalPadding: CGFloat = 10
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: contentSpacing) {
+            header
+
+            if isInitialLoadingWithoutQuota {
+                LoadingQuotaPlaceholder(language: language, useRingLayout: useRingMetricLayout)
+            } else if useRingMetricLayout {
+                RingQuotaMetricStrip(
+                    tiles: metricTiles,
+                    language: language,
+                    fallbackDetail: metricFallbackDetail
+                )
+            } else {
+                CompactQuotaMetricStrip(
+                    tiles: metricTiles,
+                    language: language,
+                    fallbackDetail: metricFallbackDetail
+                )
+            }
+
+            HStack(alignment: .center, spacing: 6) {
+                if footerMessage != nil {
+                    footer
+                } else if let quota {
+                    Text(text.updatedAt(quota.updatedAt))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Branding.inkMuted)
+                        .help(text.quotaSnapshotMeta(quota))
+                }
+                Spacer(minLength: 0)
+                if let quota, account.tool == .codex, quota.source.hasPrefix("Codex OAuth") {
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        Button { showsResetCredits.toggle() } label: {
+                            QuotaDetailButtonLabel(
+                                title: quota.resetCredits.map { text.resetCreditsCount($0.remainingCount(at: context.date)) } ?? text.resetCreditsUnknown,
+                                isPresented: showsResetCredits
+                            )
+                        }
+                        .buttonStyle(.quotaInteractive())
+                        .popover(isPresented: $showsResetCredits) {
+                            ResetCreditsDetailView(inventory: quota.resetCredits, language: language)
+                        }
+                    }
+                }
+                if let quota, (!quota.supplementaryMetrics(for: account.tool).isEmpty || quota.creditsRemaining != nil || !quota.spending.isEmpty) {
+                    Button { showsSupplementaryQuota.toggle() } label: {
+                        QuotaDetailButtonLabel(title: text.otherQuotaTitle, isPresented: showsSupplementaryQuota, showsChevron: true)
+                    }
+                        .buttonStyle(.quotaInteractive())
+                        .popover(isPresented: $showsSupplementaryQuota) {
+                            SupplementaryQuotaView(quota: quota, tool: account.tool, language: language)
+                        }
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, verticalPadding)
+        .frame(height: DashboardLayout.accountCardHeight, alignment: .top)
+        .background(
+            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
+                .fill(cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
+                .stroke(cardStroke, lineWidth: cardStrokeWidth)
+        )
+        .shadow(
+            color: isActive ? Branding.shadowPopover.opacity(0.28) : Branding.cardShadow.opacity(0.44),
+            radius: isActive ? Branding.activeCardShadowRadius : Branding.cardShadowRadius,
+            y: isActive ? Branding.activeCardShadowY : Branding.cardShadowY
+        )
+        .onHover { isHovering = $0 }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isHovering)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: isHighlighted)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isKeyboardFocused)
+        .animation(reduceMotion ? nil : .quotaFluid, value: isActive)
+        .contentShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
+        .onTapGesture {
+            guard canActivate, !isActive else { return }
+            onActivate()
+        }
+        .pointingHandCursor(canActivate && !isActive)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(cardAccessibilityLabel)
+        .accessibilityHint(cardAccessibilityHint)
+        .accessibilityAction(named: Text(text.useAccount(resolvedAccountName))) {
+            guard canActivate, !isActive else { return }
+            onActivate()
+        }
+        .accessibilityAction(named: Text(text.refreshAccount(resolvedAccountName))) {
+            guard !isRefreshing else { return }
+            onRefresh()
+        }
+        .onChange(of: refreshCycleID) { _ in
+            handleRefreshCycleChange()
+        }
+        .onChange(of: isRefreshing) { refreshing in
+            handleRefreshStateChange(isRefreshing: refreshing)
+        }
+        .onDisappear {
+            hideRefreshFeedbackTask?.cancel()
+            hideRefreshFeedbackTask = nil
+        }
+        .confirmationDialog(text.string(.deletePromptTitle), isPresented: $isConfirmingDelete) {
+            Button(text.deleteAccountTitle(displayName), role: .destructive, action: onDelete)
+            Button(text.string(.cancel), role: .cancel) {}
+        } message: {
+            Text(text.string(.deleteLocalOnly))
+        }
+    }
+
+    private var cardAccessibilityLabel: String {
+        var parts = [resolvedAccountName]
+        if isActive {
+            parts.append(text.string(.currentBadge))
+        }
+        parts.append(contentsOf: metadataItems.map(\.text))
+        if let quota {
+            parts.append(text.updatedAt(quota.updatedAt))
+            parts.append(text.quotaSnapshotMeta(quota))
+            if let availability = text.quotaAvailabilityText(quota.effectiveAvailabilityStatus) {
+                parts.append(availability)
+            }
+        }
+        if let footerMessage {
+            parts.append(footerMessage.tooltip)
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private var cardAccessibilityHint: String {
+        if isActive {
+            return text.refreshAccount(resolvedAccountName)
+        }
+        return text.useAccount(resolvedAccountName)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(displayName)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Branding.inkStrong)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(account.name)
+                    .layoutPriority(1)
+
+                Spacer(minLength: 6)
+                actionZone
+            }
+
+            if hasMetadataRow {
+                metadataRow
+            }
+        }
+    }
+
+    private var metadataRow: some View {
+        HStack(spacing: 5) {
+            ForEach(Array(metadataItems.enumerated()), id: \.offset) { index, item in
+                if index > 0 {
+                    Circle()
+                        .fill(Branding.separatorDot)
+                        .frame(width: 2.5, height: 2.5)
+                }
+
+                InlineMetadataLabel(text: item.text, tint: item.tint, weight: item.weight)
+            }
+        }
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .clipped()
+    }
+
+    private var actionZone: some View {
+        HStack(spacing: 6) {
+            if !isActive {
+                CardTextActionButton(
+                    title: text.string(.useAccount),
+                    tint: Branding.actionActivate,
+                    softTint: Branding.actionActivateSoft,
+                    isEnabled: canActivate,
+                    action: onActivate
+                )
+                .help(text.useAccount(resolvedAccountName))
+            }
+            Menu {
+                Button(action: onRefresh) {
+                    Label(text.string(.refresh), systemImage: "arrow.clockwise")
+                }
+                .disabled(isRefreshing)
+                Divider()
+                Button(role: .destructive) { isConfirmingDelete = true } label: {
+                    Label(text.string(.delete), systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Branding.inkMuted)
+                    .frame(width: 26, height: 24)
+                    .background(RoundedRectangle(cornerRadius: Branding.radiusSmallControl).fill(Branding.controlSurface))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(text.accountActionsTitle)
+            .accessibilityLabel(text.accountActionsTitle)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        if let footerMessage {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                if let icon = footerMessage.icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(footerMessage.color)
+                }
+                Text(footerMessage.display)
+                    .font(.system(size: 10.4, weight: footerMessage.weight))
+                    .foregroundStyle(footerMessage.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .help(footerMessage.tooltip)
+        }
+    }
+
+    private var refreshBadge: (text: String, tint: Color)? {
+        switch refreshFeedback {
+        case .idle:
+            return nil
+        case .refreshing:
+            return (
+                text.string(.refreshing),
+                Branding.accentBlueDark
+            )
+        case .success:
+            return (
+                text.string(.updated),
+                Branding.success
+            )
+        }
+    }
+
+    private func handleRefreshCycleChange() {
+        guard refreshCycleID != activeRefreshCycleID else { return }
+        activeRefreshCycleID = refreshCycleID
+        wasRefreshingInActiveCycle = false
+        refreshFeedback = .idle
+        hideRefreshFeedbackTask?.cancel()
+        hideRefreshFeedbackTask = nil
+    }
+
+    private func handleRefreshStateChange(isRefreshing: Bool) {
+        if isRefreshing {
+            if refreshCycleID > 0 {
+                hideRefreshFeedbackTask?.cancel()
+                hideRefreshFeedbackTask = nil
+                refreshFeedback = .refreshing
+                wasRefreshingInActiveCycle = true
+            }
+            return
+        }
+
+        guard wasRefreshingInActiveCycle else { return }
+        wasRefreshingInActiveCycle = false
+
+        if case .refreshing = refreshFeedback, errorMessage == nil {
+            refreshFeedback = .success
+            let completedCycleID = activeRefreshCycleID
+            hideRefreshFeedbackTask?.cancel()
+            hideRefreshFeedbackTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                if refreshFeedback == .success, activeRefreshCycleID == completedCycleID {
+                    refreshFeedback = .idle
+                    hideRefreshFeedbackTask = nil
+                }
+            }
+        } else {
+            refreshFeedback = .idle
+            hideRefreshFeedbackTask?.cancel()
+            hideRefreshFeedbackTask = nil
+        }
+    }
+}
+
+private enum CardRefreshFeedback: Equatable {
+    case idle
+    case refreshing
+    case success
+}

@@ -1,0 +1,96 @@
+# QuotaBar
+
+[Simplified Chinese](./README.md) | English
+
+QuotaBar is a macOS menu bar app for checking Codex, Cursor, and Claude Code account quotas in one place, then quickly switching the local account used by each tool.
+
+<img width="456" height="578" alt="QuotaBar screenshot" src="https://github.com/user-attachments/assets/bc6afa8b-e196-4be5-9982-061f453814f3" />
+
+## Highlights
+
+- Menu bar status: view the active account quota directly from the macOS menu bar.
+- Multi-tool support: Codex, Cursor, and Claude Code.
+- Quota details: prioritize 5-hour and weekly limits for Codex and Claude Code; inspect model limits, code review, and credits in the optional Other quotas popover.
+- Reset details: per-window countdowns, exact times, and time zones. Missing reset times are never inferred; elapsed resets await server confirmation. Menu bar tooltips include resets and stale readings are dimmed.
+- Reset inventory: Codex OAuth accounts show available reset counts and per-credit expiries with their own fetch timestamp. Failed queries stay unknown rather than zero. The read-only query runs alongside usage with a separate 4-second limit; no credits are redeemed.
+- Multi-account management: add, view, delete, and switch local accounts.
+- Smart recommendation: sort accounts by consume-first or availability-first strategy to decide which account should be used next.
+- Available account filter: quickly find accounts that still have usable quota.
+- Status warnings: low quota, exhausted quota, refresh failures, and stale data are clearly shown.
+- Manual refresh: refresh quota state whenever you need the latest data.
+- Launch at login: optionally start QuotaBar when you sign in to macOS.
+- Multilingual UI: Simplified Chinese, Traditional Chinese, and English.
+- Update check: check for new versions from inside the app.
+
+## Installation
+
+Download the latest version from [GitHub Releases](https://github.com/chilohwei/QuotaBar/releases).
+
+Choose the build that matches your Mac:
+
+- Apple Silicon Mac: choose `arm64`
+- Intel Mac: choose `x86_64`
+- Not sure: choose `universal`
+
+Install from the DMG:
+
+1. Download and open the DMG file.
+2. Drag `QuotaBar.app` into `Applications`.
+3. Launch QuotaBar from the Applications folder.
+4. Current builds are community-distributed: ad-hoc signed and not notarized by Apple, so Gatekeeper blocks the first launch. This is expected; integrity is guaranteed by official-release source checks plus SHA256 verification (see [SECURITY.md](./SECURITY.md)).
+5. After verifying the download source and the SHA256 shipped with each release, remove the quarantine attribute and launch:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/QuotaBar.app
+```
+
+Install using the Apple Silicon, Intel, or universal DMG from GitHub Releases.
+
+System requirement: macOS Ventura 13 or later.
+
+## Usage
+
+1. Launch QuotaBar.
+2. Click the QuotaBar icon in the menu bar.
+3. Select Codex, Cursor, or Claude Code at the top of the panel.
+4. Click `Add` to import or record an account.
+5. Check each account card for quota, status, and last updated time.
+6. Use the available account filter when you only want accounts that can still be used.
+7. Choose consume-first or availability-first sorting to find the recommended account.
+8. Click `Switch` on an account, then restart the corresponding tool when prompted.
+
+## Development
+
+QuotaBar is built with Swift Package Manager and has no third-party dependencies. Requirements: macOS 13+, Xcode 26.x (Swift 6.1+).
+
+```bash
+swift build            # build
+swift run QuotaBar     # run locally (icon appears in the menu bar, not the Dock)
+swift test             # run unit tests
+```
+
+Layout: `Sources/QuotaBar/` (entry point), `Sources/QuotaBarApp/App` (lifecycle & status bar), `Core` (the `AppState` hub and refresh policies), `Providers` (Codex/Cursor/Claude Code), `Services` (Keychain/HTTP/notifications/updates), `UI` (SwiftUI panels), and `Tests/`.
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for build, release, and contribution guidelines, and [CHANGELOG.md](./CHANGELOG.md) for the version history.
+
+See [Architecture](docs/architecture.md) and [Quota data](docs/provider-data.md) for module responsibilities and data semantics.
+
+## Privacy
+
+QuotaBar is local-first: account tokens are stored in macOS Keychain, while local account metadata and quota cache are stored under `~/Library/Application Support/QuotaBar/`.
+
+To import and switch accounts, refresh tokens, install the Claude Code statusLine integration, and display quota, QuotaBar reads and writes local Codex, Cursor, and Claude Code configuration files. Quota refreshes call the corresponding official service endpoints, and update checks access GitHub Releases. QuotaBar does not provide its own cloud account service or upload your account data to any QuotaBar-owned server.
+
+## Donation
+
+If this project helps you, please visit [https://donate.chiloh.com](https://donate.chiloh.com) to donate.
+
+## License
+
+Copyright (c) 2026 Chiloh. All rights reserved.
+
+QuotaBar is free to use, copy, download, and modify for personal, educational, research, and other non-commercial purposes, as long as the copyright, attribution, and license notice are preserved.
+
+Commercial use requires prior written permission from the author and must clearly credit QuotaBar and Chiloh. Commercial use includes, but is not limited to, selling, redistributing, integrating into paid products or services, using for business operations, providing hosted services, consulting services, integration services, or support services.
+
+Read the full terms in [LICENSE](./LICENSE). By using QuotaBar, you acknowledge and accept the license terms.
