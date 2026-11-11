@@ -2,14 +2,14 @@
 
 [Simplified Chinese](./README.md) | English
 
-QuotaBar is a macOS menu bar app for checking Codex, Cursor, and Claude Code account quotas in one place, then quickly switching the local account used by each tool.
+QuotaBar is a macOS menu bar app for checking Codex, Cursor, and Claude Code quotas and DeepSeek API balances in one place, then quickly switching the local account used by each tool.
 
 <img width="456" height="578" alt="QuotaBar screenshot" src="https://github.com/user-attachments/assets/bc6afa8b-e196-4be5-9982-061f453814f3" />
 
 ## Highlights
 
 - Menu bar status: view the active account quota directly from the macOS menu bar.
-- Multi-tool support: Codex, Cursor, and Claude Code.
+- Multi-tool support: Codex, Cursor, Claude Code, and DeepSeek.
 - Quota details: prioritize 5-hour and weekly limits for Codex and Claude Code; inspect model limits, code review, and credits in the optional Other quotas popover.
 - Reset details: per-window countdowns, exact times, and time zones. Missing reset times are never inferred; elapsed resets await server confirmation. Menu bar tooltips include resets and stale readings are dimmed.
 - Reset inventory: Codex OAuth accounts show available reset counts and per-credit expiries with their own fetch timestamp. Failed queries stay unknown rather than zero. The read-only query runs alongside usage with a separate 4-second limit; no credits are redeemed.
@@ -37,12 +37,7 @@ Install from the DMG:
 1. Download and open the DMG file.
 2. Drag `QuotaBar.app` into `Applications`.
 3. Launch QuotaBar from the Applications folder.
-4. Current builds are community-distributed: ad-hoc signed and not notarized by Apple, so Gatekeeper blocks the first launch. This is expected; integrity is guaranteed by official-release source checks plus SHA256 verification (see [SECURITY.md](./SECURITY.md)).
-5. After verifying the download source and the SHA256 shipped with each release, remove the quarantine attribute and launch:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/QuotaBar.app
-```
+The 1.5.0 installers are Developer ID signed and notarized by Apple. Use the SHA-256 files attached to the release to verify your download.
 
 Install using the Apple Silicon, Intel, or universal DMG from GitHub Releases.
 
@@ -52,8 +47,8 @@ System requirement: macOS Ventura 13 or later.
 
 1. Launch QuotaBar.
 2. Click the QuotaBar icon in the menu bar.
-3. Select Codex, Cursor, or Claude Code at the top of the panel.
-4. Click `Add` to import or record an account.
+3. Select Codex, Cursor, Claude Code, or DeepSeek at the top of the panel.
+4. Click `Add` to import or record an account. DeepSeek uses an API key to read balances.
 5. Check each account card for quota, status, and last updated time.
 6. Use the available account filter when you only want accounts that can still be used.
 7. Choose consume-first or availability-first sorting to find the recommended account.

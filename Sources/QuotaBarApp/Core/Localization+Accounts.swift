@@ -116,6 +116,14 @@ extension AppText {
         "\(Int((threshold * 100).rounded()))%"
     }
 
+    func switchToAccount(_ name: String) -> String {
+        localized(
+            english: "Switch to \(name)",
+            simplified: "切换到 \(name)",
+            traditional: "切換到 \(name)"
+        )
+    }
+
     func switchToRecommendedAccount(_ name: String) -> String {
         localized(
             english: "Switch to recommended: \(name)",

@@ -21,6 +21,9 @@ extension AppState {
 
         do {
             return try secretStore.readSecret(accountKey: secretStoreKey(for: account.id))
+        } catch let error as SecretStoreError where account.tool == .deepSeek {
+            AppLog.account.error("DeepSeek API Key could not be read from Keychain: \(String(describing: error), privacy: .public)")
+            throw DeepSeekKeyError.unreadable
         } catch SecretStoreError.missingData {
             if let recovered = try await provider.recoverSecret(for: account),
                !recovered.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

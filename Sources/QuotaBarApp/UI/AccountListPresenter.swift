@@ -59,7 +59,7 @@ struct AccountListPresenter {
         recommendationStrategy: AccountRecommendationStrategy = .preventWaste
     ) -> UUID? {
         let entries = sortEntries(
-            accounts,
+            accounts.filter { $0.tool != .deepSeek },
             activeID: activeID,
             quotaByAccount: quotaByAccount,
             loadStateByAccount: loadStateByAccount,
@@ -74,6 +74,49 @@ struct AccountListPresenter {
             .first?
             .account
             .id
+    }
+
+    static func availableReplacementID(
+        for active: Account,
+        among accounts: [Account],
+        quotaByAccount: [UUID: QuotaSnapshot],
+        loadStateByAccount: [UUID: AccountLoadState],
+        errorByAccount: [UUID: String],
+        recommendationStrategy: AccountRecommendationStrategy,
+        now: Date = Date()
+    ) -> UUID? {
+        func confirmedQuota(for account: Account) -> QuotaSnapshot? {
+            let loadState = loadStateByAccount[account.id]
+            guard loadState == .loaded || loadState == .refreshing,
+                  errorByAccount[account.id] == nil,
+                  let quota = quotaByAccount[account.id],
+                  !QuotaFreshness.isStale(quota, now: now),
+                  !quota.accountWindows(for: account.tool).contains(where: { $0.resetAt.map { $0 <= now } == true }),
+                  quota.statusBarMetric?.resetAt.map({ $0 <= now }) != true else {
+                return nil
+            }
+            return quota
+        }
+
+        guard active.tool != .deepSeek,
+              let current = confirmedQuota(for: active),
+              current.effectiveAvailabilityStatus == .quotaExhausted
+                || (current.effectiveAvailabilityStatus == .normal
+                    && (current.statusBarMetric?.ratio ?? 1) <= 0.001) else {
+            return nil
+        }
+
+        let candidates = accounts.filter { account in
+            account.id != active.id && account.tool == active.tool
+                && confirmedQuota(for: account)?.effectiveAvailabilityStatus == .normal
+        }
+        return recommendedAccountID(
+            accounts: candidates,
+            activeID: nil,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: loadStateByAccount,
+            recommendationStrategy: recommendationStrategy
+        )
     }
 
     static func recommendationReasonStrategy(
@@ -112,6 +155,8 @@ struct AccountListPresenter {
         case .normal, .authRateLimited, .serviceUnavailable:
             break
         }
+
+        if let balance = quota.balance { return balance.isAvailable && !balance.isExhausted }
 
         let ratios = quota.coreMetrics.compactMap(\.ratio)
         if !ratios.isEmpty {

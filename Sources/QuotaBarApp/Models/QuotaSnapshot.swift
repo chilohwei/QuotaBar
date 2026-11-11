@@ -18,6 +18,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
     let extraWindows: [QuotaWindow]
     let creditsRemaining: Double?
     let creditsTotal: Double?
+    let balance: AccountBalance?
     let spending: [QuotaSpend]
     var resetCredits: QuotaResetCredits?
     let updatedAt: Date
@@ -40,6 +41,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         creditsRemaining: Double?,
         creditsTotal: Double?,
         spending: [QuotaSpend] = [],
+        balance: AccountBalance? = nil,
         resetCredits: QuotaResetCredits? = nil,
         updatedAt: Date,
         periodEnd: Date? = nil,
@@ -59,6 +61,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
         self.extraWindows = extraWindows
         self.creditsRemaining = creditsRemaining
         self.spending = spending
+        self.balance = balance
         self.resetCredits = resetCredits
         self.creditsTotal = creditsTotal
         self.updatedAt = updatedAt
@@ -87,6 +90,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
             creditsRemaining: try container.decodeIfPresent(Double.self, forKey: .creditsRemaining),
             creditsTotal: try container.decodeIfPresent(Double.self, forKey: .creditsTotal),
             spending: try container.decodeIfPresent([QuotaSpend].self, forKey: .spending) ?? [],
+            balance: try container.decodeIfPresent(AccountBalance.self, forKey: .balance),
             resetCredits: try container.decodeIfPresent(QuotaResetCredits.self, forKey: .resetCredits),
             updatedAt: try container.decode(Date.self, forKey: .updatedAt),
             periodEnd: try container.decodeIfPresent(Date.self, forKey: .periodEnd),
@@ -218,6 +222,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
             creditsRemaining: creditsRemaining,
             creditsTotal: creditsTotal,
             spending: spending,
+            balance: balance,
             resetCredits: resetCredits,
             updatedAt: updatedAt,
             periodEnd: periodEnd,
@@ -247,6 +252,7 @@ struct QuotaSnapshot: Codable, Equatable, Sendable {
             creditsRemaining: creditsRemaining,
             creditsTotal: creditsTotal,
             spending: spending,
+            balance: balance,
             resetCredits: resetCredits,
             updatedAt: updatedAt ?? self.updatedAt,
             periodEnd: periodEnd,

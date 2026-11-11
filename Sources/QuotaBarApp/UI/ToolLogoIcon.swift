@@ -14,6 +14,8 @@ struct ToolLogoIcon: View {
             return "square.grid.2x2.fill"
         case .claudeCode:
             return "asterisk"
+        case .deepSeek:
+            return "dollarsign.circle"
         }
     }
 

@@ -2,14 +2,14 @@
 
 [English](./README.en.md) | 简体中文
 
-QuotaBar 是一款 macOS 菜单栏工具，帮助你集中查看 Codex、Cursor、Claude Code 的账号额度，并在需要时快速切换本机正在使用的账号。
+QuotaBar 是一款 macOS 菜单栏工具，帮助你集中查看 Codex、Cursor、Claude Code 的账号额度和 DeepSeek API 余额，并在需要时快速切换本机正在使用的账号。
 
 <img width="456" height="578" alt="image" src="https://github.com/user-attachments/assets/bc6afa8b-e196-4be5-9982-061f453814f3" />
 
 ## 核心功能
 
 - 菜单栏常驻：从 macOS 菜单栏直接查看当前账号剩余额度。
-- 多工具支持：支持 Codex、Cursor、Claude Code。
+- 多工具支持：支持 Codex、Cursor、Claude Code 和 DeepSeek。
 - 额度查看：Codex、Claude Code 优先展示 5 小时和周额度；模型专属额度、代码审查额度与点数可在“其他额度”中按需查看。
 - 重置信息：各窗口独立展示重置倒计时、准确时间和时区；缺失时间不推算，到点后等待服务端确认。菜单栏悬停可查看重置信息，陈旧数据会淡化显示。
 - 重置次数：Codex OAuth 账号显示接口返回的可用重置次数，点击可查看各次权益的到期时间与查询时间；查询失败显示未知，不计为 0。该只读查询与额度请求并行，独立限时 4 秒，不执行重置兑换。
@@ -37,12 +37,7 @@ QuotaBar 是一款 macOS 菜单栏工具，帮助你集中查看 Codex、Cursor�
 1. 下载并打开 DMG 文件。
 2. 将 `QuotaBar.app` 拖入 `Applications`。
 3. 从“应用程序”文件夹启动 QuotaBar。
-4. 当前版本为社区分发，采用即席（ad-hoc）签名、未经 Apple 公证，因此首次启动会被 Gatekeeper 拦截。这是预期行为，安全性由「官方 Release 来源校验 + SHA256 完整性校验」保证（详见 [SECURITY.md](./SECURITY.md)）。
-5. 核对下载来源与每个 Release 附带的 SHA256 无误后，移除 quarantine 标记再启动：
-
-```bash
-xattr -dr com.apple.quarantine /Applications/QuotaBar.app
-```
+1.5.0 安装包采用 Developer ID 签名并通过 Apple 公证。可用 Release 附带的 SHA-256 文件校验下载。
 
 安装包通过 GitHub Releases 提供，支持 Apple Silicon、Intel 和通用 DMG。
 
@@ -52,8 +47,8 @@ xattr -dr com.apple.quarantine /Applications/QuotaBar.app
 
 1. 启动 QuotaBar。
 2. 点击菜单栏中的 QuotaBar 图标，打开账号面板。
-3. 在面板顶部选择 Codex、Cursor 或 Claude Code。
-4. 点击“添加”导入或记录账号。
+3. 在面板顶部选择 Codex、Cursor、Claude Code 或 DeepSeek。
+4. 点击“添加”导入或记录账号。DeepSeek 使用 API Key 查询余额。
 5. 查看账号卡片上的额度、状态和更新时间。
 6. 需要切换账号时，点击对应账号的“切换”。
 7. 按提示重启对应应用，让账号切换生效。

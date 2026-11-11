@@ -74,7 +74,62 @@ struct DashboardView: View {
     @State private var highlightedAccountID: UUID?
     @State private var highlightClearTask: Task<Void, Never>?
     @State private var keyboardSelectedAccountID: UUID?
+    @State private var deepSeekAccountToReveal: UUID?
+    @State private var deepSeekKeyEditor: DeepSeekKeyEditor?
     var text: AppText { appState.text }
+
+    private enum DeepSeekKeyEditor: Identifiable {
+        case add
+        case imported(String)
+        case replace(UUID)
+
+        var accountID: UUID? {
+            if case .replace(let id) = self { return id }
+            return nil
+        }
+
+        var importedKey: String? {
+            if case .imported(let key) = self { return key }
+            return nil
+        }
+
+        var id: String { accountID?.uuidString ?? "add" }
+    }
+
+    func beginAddingAccount() {
+        if appState.isAddingAccount {
+            appState.cancelAddAccount()
+        } else if appState.selectedTool == .deepSeek {
+            deepSeekKeyEditor = .add
+        } else {
+            appState.quickAddAccount(tool: appState.selectedTool)
+        }
+    }
+
+    func openConfiguredDeepSeek() {
+        let source = appState.selectedTool
+        Task {
+            let config = await Task.detached { DeepSeekBackendConfiguration.read(for: source) }.value
+            guard appState.isDashboardVisible, appState.selectedTool == source else { return }
+            guard let config else {
+                appState.refreshConfiguredBackend()
+                return
+            }
+
+            appState.selectTool(.deepSeek)
+            accountFilter = .all
+            if let key = config.apiKey {
+                let identities = DeepSeekProvider().accountIdentityAliases(from: key)
+                if let account = appState.findDuplicateStoredAccount(for: .deepSeek, detectedIdentities: identities) {
+                    deepSeekAccountToReveal = account.id
+                } else {
+                    deepSeekKeyEditor = .imported(key)
+                }
+            } else if appState.accounts(for: .deepSeek).isEmpty {
+                deepSeekKeyEditor = .add
+            }
+        }
+    }
 
     var toolAccounts: [Account] {
         appState.accounts(for: appState.selectedTool)
@@ -118,7 +173,7 @@ struct DashboardView: View {
     }
 
     var showsHeaderStatus: Bool {
-        appState.isAddingAccount || visibleAccounts.count > 1
+        appState.isAddingAccount || appState.hasConfiguredDeepSeekBackend || visibleAccounts.count > 1
     }
 
     var dashboardHeaderHeight: CGFloat {
@@ -158,6 +213,15 @@ struct DashboardView: View {
         .frame(width: DashboardLayout.panelWidth, height: preferredPanelHeight, alignment: .top)
         .background(DashboardPanelBackground())
         .foregroundStyle(Branding.ink)
+        .sheet(item: $deepSeekKeyEditor) { editor in
+            DeepSeekKeyForm(
+                text: text,
+                isReplacing: editor.accountID != nil,
+                importedKey: editor.importedKey
+            ) { key, name in
+                try await appState.saveDeepSeekKey(key, name: name, replacing: editor.accountID)
+            }
+        }
         .onChange(of: isRefreshingSelectedTool) { refreshing in
             if refreshing {
                 if frozenAccountOrderByTool[appState.selectedTool] == nil {
@@ -294,6 +358,8 @@ struct DashboardView: View {
     var accountList: some View {
         let accounts = visibleAccounts
         let listHeight = accountListHeight
+        let active = appState.activeAccount(for: appState.selectedTool)
+        let replacement = active.flatMap { appState.availableReplacement(for: $0) }
 
         ScrollViewReader { scrollProxy in
             ScrollView(.vertical, showsIndicators: true) {
@@ -322,7 +388,15 @@ struct DashboardView: View {
                                     refreshCycleID: refreshCycleID,
                                     onActivate: { appState.activateAccount(account) },
                                     onRefresh: { appState.refreshAccount(account) },
-                                    onDelete: { appState.deleteAccount(account) }
+                                    onDelete: { appState.deleteAccount(account) },
+                                    onReplaceKey: account.tool == .deepSeek ? {
+                                        deepSeekKeyEditor = .replace(account.id)
+                                    } : nil,
+                                    replacement: account.id == active?.id ? replacement : nil,
+                                    onSwitchToReplacement: { target in
+                                        guard appState.availableReplacement(for: account)?.id == target.id else { return }
+                                        appState.activateAccount(target)
+                                    }
                                 )
                                 .id(account.id)
                                 .transaction { transaction in
@@ -355,6 +429,11 @@ struct DashboardView: View {
             .padding(.horizontal, 18)
             .onChange(of: refreshCycleID) { _ in
                 scrollAccountListToTop(using: scrollProxy)
+            }
+            .onChange(of: deepSeekAccountToReveal) { accountID in
+                guard let accountID else { return }
+                landOnAccount(accountID, using: scrollProxy)
+                deepSeekAccountToReveal = nil
             }
             .onChange(of: appState.lastAddedAccountID) { addedID in
                 guard let addedID else { return }

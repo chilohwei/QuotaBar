@@ -21,7 +21,7 @@ extension AppState {
     }
 
     func errorRequiresUserAction(_ error: Error) -> Bool {
-        if error is SecretStoreError {
+        if error is DeepSeekKeyError || error is SecretStoreError {
             return true
         }
         if let httpError = error as? QuotaHTTPError {

@@ -25,7 +25,7 @@ extension StatusBarController {
         dashboardPanel.isOpaque = false
         dashboardPanel.backgroundColor = .clear
         dashboardPanel.hasShadow = true
-        dashboardPanel.level = .statusBar
+        dashboardPanel.level = .normal
         dashboardPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
         globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -102,6 +102,7 @@ extension StatusBarController {
 
     private func dismissDashboardPanelIfAllowed() {
         guard dashboardPanel.isVisible,
+              dashboardPanel.attachedSheet == nil,
               !isPresentingRestartPrompt else {
             return
         }
@@ -126,6 +127,12 @@ extension StatusBarController {
         guard let button = statusItem.button else { return }
 
         if dashboardPanel.isVisible {
+            if let sheet = dashboardPanel.attachedSheet, !NSApp.isActive || !sheet.isKeyWindow {
+                NSApp.activate(ignoringOtherApps: true)
+                dashboardPanel.orderFront(nil)
+                sheet.makeKeyAndOrderFront(nil)
+                return
+            }
             // An unanswered restart sheet is attached to the panel; leave both up.
             guard !isPresentingRestartPrompt else { return }
             pendingPanelPresentationTask?.cancel()
@@ -170,6 +177,9 @@ extension StatusBarController {
         guard notification.object as? NSWindow === dashboardPanel else { return }
         // If the panel goes down with a sheet still attached, the sheet's completion never
         // fires; clear the flag so outside-click closing isn't disabled forever.
+        if !isPresentingRestartPrompt, let sheet = dashboardPanel.attachedSheet {
+            dashboardPanel.endSheet(sheet, returnCode: .cancel)
+        }
         isPresentingRestartPrompt = false
         appState.setDashboardVisible(false)
     }

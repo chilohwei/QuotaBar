@@ -126,6 +126,25 @@ struct AppStateRefreshSynchronizationTests {
     }
 
     @MainActor
+    @Test("DeepSeek background refresh respects retry deadlines and unreadable keys")
+    func deepSeekRefreshEligibility() {
+        let state = AppState()
+        let account = Account(tool: .deepSeek, name: "DeepSeek")
+        state.loadStateByAccount[account.id] = .failed
+        let interval = AppState.deepSeekRefreshInterval
+        #expect(state.shouldRefreshAccount(account, freshnessInterval: interval))
+
+        state.refreshBackoffUntilByAccount[account.id] = Date(timeIntervalSinceNow: 60)
+        #expect(!state.shouldRefreshAccount(account, freshnessInterval: interval, intent: .dashboardOpen))
+        #expect(state.shouldRefreshAccount(account, freshnessInterval: interval, intent: .manual))
+
+        state.refreshBackoffUntilByAccount[account.id] = nil
+        state.errorRequiresUserActionByAccount[account.id] = true
+        #expect(!state.shouldRefreshAccount(account, freshnessInterval: interval))
+        #expect(state.shouldRefreshAccount(account, freshnessInterval: interval, intent: .manual))
+    }
+
+    @MainActor
     @Test("usage-triggered refresh is coalesced per tool")
     func usageSignalThrottlePerTool() {
         let state = AppState()

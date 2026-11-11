@@ -217,7 +217,7 @@ jobs:
         with:
           generate_release_notes: ${{ steps.notes.outputs.path == '' }}
           fail_on_unmatched_files: true
-          overwrite_files: true
+          overwrite_files: false
           make_latest: true
           target_commitish: ${{ github.sha }}
           body_path: ${{ steps.notes.outputs.path }}

@@ -215,11 +215,7 @@ extension DashboardView {
             }
 
             Button {
-                if appState.isAddingAccount {
-                    appState.cancelAddAccount()
-                } else {
-                    appState.quickAddAccount(tool: appState.selectedTool)
-                }
+                beginAddingAccount()
             } label: {
                 HStack(spacing: 5) {
                     if appState.isAddingAccount {

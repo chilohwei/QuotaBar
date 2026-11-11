@@ -106,6 +106,8 @@ extension AppText {
                 return "Switched to \(accountName). Restart Cursor to apply this account."
             case .claudeCode:
                 return "Switched to \(accountName). Restart Claude Code to apply this account."
+            case .deepSeek:
+                return accountName
             }
         case .simplifiedChinese:
             switch tool {
@@ -115,6 +117,8 @@ extension AppText {
                 return "已切换到 \(accountName)。请重启 Cursor 后生效。"
             case .claudeCode:
                 return "已切换到 \(accountName)。请重启 Claude Code 后生效。"
+            case .deepSeek:
+                return accountName
             }
         case .traditionalChinese:
             switch tool {
@@ -124,6 +128,8 @@ extension AppText {
                 return "已切換到 \(accountName)。請重啟 Cursor 後生效。"
             case .claudeCode:
                 return "已切換到 \(accountName)。請重啟 Claude Code 後生效。"
+            case .deepSeek:
+                return accountName
             }
         }
     }
@@ -131,11 +137,11 @@ extension AppText {
     func updateAvailableMessage(version: String, currentVersion: String) -> String {
         switch language {
         case .english:
-            return "QuotaBar \(version) is available. Current version: \(currentVersion). This unsigned build is distributed through GitHub Releases; macOS may require right-click Open or manual quarantine removal after installation. Download, install, and restart now?"
+            return "QuotaBar \(version) is available. Current version: \(currentVersion). Download, install, and restart now?"
         case .simplifiedChinese:
-            return "发现 QuotaBar \(version)。当前版本：\(currentVersion)。当前版本通过 GitHub Releases 分发且未做 Developer ID 签名，安装后 macOS 可能需要右键打开或手动移除 quarantine。是否立即下载、安装并重启？"
+            return "发现 QuotaBar \(version)。当前版本：\(currentVersion)。是否立即下载、安装并重启？"
         case .traditionalChinese:
-            return "發現 QuotaBar \(version)。目前版本：\(currentVersion)。目前版本透過 GitHub Releases 分發且未做 Developer ID 簽名，安裝後 macOS 可能需要右鍵打開或手動移除 quarantine。是否立即下載、安裝並重啟？"
+            return "發現 QuotaBar \(version)。目前版本：\(currentVersion)。是否立即下載、安裝並重啟？"
         }
     }
 

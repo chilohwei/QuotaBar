@@ -29,7 +29,7 @@ extension AppState {
     func applyPersistedState(_ state: PersistedState) {
         accounts = state.accounts
         activeAccountByTool = state.activeAccountByTool.filter { supportedTools.contains($0.key) }
-        selectedTool = [.codex, .cursor, .claudeCode]
+        selectedTool = supportedTools
             .first { activeAccountByTool[$0] != nil }
             ?? .codex
     }

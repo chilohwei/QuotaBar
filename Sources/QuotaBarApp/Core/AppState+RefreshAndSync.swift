@@ -7,6 +7,14 @@ extension AppState {
     /// runs whether or not the panel is open and whether or not the tools are being used.
     func startAutoRefreshLoop() {
         refreshTask?.cancel()
+        deepSeekRefreshTask?.cancel()
+        deepSeekRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.deepSeekRefreshInterval))
+                guard !Task.isCancelled else { break }
+                await self?.refreshActiveDeepSeekIfNeeded()
+            }
+        }
         refreshTask = Task {
             // Wall-clock, not a summed-delay counter: the loop sleeps through system suspend, where
             // real elapsed time can run far ahead of the sum of intended delays.
@@ -40,12 +48,20 @@ extension AppState {
         }
     }
 
+    func refreshActiveDeepSeekIfNeeded() async {
+        guard let account = activeAccount(for: .deepSeek),
+              shouldRefreshAccount(account, freshnessInterval: Self.deepSeekRefreshInterval) else { return }
+        await refreshQuota(for: account)
+    }
+
     func refreshActiveAccounts(intent: RefreshIntent = .background) async {
+        async let deepSeek: Void = refreshActiveAccount(for: .deepSeek, syncInstalled: false, intent: intent)
         await syncInstalledCurrentAccounts()
         await refreshAccounts(
-            supportedToolsPrioritizingSelectedTool.compactMap { activeAccount(for: $0) },
+            supportedToolsPrioritizingSelectedTool.filter { $0 != .deepSeek }.compactMap { activeAccount(for: $0) },
             intent: intent
         )
+        await deepSeek
     }
 
     func refreshActiveAccountsIfNeeded(
@@ -57,6 +73,7 @@ extension AppState {
             await syncInstalledCurrentAccounts()
         }
         let targetAccounts = supportedToolsPrioritizingSelectedTool
+            .filter { intent != .background || $0 != .deepSeek }
             .compactMap { activeAccount(for: $0) }
             .filter { shouldRefreshAccount($0, freshnessInterval: freshnessInterval, intent: intent) }
         await refreshAccounts(targetAccounts, intent: intent)
@@ -266,7 +283,7 @@ extension AppState {
         _ tool: ToolKind,
         discardedAccount: Account? = nil
     ) async {
-        guard let account = activeAccount(for: tool) else { return }
+        guard tool != .deepSeek, let account = activeAccount(for: tool) else { return }
         let provider = provider(for: tool)
         do {
             if tool == .claudeCode {
@@ -327,7 +344,7 @@ extension AppState {
         for tool: ToolKind,
         intent: RefreshIntent = .background
     ) async -> Account? {
-        guard supportedTools.contains(tool) else { return nil }
+        guard tool != .deepSeek, supportedTools.contains(tool) else { return nil }
         guard await beginCredentialSync(for: tool) else { return nil }
         defer { finishCredentialSync(for: tool) }
         let provider = provider(for: tool)
@@ -476,6 +493,11 @@ extension AppState {
         if refreshingAccountIDs.contains(account.id) {
             return false
         }
+        if account.tool == .deepSeek,
+           !intent.bypassesAppBackoff,
+           deepSeekRefreshIsDeferred(for: account.id) {
+            return false
+        }
 
         let effectiveFreshnessInterval = effectiveFreshnessInterval(
             for: account,
@@ -532,9 +554,20 @@ extension AppState {
         QuotaFreshness.isStale(snapshot) ? .stale : .loaded
     }
 
+    private func deepSeekRefreshIsDeferred(for accountID: UUID) -> Bool {
+        errorRequiresUserActionByAccount[accountID] == true
+            || refreshBackoffUntilByAccount[accountID].map { $0 > Date() } == true
+    }
+
     func refreshQuota(for account: Account, intent: RefreshIntent = .background) async {
         guard !refreshingAccountIDs.contains(account.id) else { return }
         guard !activatingTools.contains(account.tool) else {
+            restoreRefreshStateAfterSkippedRefresh(for: account)
+            return
+        }
+        if account.tool == .deepSeek,
+           !intent.bypassesAppBackoff,
+           deepSeekRefreshIsDeferred(for: account.id) {
             restoreRefreshStateAfterSkippedRefresh(for: account)
             return
         }
@@ -548,6 +581,15 @@ extension AppState {
         }
         let provider = provider(for: account.tool)
         let hadSnapshot = quotaByAccount[account.id] != nil
+        // A pending response must not overwrite the verified balance from a replacement key.
+        let identityAtStart = account.tool == .deepSeek
+            ? accounts.first { $0.id == account.id }?.settings.identityKey
+            : nil
+        func canApplyRefresh() -> Bool {
+            guard account.tool == .deepSeek else { return true }
+            guard let current = accounts.first(where: { $0.id == account.id }) else { return false }
+            return current.settings.identityKey == identityAtStart
+        }
 
         AppLog.refresh.info("Refreshing account \(account.id.uuidString, privacy: .public) for \(account.tool.rawValue, privacy: .public), intent=\(intent.rawValue, privacy: .public)")
         refreshingAccountIDs.insert(account.id)
@@ -611,6 +653,7 @@ extension AppState {
                 }
                 snapshot = try await provider.fetchQuota(account: account, secret: refreshedSecret, intent: .manual)
             }
+            guard canApplyRefresh() else { return }
             let settingsChanged = updateAccountSettingsIfNeeded(
                 accountID: account.id,
                 provider: provider,
@@ -668,17 +711,27 @@ extension AppState {
             }
             AppLog.refresh.info("Refresh succeeded for account \(account.id.uuidString, privacy: .public)")
         } catch {
+            guard canApplyRefresh() else { return }
+            if account.tool == .deepSeek, Task.isCancelled {
+                restoreRefreshStateAfterSkippedRefresh(for: account)
+                return
+            }
             let failureCount = (refreshFailureCountByAccount[account.id] ?? 0) + 1
             refreshFailureCountByAccount[account.id] = failureCount
+            let backoff = account.tool == .deepSeek ? deepSeekBackoffPolicy : refreshBackoffPolicy
             let retryAt = retryDeadline(for: error)
-                ?? Date().addingTimeInterval(refreshBackoffPolicy.delay(afterFailureCount: failureCount))
-            if !intent.bypassesAppBackoff {
+                ?? Date().addingTimeInterval(backoff.delay(afterFailureCount: failureCount))
+            if account.tool == .deepSeek || !intent.bypassesAppBackoff {
                 refreshBackoffUntilByAccount[account.id] = retryAt
             }
             AppLog.refresh.error("Refresh failed for account \(account.id.uuidString, privacy: .public), failures=\(failureCount, privacy: .public): \(String(describing: error), privacy: .private)")
             errorByAccount[account.id] = text.refreshAccountFailedMessage(resolvedErrorMessage(error))
             errorRequiresUserActionByAccount[account.id] = errorRequiresUserAction(error)
-            loadStateByAccount[account.id] = loadStateAfterFailedRefresh(for: account)
+            if account.tool == .deepSeek, hadSnapshot {
+                loadStateByAccount[account.id] = .stale
+            } else {
+                loadStateByAccount[account.id] = loadStateAfterFailedRefresh(for: account)
+            }
         }
     }
 

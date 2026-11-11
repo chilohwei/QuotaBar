@@ -2,6 +2,13 @@ import Foundation
 
 extension AppText {
     func userFacingErrorMessage(_ error: Error) -> String {
+        if let keyError = error as? DeepSeekKeyError {
+            switch keyError {
+            case .invalid: return deepSeekInvalidKey
+            case .unreadable: return deepSeekUnreadableKey
+            case .duplicate: return deepSeekDuplicateKey
+            }
+        }
         if let urlError = error as? URLError {
             return networkErrorMessage(urlError)
         }

@@ -1,7 +1,7 @@
 import Foundation
 
 struct ProviderRegistry: Sendable {
-    let supportedTools: [ToolKind] = [.codex, .cursor, .claudeCode]
+    let supportedTools: [ToolKind] = ToolKind.allCases
     private let overrides: [ToolKind: any Provider]
 
     init(overrides: [ToolKind: any Provider] = [:]) {
@@ -19,6 +19,8 @@ struct ProviderRegistry: Sendable {
             return CursorProvider()
         case .claudeCode:
             return ClaudeCodeProvider()
+        case .deepSeek:
+            return DeepSeekProvider()
         }
     }
 }

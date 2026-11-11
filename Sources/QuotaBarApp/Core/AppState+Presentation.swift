@@ -17,17 +17,12 @@ extension AppState {
         await syncInstalledCurrentAccount(for: tool)
         guard isRefreshOnOpenEnabled else { return }
 
-        let targetAccounts = accounts(for: tool)
-        guard !targetAccounts.isEmpty else { return }
         // `.dashboardOpen` carries its own, much shorter provider-cache floor, so this is a real
         // fetch rather than a cache read — opening the panel is when the numbers have to be live.
         // The app-level gate below still skips accounts refreshed seconds ago (rapid open/close).
-        guard shouldRefreshAccounts(
-            targetAccounts,
-            freshnessInterval: dashboardOpenRefreshFreshnessInterval,
-            intent: .dashboardOpen
-        ) else { return }
-
+        let targetAccounts = accounts(for: tool).filter {
+            shouldRefreshAccount($0, freshnessInterval: dashboardOpenRefreshFreshnessInterval, intent: .dashboardOpen)
+        }
         primeRefreshState(for: targetAccounts)
         await refreshAccounts(targetAccounts, intent: .dashboardOpen)
     }
@@ -45,6 +40,7 @@ extension AppState {
         isDashboardVisible = visible
 
         if visible {
+            refreshConfiguredBackend()
             startDashboardRefreshLoop()
         } else {
             dashboardRefreshTask?.cancel()
@@ -68,7 +64,9 @@ extension AppState {
 
     func selectTool(_ tool: ToolKind) {
         guard supportedTools.contains(tool) else { return }
+        if selectedTool != tool { hasConfiguredDeepSeekBackend = false }
         selectedTool = tool
+        refreshConfiguredBackend()
         let targetAccounts = accounts(for: tool)
         let shouldRefresh = shouldRefreshForForegroundDisplay(targetAccounts)
         if shouldRefresh {

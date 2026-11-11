@@ -65,6 +65,12 @@ enum AccountCardStatusPresenter {
             break
         }
 
+        if let balance = quota.balance {
+            if loadState == .stale { return .stale }
+            if !balance.isAvailable { return .warning }
+            return balance.primary == nil ? .pending : .healthy
+        }
+
         let metrics = quota.orderedMetrics
         if metrics.isEmpty {
             return .pending

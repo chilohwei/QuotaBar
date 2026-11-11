@@ -194,7 +194,6 @@ extension StatusBarController {
         )
         window.title = appState.text.string(.downloadAndInstall)
         window.isReleasedWhenClosed = false
-        window.level = .floating
         window.center()
 
         let container = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 360, height: 134))

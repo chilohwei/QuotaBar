@@ -5,13 +5,24 @@ struct StatusBarQuotaInput {
     let accountName: String
     let quota: QuotaSnapshot?
     var alternativeAccountName: String?
+    var isStale = false
+    var refreshError: String?
 }
 
 struct StatusBarQuotaPresenter {
-    static func entries(for inputs: [StatusBarQuotaInput]) -> [StatusBarQuotaEntry] {
+    static func entries(for inputs: [StatusBarQuotaInput], locale: Locale = .current) -> [StatusBarQuotaEntry] {
         inputs.map { input in
             let lines = input.quota?.mainMetrics(for: input.tool).prefix(2).compactMap(quotaLine(for:)) ?? []
-            let displayLines = lines.isEmpty ? [placeholderLine] : lines
+            let balance = input.quota?.balance
+            let balanceLine = balance.flatMap { balance in
+                balance.primary.map { amount in
+                    StatusBarQuotaLine(
+                        text: amount.formatted(amount.total, locale: locale),
+                        level: balance.isExhausted ? .exhausted : (balance.isAvailable ? .normal : .low)
+                    )
+                }
+            }
+            let displayLines = balanceLine.map { [$0] } ?? (lines.isEmpty ? [placeholderLine] : lines)
 
             let remainingPercent = input.quota?.statusBarMetric?.ratio.map {
                 Int((min(max($0, 0), 1) * 100).rounded())
@@ -25,8 +36,10 @@ struct StatusBarQuotaPresenter {
                 availabilityStatus: input.quota?.effectiveAvailabilityStatus,
                 lines: displayLines,
                 alternativeAccountName: input.alternativeAccountName,
-                isStale: input.quota.map { QuotaFreshness.isStale($0) || $0.effectiveAvailabilityStatus == .serviceUnavailable } ?? false,
-                resetWindows: input.quota?.mainMetrics(for: input.tool).map(\.window) ?? []
+                isStale: input.isStale || (input.quota.map { QuotaFreshness.isStale($0) || $0.effectiveAvailabilityStatus == .serviceUnavailable } ?? false),
+                resetWindows: input.quota?.mainMetrics(for: input.tool).map(\.window) ?? [],
+                balance: balance,
+                refreshError: input.refreshError
             )
         }
     }
@@ -52,6 +65,17 @@ struct StatusBarQuotaPresenter {
                         metadata: metadata,
                         availability: entry.availabilityStatus
                     )
+                } else if let balance = entry.balance {
+                    var parts = ["\(entry.tool.displayName) \(entry.accountName)"]
+                    parts += balance.amounts.map { $0.formatted($0.total, locale: text.language.locale) }
+                    if balance.amounts.isEmpty { parts.append(text.string(.waitingData)) }
+                    if balance.isExhausted {
+                        parts.append(text.string(.exhausted))
+                    } else if !balance.isAvailable {
+                        parts.append(text.balanceUnavailable)
+                    }
+                    if let metadata { parts.append(metadata) }
+                    line = parts.joined(separator: " · ")
                 } else {
                     var parts = [
                         "\(entry.tool.displayName) \(entry.accountName)",
@@ -70,6 +94,9 @@ struct StatusBarQuotaPresenter {
                     line += "\n\(text.quotaLabel(window.label)): \(reset)"
                 }
                 if entry.isStale { line += "\n" + text.string(.staleData) }
+                if let refreshError = entry.refreshError {
+                    line += "\n" + text.localizedStoredErrorMessage(refreshError)
+                }
                 if let alternative = entry.alternativeAccountName {
                     line += "\n· " + text.alternativeAccountAvailable(alternative)
                 }

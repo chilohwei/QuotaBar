@@ -3,6 +3,7 @@ import Foundation
 enum ToolKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case codex
     case cursor
+    case deepSeek
     case claudeCode
 
     var id: String { rawValue }
@@ -15,6 +16,8 @@ enum ToolKind: String, Codable, CaseIterable, Identifiable, Sendable {
             return "Cursor"
         case .claudeCode:
             return "Claude Code"
+        case .deepSeek:
+            return "DeepSeek"
         }
     }
 
@@ -26,6 +29,8 @@ enum ToolKind: String, Codable, CaseIterable, Identifiable, Sendable {
             return "cursor"
         case .claudeCode:
             return "claude"
+        case .deepSeek:
+            return "deepseek"
         }
     }
 }

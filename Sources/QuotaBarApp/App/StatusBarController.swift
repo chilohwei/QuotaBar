@@ -116,12 +116,13 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 tool: tool,
                 accountName: active.name,
                 quota: quota,
-                alternativeAccountName: quota.flatMap {
-                    alternativeAccountName(for: tool, active: active, quota: $0)
-                }
+                alternativeAccountName: appState.availableReplacement(for: active)?.name,
+                isStale: tool == .deepSeek && (appState.loadStateByAccount[active.id] == .stale
+                    || appState.errorByAccount[active.id] != nil),
+                refreshError: tool == .deepSeek ? appState.errorByAccount[active.id] : nil
             )
         }
-        let entries = StatusBarQuotaPresenter.entries(for: inputs)
+        let entries = StatusBarQuotaPresenter.entries(for: inputs, locale: appState.language.locale)
         let display = entries.isEmpty ? nil : StatusBarQuotaDisplay(items: entries)
 
         button.toolTip = StatusBarQuotaPresenter.tooltip(for: entries, text: appState.text)
@@ -129,18 +130,6 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         statusBarContentView?.configure(display: display)
         statusItem.length = display?.preferredStatusItemLength ?? NSStatusItem.squareLength
         button.setAccessibilityLabel(button.toolTip ?? appState.text.string(.statusBarNoData))
-    }
-
-    // Names a ready-to-use recommended account when the active one is out of quota,
-    // so the menu bar can hint that switching would help.
-    private func alternativeAccountName(for tool: ToolKind, active: Account, quota: QuotaSnapshot) -> String? {
-        let exhausted = quota.hasExhaustedQuota || (quota.statusBarMetric?.ratio ?? 1) <= 0.001
-        guard exhausted,
-              let recommended = appState.recommendedAccount(for: tool),
-              recommended.id != active.id else {
-            return nil
-        }
-        return recommended.name
     }
 
     private func configureStatusItem() {
@@ -163,9 +152,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     private func applyMenuBarIcon(to button: NSStatusBarButton) {
-        let iconSize: CGFloat = 17.5
-        let icon = Branding.makeMenuBarIcon(size: iconSize)
-        icon.size = NSSize(width: iconSize, height: iconSize)
+        let icon = Branding.makeMenuBarIcon(size: StatusBarQuotaContentView.logoSize)
         button.image = nil
         button.title = ""
 

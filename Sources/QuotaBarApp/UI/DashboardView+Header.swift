@@ -149,7 +149,7 @@ extension DashboardView {
             return 19
         case .cursor:
             return 18
-        case .claudeCode:
+        case .claudeCode, .deepSeek:
             return 20
         }
     }
@@ -206,6 +206,14 @@ extension DashboardView {
             }
 
             Spacer(minLength: 0)
+            if appState.hasConfiguredDeepSeekBackend && !appState.isAddingAccount {
+                CardTextActionButton(
+                    title: text.configuredDeepSeekBackend,
+                    tint: Branding.actionActivate,
+                    softTint: Branding.actionActivateSoft,
+                    action: openConfiguredDeepSeek
+                )
+            }
         }
         .frame(height: 22, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -243,11 +251,7 @@ extension DashboardView {
             headerSettingsButton
 
             Button {
-                if appState.isAddingAccount {
-                    appState.cancelAddAccount()
-                } else {
-                    appState.quickAddAccount(tool: appState.selectedTool)
-                }
+                beginAddingAccount()
             } label: {
                 HStack(spacing: 5) {
                     if appState.isAddingAccount {
@@ -320,6 +324,7 @@ extension DashboardView {
             guard isEnabled else { return }
             freezeCurrentAccountOrder()
             refreshCycleID += 1
+            appState.refreshConfiguredBackend()
             appState.refreshSelectedTool()
         } label: {
             HeaderRefreshGlyph(isRefreshing: isBusy)

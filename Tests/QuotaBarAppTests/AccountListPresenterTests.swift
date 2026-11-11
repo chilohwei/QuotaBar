@@ -652,6 +652,47 @@ struct AccountListPresenterTests {
         #expect(result.map(\.id) == [lowQuota.id, highQuota.id])
     }
 
+    @Test("exhausted account offers the best confirmed replacement on the same tool")
+    func replacementRequiresConfirmedAvailability() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let active = Account(tool: .codex, name: "Current")
+        let ready = Account(tool: .codex, name: "Ready")
+        let stale = Account(tool: .codex, name: "Stale")
+        let rejected = Account(tool: .codex, name: "Rejected")
+        let reset = Account(tool: .codex, name: "Awaiting reset confirmation")
+        let otherTool = Account(tool: .claudeCode, name: "Other tool")
+        let accounts = [active, ready, stale, rejected, reset, otherTool]
+        let quotas = [
+            active.id: snapshot(remaining: 0, updatedAt: now),
+            ready.id: snapshot(remaining: 35, updatedAt: now),
+            stale.id: snapshot(remaining: 90, updatedAt: now.addingTimeInterval(-601)),
+            rejected.id: snapshot(remaining: 95, updatedAt: now),
+            reset.id: snapshot(remaining: 98, resetAt: now.addingTimeInterval(-1), updatedAt: now),
+            otherTool.id: snapshot(remaining: 100, updatedAt: now)
+        ]
+        let loadStates = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, AccountLoadState.loaded) })
+
+        #expect(AccountListPresenter.availableReplacementID(
+            for: active,
+            among: accounts,
+            quotaByAccount: quotas,
+            loadStateByAccount: loadStates,
+            errorByAccount: [rejected.id: "Credential error"],
+            recommendationStrategy: .maximizeAvailability,
+            now: now
+        ) == ready.id)
+
+        #expect(AccountListPresenter.availableReplacementID(
+            for: ready,
+            among: accounts,
+            quotaByAccount: quotas,
+            loadStateByAccount: loadStates,
+            errorByAccount: [:],
+            recommendationStrategy: .maximizeAvailability,
+            now: now
+        ) == nil)
+    }
+
     private func snapshot(
         remaining: Double,
         resetAt: Date? = nil,

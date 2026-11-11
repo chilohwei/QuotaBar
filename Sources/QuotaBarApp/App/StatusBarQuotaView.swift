@@ -11,6 +11,8 @@ struct StatusBarQuotaEntry {
     var alternativeAccountName: String?
     var isStale = false
     var resetWindows: [QuotaWindow] = []
+    var balance: AccountBalance? = nil
+    var refreshError: String?
 }
 
 enum StatusBarQuotaWarningLevel: Equatable {
@@ -50,7 +52,7 @@ final class StatusBarQuotaContentView: NSView {
     static let preferredHeight: CGFloat = 22
     static let contentHeight: CGFloat = 20
     static let contentHorizontalInset: CGFloat = 2
-    static let logoSize: CGFloat = 17
+    static let logoSize: CGFloat = 14
     static let logoQuotaSpacing: CGFloat = 6
 
     private let logoImageView = NSImageView()
@@ -140,7 +142,7 @@ final class StatusBarQuotaContentView: NSView {
 @MainActor
 private final class StatusBarQuotaItemView: NSView {
     static let lineFont = NSFont.monospacedDigitSystemFont(ofSize: 8.0, weight: .semibold)
-    private static let toolIconSize: CGFloat = 14
+    private static let toolIconSize = StatusBarQuotaContentView.logoSize
     private static let iconTextSpacing: CGFloat = 3.5
     private static let lineHeight: CGFloat = 10
     private static let lineSpacing: CGFloat = 0
@@ -413,10 +415,7 @@ enum StatusBarToolLogoImageCache {
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
 
-        let rendered = NSImage(size: NSSize(width: size, height: size))
-        rendered.addRepresentation(output)
-        rendered.isTemplate = false
-        return rendered
+        return fittedIcon(from: output, size: size)
     }
 
     private static func perPixelLuminanceIcon(source: NSBitmapImageRep, size: CGFloat, color: NSColor) -> NSImage? {
@@ -446,10 +445,32 @@ enum StatusBarToolLogoImageCache {
             }
         }
 
-        let rendered = NSImage(size: NSSize(width: size, height: size))
-        rendered.addRepresentation(output)
-        rendered.isTemplate = false
-        return rendered
+        return fittedIcon(from: output, size: size)
+    }
+
+    private static func fittedIcon(from bitmap: NSBitmapImageRep, size: CGFloat) -> NSImage? {
+        guard let pixels = bitmap.bitmapData, let source = bitmap.cgImage else { return nil }
+
+        var minX = bitmap.pixelsWide
+        var minY = bitmap.pixelsHigh
+        var maxX = -1
+        var maxY = -1
+        // makeOutputRep allocates interleaved RGBA8 pixels.
+        for y in 0 ..< bitmap.pixelsHigh {
+            let row = pixels.advanced(by: y * bitmap.bytesPerRow)
+            for x in 0 ..< bitmap.pixelsWide where row[x * 4 + 3] > 12 {
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
+            }
+        }
+
+        guard minX <= maxX, minY <= maxY else { return nil }
+        let bounds = CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+        guard let cropped = source.cropping(to: bounds) else { return nil }
+        let scale = size / max(bounds.width, bounds.height)
+        return NSImage(cgImage: cropped, size: NSSize(width: bounds.width * scale, height: bounds.height * scale))
     }
 
     private static func makeOutputRep(width: Int, height: Int) -> NSBitmapImageRep? {
@@ -481,6 +502,9 @@ enum StatusBarToolLogoImageCache {
         case .cursor:
             return NSImage(systemSymbolName: "cube.fill", accessibilityDescription: nil)
                 ?? NSImage(systemSymbolName: "square.grid.2x2.fill", accessibilityDescription: nil)
+                ?? Branding.makeBrandMarkIcon(size: 32, monochrome: true)
+        case .deepSeek:
+            return NSImage(systemSymbolName: "dollarsign.circle", accessibilityDescription: nil)
                 ?? Branding.makeBrandMarkIcon(size: 32, monochrome: true)
         case .claudeCode:
             return NSImage(systemSymbolName: "asterisk", accessibilityDescription: nil)

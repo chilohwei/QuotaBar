@@ -18,6 +18,9 @@ struct AccountCardView: View {
     let onActivate: () -> Void
     let onRefresh: () -> Void
     let onDelete: () -> Void
+    var onReplaceKey: (() -> Void)? = nil
+    var replacement: Account?
+    var onSwitchToReplacement: ((Account) -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isConfirmingDelete = false
@@ -169,6 +172,8 @@ struct AccountCardView: View {
             if lower.contains("pro") { return .pro }
             if lower.contains("plus") { return .plus }
             return .unknown(rawPlan)
+        case .deepSeek:
+            return .apiKey
         case .claudeCode:
             if lower == "claude.ai" || lower.contains("claude.ai") {
                 return .claudeFirstParty
@@ -206,6 +211,8 @@ struct AccountCardView: View {
             return subscriptionType(from: plan, tool: .cursor) != .free
         case .claudeCode:
             return true
+        case .deepSeek:
+            return false
         }
     }
 
@@ -389,6 +396,8 @@ struct AccountCardView: View {
 
     private var loadingMetricTitles: [String] {
         switch account.tool {
+        case .deepSeek:
+            return [text.balanceTitle]
         case .cursor:
             return ["Total", "Auto", "API"]
         case .codex, .claudeCode:
@@ -411,7 +420,14 @@ struct AccountCardView: View {
         VStack(alignment: .leading, spacing: contentSpacing) {
             header
 
-            if isInitialLoadingWithoutQuota {
+            if account.tool == .deepSeek {
+                AccountBalanceMetricView(
+                    balance: quota?.balance,
+                    isRefreshing: isInitialLoadingWithoutQuota,
+                    isStale: loadState == .stale || quota.map { QuotaFreshness.isStale($0) } == true,
+                    text: text
+                )
+            } else if isInitialLoadingWithoutQuota {
                 LoadingQuotaPlaceholder(language: language, metricTitles: loadingMetricTitles)
             } else {
                 AdaptiveQuotaMetricStrip(
@@ -424,6 +440,21 @@ struct AccountCardView: View {
             HStack(alignment: .center, spacing: 6) {
                 if footerMessage != nil {
                     footer
+                } else if let replacement, let onSwitchToReplacement {
+                    let title = text.switchToAccount(replacement.name)
+                    Button {
+                        onSwitchToReplacement(replacement)
+                    } label: {
+                        Text(title)
+                            .font(.system(size: 10.8, weight: .medium))
+                            .foregroundStyle(Branding.actionActivate)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.quotaInteractive())
+                    .help(title)
+                    .accessibilityLabel(title)
                 } else if let quota {
                     Text(text.updatedAt(quota.updatedAt))
                         .font(.system(size: 10.2, weight: .regular))
@@ -446,13 +477,17 @@ struct AccountCardView: View {
                         }
                     }
                 }
-                if let quota, (!quota.supplementaryMetrics(for: account.tool).isEmpty || quota.creditsRemaining != nil || !quota.spending.isEmpty) {
+                if let quota, (quota.balance?.primary != nil || !quota.supplementaryMetrics(for: account.tool).isEmpty || quota.creditsRemaining != nil || !quota.spending.isEmpty) {
                     Button { showsSupplementaryQuota.toggle() } label: {
-                        QuotaDetailButtonLabel(title: text.otherQuotaTitle, isPresented: showsSupplementaryQuota, showsChevron: true)
+                        QuotaDetailButtonLabel(title: quota.balance == nil ? text.otherQuotaTitle : text.balanceDetails, isPresented: showsSupplementaryQuota, showsChevron: true)
                     }
                         .buttonStyle(.quotaInteractive())
                         .popover(isPresented: $showsSupplementaryQuota) {
-                            SupplementaryQuotaView(quota: quota, tool: account.tool, language: language)
+                            if let balance = quota.balance {
+                                AccountBalanceDetailsView(balance: balance, text: text)
+                            } else {
+                                SupplementaryQuotaView(quota: quota, tool: account.tool, language: language)
+                            }
                         }
                 }
             }
@@ -590,6 +625,11 @@ struct AccountCardView: View {
                     Label(text.string(.refresh), systemImage: "arrow.clockwise")
                 }
                 .disabled(isRefreshing)
+                if let onReplaceKey {
+                    Button(action: onReplaceKey) {
+                        Label(text.replaceDeepSeekKey, systemImage: "key")
+                    }
+                }
                 Divider()
                 Button(role: .destructive) { isConfirmingDelete = true } label: {
                     Label(text.string(.delete), systemImage: "trash")

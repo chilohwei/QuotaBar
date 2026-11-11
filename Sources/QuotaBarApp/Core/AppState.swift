@@ -36,6 +36,8 @@ final class AppState: ObservableObject {
     @Published var restartRequiredTool: ToolKind?
     @Published var addAccountErrorMessage: String?
     @Published var updateBannerState: AppUpdateBannerState = .idle
+    @Published var hasConfiguredDeepSeekBackend = false
+    private var configuredBackendTask: Task<Void, Never>?
     @Published var isLaunchAtLoginEnabled = false
     @Published var isRefreshOnOpenEnabled: Bool = AppPreferencesStore.refreshOnOpenEnabled
     @Published var isQuotaNotificationsEnabled: Bool = AppPreferencesStore.quotaNotificationsEnabled
@@ -48,11 +50,13 @@ final class AppState: ObservableObject {
     let quotaCacheStore = QuotaSnapshotCacheStore()
     let providerRegistry: ProviderRegistry
     let refreshBackoffPolicy = RefreshBackoffPolicy()
+    let deepSeekBackoffPolicy = RefreshBackoffPolicy(baseDelay: 15, maxDelay: 120)
     let refreshIntervalPolicy = RefreshIntervalPolicy()
     let notificationService = QuotaNotificationService()
     var hostActions = AppHostActions()
 
     var refreshTask: Task<Void, Never>?
+    var deepSeekRefreshTask: Task<Void, Never>?
     var dashboardRefreshTask: Task<Void, Never>?
     var addAccountTask: Task<Void, Never>?
     var addAccountOperationID: UUID?
@@ -73,6 +77,7 @@ final class AppState: ObservableObject {
     var isDashboardVisible = false
     var dashboardVisibleAccountIDs: [UUID] = []
     var refreshingAccountIDs: Set<UUID> = []
+    var interactiveActivationTools: Set<ToolKind> = []
     var refreshingToolByAccountID: [UUID: ToolKind] = [:]
     var activatingTools: Set<ToolKind> = []
     var credentialSyncCountByTool: [ToolKind: Int] = [:]
@@ -103,6 +108,7 @@ final class AppState: ObservableObject {
     let foregroundRefreshFreshnessInterval: TimeInterval = 30
     let dashboardOpenRefreshFreshnessInterval: TimeInterval = 25
     let dashboardVisibleRefreshInterval: TimeInterval = 30
+    static let deepSeekRefreshInterval: TimeInterval = 30
     // Coalesce usage-triggered refreshes: while a tool is actively used, its activity file changes
     // constantly, so cap live fetches to at most one per this interval (near-real-time, API-safe).
     let usageSignalMinRefreshInterval: TimeInterval = 10
@@ -122,6 +128,18 @@ final class AppState: ObservableObject {
     var supportedToolsPrioritizingSelectedTool: [ToolKind] {
         guard supportedTools.contains(selectedTool) else { return supportedTools }
         return [selectedTool] + supportedTools.filter { $0 != selectedTool }
+    }
+
+    func refreshConfiguredBackend() {
+        configuredBackendTask?.cancel()
+        let tool = selectedTool
+        configuredBackendTask = Task { [weak self] in
+            let configured = await Task.detached {
+                DeepSeekBackendConfiguration.read(for: tool) != nil
+            }.value
+            guard !Task.isCancelled, let self, self.selectedTool == tool else { return }
+            self.hasConfiguredDeepSeekBackend = configured
+        }
     }
 
     func bootstrap() {
@@ -170,8 +188,10 @@ final class AppState: ObservableObject {
     func shutdown() {
         finalizePendingDeletionNow()
         refreshTask?.cancel()
+        deepSeekRefreshTask?.cancel()
         dashboardRefreshTask?.cancel()
         addAccountTask?.cancel()
+        configuredBackendTask?.cancel()
         transientNoticeTask?.cancel()
         refreshEventTasks.values.forEach { $0.cancel() }
         refreshEventTasks.removeAll()
@@ -201,6 +221,20 @@ final class AppState: ObservableObject {
     func activeAccount(for tool: ToolKind) -> Account? {
         guard let activeID = activeAccountByTool[tool] else { return nil }
         return accounts.first(where: { $0.id == activeID })
+    }
+
+    func availableReplacement(for active: Account) -> Account? {
+        guard activeAccountByTool[active.tool] == active.id else { return nil }
+        let toolAccounts = accounts(for: active.tool)
+        guard let id = AccountListPresenter.availableReplacementID(
+            for: active,
+            among: toolAccounts,
+            quotaByAccount: quotaByAccount,
+            loadStateByAccount: loadStateByAccount,
+            errorByAccount: errorByAccount,
+            recommendationStrategy: recommendationStrategy
+        ) else { return nil }
+        return toolAccounts.first { $0.id == id }
     }
 
     func recommendedAccount(for tool: ToolKind) -> Account? {

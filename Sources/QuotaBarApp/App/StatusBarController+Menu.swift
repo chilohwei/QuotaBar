@@ -126,8 +126,7 @@ extension StatusBarController {
 
     // Account switches take effect only after the tool re-reads its credentials; this dialog
     // offers to do the restart right away and is the only prompt (no notice bar alongside).
-    // With the dashboard open it attaches as a sheet — the panel floats at status-bar level,
-    // so a free-standing modal window would end up behind it.
+    // With the dashboard open, attach the prompt to that window.
     func presentRestartPrompt(tool: ToolKind, message: String) {
         let alert = NSAlert()
         alert.messageText = appState.text.string(.restartRequiredTitle)
@@ -159,7 +158,7 @@ extension StatusBarController {
             restartCursorApp()
         case .codex:
             CodexRestartService.restartCodex()
-        case .claudeCode:
+        case .claudeCode, .deepSeek:
             break
         }
     }

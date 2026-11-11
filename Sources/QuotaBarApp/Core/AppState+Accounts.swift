@@ -54,6 +54,78 @@ extension AppState {
         }
     }
 
+    func saveDeepSeekKey(_ input: String, name: String, replacing accountID: UUID?) async throws {
+        let secret = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let provider = provider(for: .deepSeek)
+        let snapshot = try await provider.fetchQuota(secret: secret)
+        try Task.checkCancellation()
+
+        let identities = provider.accountIdentityAliases(from: secret)
+        let duplicate = findDuplicateStoredAccount(for: .deepSeek, detectedIdentities: identities)
+        let account: Account
+
+        if let accountID {
+            guard let index = accounts.firstIndex(where: { $0.id == accountID && $0.tool == .deepSeek }) else {
+                throw CancellationError()
+            }
+            if let duplicate, duplicate.id != accountID {
+                throw DeepSeekKeyError.duplicate
+            }
+
+            let previous = accounts[index]
+            let prepared = try await provider.prepareAccount(previous, secret: secret)
+            try Task.checkCancellation()
+            guard let currentIndex = accounts.firstIndex(where: { $0.id == accountID }) else {
+                throw CancellationError()
+            }
+            let key = secretStoreKey(for: accountID)
+            let previousSecret = storedSecretSnapshot(for: previous)
+            try secretStore.saveSecret(secret, accountKey: key)
+            accounts[currentIndex].settings = prepared.settings
+            do {
+                try await persistState()
+            } catch {
+                if let currentIndex = accounts.firstIndex(where: { $0.id == accountID }) {
+                    accounts[currentIndex].settings = previous.settings
+                    if let previousSecret {
+                        try secretStore.saveSecret(previousSecret, accountKey: key)
+                    } else {
+                        try secretStore.deleteSecret(accountKey: key)
+                    }
+                }
+                throw error
+            }
+            account = prepared
+        } else {
+            let displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            account = try await addAccount(
+                tool: .deepSeek,
+                name: displayName.isEmpty ? text.deepSeekAccountName : displayName,
+                secret: secret,
+                makeActive: false,
+                useAsDefaultActive: true,
+                applyToTool: false,
+                refreshAfterAdd: false
+            )
+        }
+
+        guard accounts.contains(where: { $0.id == account.id }) else { return }
+        quotaByAccount[account.id] = snapshot
+        loadStateByAccount[account.id] = .loaded
+        errorByAccount[account.id] = nil
+        errorRequiresUserActionByAccount[account.id] = nil
+        refreshFailureCountByAccount[account.id] = nil
+        refreshBackoffUntilByAccount[account.id] = nil
+        do {
+            try quotaCacheStore.save(snapshot, accountID: account.id)
+        } catch {
+            AppLog.refresh.error("Failed to cache DeepSeek balance: \(String(describing: error), privacy: .private)")
+        }
+        if accountID == nil {
+            handleAddAccountSuccess(account: account, updatedExistingAccount: duplicate != nil, tool: .deepSeek)
+        }
+    }
+
     private struct QuickAddSecretResult {
         let secret: String
         let matchesExistingAccount: Bool
@@ -274,6 +346,7 @@ extension AppState {
     }
 
     func activateAccount(_ account: Account) {
+        guard interactiveActivationTools.insert(account.tool).inserted else { return }
         Task {
             do {
                 AppLog.account.info("Activating account \(account.id.uuidString, privacy: .public) for \(account.tool.rawValue, privacy: .public)")
@@ -282,6 +355,11 @@ extension AppState {
                     captureMissingCurrentAccount: true,
                     discardedAccount: nil
                 )
+                interactiveActivationTools.remove(account.tool)
+                if account.tool == .deepSeek {
+                    await refreshQuota(for: account, intent: .manual)
+                    return
+                }
                 let message = text.restartRequiredMessage(accountName: account.name, tool: account.tool)
                 // Codex gets a dialog with a working "restart now" button as the only prompt —
                 // the panel's notice bar stays hidden so the two never show together.
@@ -293,6 +371,7 @@ extension AppState {
                 }
                 await refreshQuota(for: account, intent: .manual)
             } catch {
+                interactiveActivationTools.remove(account.tool)
                 AppLog.account.error("Activate account failed for \(account.id.uuidString, privacy: .public): \(String(describing: error), privacy: .private)")
                 errorByAccount[account.id] = text.switchAccountFailedMessage(resolvedErrorMessage(error))
                 errorRequiresUserActionByAccount[account.id] = errorRequiresUserAction(error)
@@ -410,7 +489,8 @@ extension AppState {
     ) async throws -> Account {
         let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let provider = provider(for: tool)
-        let detectedName = provider.suggestAccountName(from: secret) ?? AccountIdentityResolver.extractEmail(from: secret)
+        let detectedName = tool == .deepSeek ? nil :
+            provider.suggestAccountName(from: secret) ?? AccountIdentityResolver.extractEmail(from: secret)
         let detectedIdentity = provider.accountIdentity(from: secret)
         let detectedIdentityAliases = provider.accountIdentityAliases(from: secret)
 
@@ -480,12 +560,24 @@ extension AppState {
             try secretStore.saveSecret(secret, accountKey: secretStoreKey(for: account.id))
         }
 
+        let previousActiveID = activeAccountByTool[tool]
         accounts.append(account)
         if makeActive || (useAsDefaultActive && activeAccountByTool[tool] == nil) {
             activeAccountByTool[tool] = account.id
         }
 
-        try await persistState()
+        do {
+            try await persistState()
+        } catch {
+            if tool == .deepSeek {
+                accounts.removeAll { $0.id == account.id }
+                if activeAccountByTool[tool] == account.id {
+                    activeAccountByTool[tool] = previousActiveID
+                }
+                try secretStore.deleteSecret(accountKey: secretStoreKey(for: account.id))
+            }
+            throw error
+        }
 
         if applyToTool, activeAccountByTool[tool] == account.id {
             try await provider.activate(account: account, secret: secret)
