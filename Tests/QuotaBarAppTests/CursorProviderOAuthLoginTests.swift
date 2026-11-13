@@ -44,24 +44,6 @@ struct CursorProviderOAuthLoginTests {
         #expect(query["mode"] == "login")
     }
 
-    @Test("Poll payload with tokens becomes Cursor credentials")
-    func pollPayloadWithTokensBecomesCredentials() throws {
-        let provider = CursorProvider()
-        let payload = Data("""
-        {
-          "accessToken": "access-token-value",
-          "refreshToken": "refresh-token-value",
-          "authId": "auth0|user_123"
-        }
-        """.utf8)
-
-        let credentials = try #require(provider.cursorOAuthCredentials(fromPollData: payload))
-
-        #expect(credentials.accessToken == "access-token-value")
-        #expect(credentials.refreshToken == "refresh-token-value")
-        #expect(credentials.source == "cursorOAuth")
-    }
-
     @Test("Poll payload without an access token is treated as pending")
     func pollPayloadWithoutAccessTokenIsPending() {
         let provider = CursorProvider()
@@ -71,22 +53,43 @@ struct CursorProviderOAuthLoginTests {
         #expect(provider.cursorOAuthCredentials(fromPollData: Data("not-json".utf8)) == nil)
     }
 
-    @Test("OAuth credentials survive an encode/parse roundtrip")
-    func oauthCredentialsRoundtrip() throws {
+    enum PollTokenKind: String, CaseIterable, Sendable {
+        case opaque
+        case jwt
+    }
+
+    @Test("OAuth poll credentials survive encoding and parsing", arguments: PollTokenKind.allCases)
+    func oauthCredentialsRoundtrip(tokenKind: PollTokenKind) throws {
         let provider = CursorProvider()
+        let accessToken: String
+        let refreshToken: String
+        let authID: String
+        switch tokenKind {
+        case .opaque:
+            accessToken = "access-token-value"
+            refreshToken = "refresh-token-value"
+            authID = "auth0|user_123"
+        case .jwt:
+            authID = "auth0|user_01"
+            accessToken = jwt(claims: ["sub": authID])
+            refreshToken = "oauth-refresh-token"
+        }
         let payload = Data("""
         {
-          "accessToken": "\(jwt(claims: ["sub": "auth0|user_01"]))",
-          "refreshToken": "oauth-refresh-token",
-          "authId": "auth0|user_01"
+          "accessToken": "\(accessToken)",
+          "refreshToken": "\(refreshToken)",
+          "authId": "\(authID)"
         }
         """.utf8)
 
         let credentials = try #require(provider.cursorOAuthCredentials(fromPollData: payload))
-        let parsed = try provider.parseCredentials(provider.encodeCredentials(credentials))
+        #expect(credentials.accessToken == accessToken)
+        #expect(credentials.refreshToken == refreshToken)
+        #expect(credentials.source == "cursorOAuth")
 
-        #expect(parsed.accessToken == credentials.accessToken)
-        #expect(parsed.refreshToken == "oauth-refresh-token")
+        let parsed = try provider.parseCredentials(provider.encodeCredentials(credentials))
+        #expect(parsed.accessToken == accessToken)
+        #expect(parsed.refreshToken == refreshToken)
         #expect(parsed.source == "cursorOAuth")
     }
 

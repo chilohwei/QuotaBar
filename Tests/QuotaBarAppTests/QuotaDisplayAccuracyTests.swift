@@ -103,4 +103,98 @@ struct QuotaDisplayAccuracyTests {
         #expect(!quota.hasExhaustedQuota)
     }
 
+    @Test("status bar metric uses the quota bottleneck")
+    func statusBarMetricUsesBottleneck() {
+        let snapshot = QuotaSnapshot(
+            source: "Fixture",
+            primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil),
+            secondary: QuotaWindow(label: "Weekly", used: 80, limit: 100, resetAt: nil),
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1),
+            note: nil
+        )
+
+        #expect(snapshot.statusBarMetric?.title == "Weekly")
+        #expect(snapshot.statusBarMetric?.ratio == 0.2)
+    }
+
+    @Test("quota freshness treats expired reset windows as stale")
+    func quotaFreshnessTreatsExpiredResetWindowsAsStale() {
+        let snapshot = QuotaSnapshot(
+            source: "Claude Code StatusLine",
+            primary: QuotaWindow(
+                label: "5h",
+                used: 8,
+                limit: 100,
+                resetAt: Date(timeIntervalSince1970: 1_780_000_000)
+            ),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_780_000_000),
+            note: nil
+        )
+
+        #expect(
+            QuotaFreshness.isStale(
+                snapshot,
+                now: Date(timeIntervalSince1970: 1_780_000_200)
+            )
+        )
+    }
+
+    @Test("Claude OAuth source label does not claim primary live data")
+    func claudeOAuthSourceLabelDoesNotClaimPrimaryLiveData() {
+        let snapshot = QuotaSnapshot(
+            source: "Claude Code OAuth",
+            primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSince1970: 1),
+            note: nil
+        )
+
+        #expect(AppText(language: .english).quotaSnapshotMeta(snapshot).contains("Claude Code OAuth"))
+        #expect(!AppText(language: .simplifiedChinese).quotaSnapshotMeta(snapshot).contains("实时"))
+        #expect(!AppText(language: .traditionalChinese).quotaSnapshotMeta(snapshot).contains("即時"))
+    }
+
+    @Test("cache snapshots do not show freshness badges on account cards")
+    func cacheSnapshotsDoNotShowFreshnessBadgesOnAccountCards() {
+        let snapshot = QuotaSnapshot(
+            source: "Claude Code OAuth Cache",
+            primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil),
+            secondary: nil,
+            creditsRemaining: nil,
+            creditsTotal: nil,
+            updatedAt: Date(timeIntervalSinceNow: -60 * 60),
+            note: nil
+        )
+
+        #expect(AppText(language: .simplifiedChinese).quotaFreshnessBadge(snapshot) == nil)
+        #expect(AppText(language: .traditionalChinese).quotaFreshnessBadge(snapshot) == nil)
+        #expect(AppText(language: .english).quotaFreshnessBadge(snapshot) == nil)
+    }
+
+    @Test("stale-data age humanizes to minutes, hours, and days")
+    func humanizedAgeFormatting() {
+        #expect(AppText.humanizedAge(minutes: 12, language: .simplifiedChinese) == "12 分钟")
+        #expect(AppText.humanizedAge(minutes: 480, language: .simplifiedChinese) == "8 小时")
+        #expect(AppText.humanizedAge(minutes: 480, language: .traditionalChinese) == "8 小時")
+        #expect(AppText.humanizedAge(minutes: 3000, language: .simplifiedChinese) == "2 天")
+        #expect(AppText.humanizedAge(minutes: 90, language: .english) == "1 hour")
+        #expect(AppText.humanizedAge(minutes: 2880, language: .english) == "2 days")
+    }
+
+    @Test("credential guidance note localizes and shows on the card")
+    func credentialGuidanceNoteLocalization() {
+        let note = QuotaNoteCatalog.claudeCredentialsAwaitingClaudeCode
+        let en = AppText(language: .english)
+        #expect(en.localizedNote(note)?.contains("live data resumes") == true)
+        #expect(en.shouldDisplayNoteOnCard(note))
+        let zh = AppText(language: .simplifiedChinese)
+        #expect(zh.localizedNote(note) == note)
+    }
 }

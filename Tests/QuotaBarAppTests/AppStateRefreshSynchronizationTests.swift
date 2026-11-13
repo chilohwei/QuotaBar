@@ -194,9 +194,14 @@ struct AppStateRefreshSynchronizationTests {
         #expect(state.nextResetBoundaryRefreshDate(for: expired, now: now) == nil)
     }
 
+    enum CredentialSyncEntry: CaseIterable, Sendable {
+        case installedSync
+        case credentialEvent
+    }
+
     @MainActor
-    @Test("both credential sync entries absorb a pending-deletion account")
-    func credentialSyncEntriesAbsorbPendingDeletion() async throws {
+    @Test("credential sync absorbs a pending-deletion account", arguments: CredentialSyncEntry.allCases)
+    func credentialSyncEntriesAbsorbPendingDeletion(entry: CredentialSyncEntry) async throws {
         let pendingIdentity = "claude-code:account:8FF17EA7-CE42-4001-AAAA-000000000001"
         let fixture = PendingDeletionSecretFixture()
         defer { fixture.cleanup() }
@@ -221,9 +226,7 @@ struct AppStateRefreshSynchronizationTests {
         let pendingSecretKey = "account.\(pending.id.uuidString).secret"
         try fixture.store.saveSecret("stored-secret", accountKey: pendingSecretKey)
 
-        #expect(await state.syncInstalledCurrentAccount(for: .claudeCode, intent: .local) == nil)
-        #expect(try fixture.store.readSecret(accountKey: pendingSecretKey) == "live-secret")
-        await state.refreshAfterCredentialChange(for: .claudeCode)
+        await syncCredentials(using: entry, state: state)
 
         #expect(state.accounts == [fallback])
         #expect(state.activeAccountByTool[.claudeCode] == fallback.id)
@@ -232,8 +235,8 @@ struct AppStateRefreshSynchronizationTests {
     }
 
     @MainActor
-    @Test("credential sync stays suppressed while physical deletion hands off the CLI")
-    func credentialSyncIsSuppressedDuringFinalization() async {
+    @Test("credential sync stays suppressed while physical deletion hands off the CLI", arguments: CredentialSyncEntry.allCases)
+    func credentialSyncIsSuppressedDuringFinalization(entry: CredentialSyncEntry) async {
         let identity = "claude-code:account:8ff17ea7-ce42-4001-aaaa-000000000001"
         let fixture = PendingDeletionSecretFixture()
         defer { fixture.cleanup() }
@@ -250,24 +253,48 @@ struct AppStateRefreshSynchronizationTests {
         state.activeAccountByTool[.claudeCode] = fallback.id
         state.finalizingDeletionAccounts[deleting.id] = deleting
 
-        #expect(await state.syncInstalledCurrentAccount(for: .claudeCode, intent: .local) == nil)
-        await state.refreshAfterCredentialChange(for: .claudeCode)
+        await syncCredentials(using: entry, state: state)
 
         #expect(state.accounts == [fallback])
         #expect(state.activeAccountByTool[.claudeCode] == fallback.id)
-        #expect((try? fixture.store.readSecret(
-            accountKey: "account.\(deleting.id.uuidString).secret"
-        )) == nil)
+        #expect(state.credentialSignatureByTool[.claudeCode] == identity)
+        do {
+            _ = try fixture.store.readSecret(accountKey: "account.\(deleting.id.uuidString).secret")
+            Issue.record("Finalizing deletion must not recreate the account secret")
+        } catch SecretStoreError.missingData {
+            // No credential exists for the deleted account.
+        } catch {
+            Issue.record("Unexpected error reading the deleted account secret: \(error)")
+        }
+    }
+
+    @MainActor
+    private func syncCredentials(using entry: CredentialSyncEntry, state: AppState) async {
+        switch entry {
+        case .installedSync:
+            #expect(await state.syncInstalledCurrentAccount(for: .claudeCode, intent: .local) == nil)
+        case .credentialEvent:
+            await state.refreshAfterCredentialChange(for: .claudeCode)
+        }
     }
 }
 
 private struct PendingDeletionProvider: Provider {
+    private enum UnexpectedOperation: Error {
+        case prepareAccount
+    }
+
     let tool = ToolKind.claudeCode
     let identity: String
     let importedSecret: String
 
     func importCurrentCredentials() async throws -> String {
         importedSecret
+    }
+
+    func prepareAccount(_ account: Account, secret: String) async throws -> Account {
+        Issue.record("Credential sync attempted to recreate a deleted account")
+        throw UnexpectedOperation.prepareAccount
     }
 
     func activate(account: Account, secret: String) async throws {

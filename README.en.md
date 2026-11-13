@@ -48,7 +48,7 @@ System requirement: macOS Ventura 13 or later.
 1. Launch QuotaBar.
 2. Click the QuotaBar icon in the menu bar.
 3. Select Codex, Cursor, Claude Code, or DeepSeek at the top of the panel.
-4. Click `Add` to import or record an account. DeepSeek uses an API key to read balances.
+4. For ChatGPT (Codex) accounts, click `Add` to sign in and authorize in your browser; existing local accounts sync automatically at startup. Other tools can import or sign in through `Add`. DeepSeek uses an API key to read balances.
 5. Check each account card for quota, status, and last updated time.
 6. Use the available account filter when you only want accounts that can still be used.
 7. Choose consume-first or availability-first sorting to find the recommended account.
@@ -61,12 +61,12 @@ QuotaBar is built with Swift Package Manager and has no third-party dependencies
 ```bash
 swift build            # build
 swift run QuotaBar     # run locally (icon appears in the menu bar, not the Dock)
-swift test             # run unit tests
+swift test --filter AppStateAddAccountTests  # validate the affected module when needed
 ```
 
 Layout: `Sources/QuotaBar/` (entry point), `Sources/QuotaBarApp/App` (lifecycle & status bar), `Core` (the `AppState` hub and refresh policies), `Providers` (Codex/Cursor/Claude Code), `Services` (Keychain/HTTP/notifications/updates), `UI` (SwiftUI panels), and `Tests/`.
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for build, release, and contribution guidelines, and [CHANGELOG.md](./CHANGELOG.md) for the version history.
+Add or run tests only when needed. See [CONTRIBUTING.md](./CONTRIBUTING.md) for test scope, build, and release guidelines, and [CHANGELOG.md](./CHANGELOG.md) for the version history.
 
 See [Architecture](docs/architecture.md) and [Quota data](docs/provider-data.md) for module responsibilities and data semantics.
 

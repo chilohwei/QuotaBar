@@ -48,7 +48,7 @@ QuotaBar 是一款 macOS 菜单栏工具，帮助你集中查看 Codex、Cursor�
 1. 启动 QuotaBar。
 2. 点击菜单栏中的 QuotaBar 图标，打开账号面板。
 3. 在面板顶部选择 Codex、Cursor、Claude Code 或 DeepSeek。
-4. 点击“添加”导入或记录账号。DeepSeek 使用 API Key 查询余额。
+4. 添加 ChatGPT（Codex）账号时，点击“添加”会打开浏览器登录授权；本机已有账号在启动时自动同步。其他工具可通过“添加”导入或登录账号，DeepSeek 使用 API Key 查询余额。
 5. 查看账号卡片上的额度、状态和更新时间。
 6. 需要切换账号时，点击对应账号的“切换”。
 7. 按提示重启对应应用，让账号切换生效。
@@ -60,12 +60,12 @@ QuotaBar 使用 Swift Package Manager 构建，无第三方依赖。环境要求
 ```bash
 swift build            # 构建
 swift run QuotaBar     # 本地运行（图标出现在菜单栏，而非 Dock）
-swift test             # 运行单元测试
+swift test --filter AppStateAddAccountTests  # 按需验证对应模块
 ```
 
 主要目录：`Sources/QuotaBar/`（入口）、`Sources/QuotaBarApp/App`（生命周期与状态栏）、`Core`（`AppState` 状态中枢与刷新策略）、`Providers`（Codex/Cursor/Claude Code）、`Services`（Keychain/HTTP/通知/更新）、`UI`（SwiftUI 面板）、`Tests/`（单元测试）。
 
-构建、发布与贡献规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)，版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
+非必要不新增、不运行测试；测试范围、构建与发布规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)，版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
 代码结构与数据约定见 [架构](docs/architecture.md) 和 [额度数据](docs/provider-data.md)。
 

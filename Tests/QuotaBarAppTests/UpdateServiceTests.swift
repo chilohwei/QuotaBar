@@ -39,15 +39,4 @@ struct UpdateServiceTests {
         #expect(!OfficialReleaseSource.isOfficialAssetURL(otherRepoURL, tagName: "v1.2.3", assetName: "QuotaBar-1.2.3-arm64.dmg"))
         #expect(!OfficialReleaseSource.isOfficialAssetURL(wrongTagURL, tagName: "v1.2.3", assetName: "QuotaBar-1.2.3-arm64.dmg"))
     }
-
-    @Test("quota HTTP retry classification is shared")
-    func quotaHTTPRetryClassification() {
-        #expect(QuotaHTTPClient.isRetryableNetworkError(URLError(.timedOut)))
-        #expect(!QuotaHTTPClient.isRetryableNetworkError(URLError(.badURL)))
-        #expect(QuotaHTTPClient.isRetryableNetworkError(QuotaHTTPError(
-            operation: "test",
-            statusCode: 429,
-            isRetryable: true
-        )))
-    }
 }

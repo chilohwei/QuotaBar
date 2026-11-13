@@ -4,34 +4,35 @@ import Testing
 
 @Suite("Refresh policy")
 struct RefreshPolicyTests {
-    @Test("low active quota uses faster interval")
-    func lowActiveQuotaUsesFasterInterval() {
-        let policy = RefreshIntervalPolicy(
-            isOnBatteryPower: { false },
-            userIdleDuration: { 0 }
-        )
+    struct RefreshIntervalCase: Sendable {
+        enum ExpectedInterval: Sendable {
+            case lowQuota
+            case powerSaving
+            case standard
+        }
 
-        #expect(policy.automaticRefreshInterval(activeRemainingRatios: [0.8, 0.19]) == policy.lowQuotaInterval)
+        let batteryPowered: Bool
+        let idleDuration: TimeInterval
+        let remainingRatios: [Double]
+        let expected: ExpectedInterval
     }
 
-    @Test("battery idle state uses power saving interval")
-    func batteryIdleUsesPowerSavingInterval() {
+    @Test("refresh interval follows active quota, power, and idle state", arguments: [
+        RefreshIntervalCase(batteryPowered: false, idleDuration: 0, remainingRatios: [0.8, 0.19], expected: .lowQuota),
+        RefreshIntervalCase(batteryPowered: true, idleDuration: 600, remainingRatios: [0.1], expected: .powerSaving),
+        RefreshIntervalCase(batteryPowered: false, idleDuration: 600, remainingRatios: [0.6], expected: .standard)
+    ])
+    func automaticRefreshInterval(testCase: RefreshIntervalCase) {
         let policy = RefreshIntervalPolicy(
-            isOnBatteryPower: { true },
-            userIdleDuration: { 600 }
+            isOnBatteryPower: { testCase.batteryPowered },
+            userIdleDuration: { testCase.idleDuration }
         )
-
-        #expect(policy.automaticRefreshInterval(activeRemainingRatios: [0.1]) == policy.powerSavingInterval)
-    }
-
-    @Test("normal state uses default interval")
-    func normalStateUsesDefaultInterval() {
-        let policy = RefreshIntervalPolicy(
-            isOnBatteryPower: { false },
-            userIdleDuration: { 600 }
-        )
-
-        #expect(policy.automaticRefreshInterval(activeRemainingRatios: [0.6]) == policy.defaultInterval)
+        let expected = switch testCase.expected {
+        case .lowQuota: policy.lowQuotaInterval
+        case .powerSaving: policy.powerSavingInterval
+        case .standard: policy.defaultInterval
+        }
+        #expect(policy.automaticRefreshInterval(activeRemainingRatios: testCase.remainingRatios) == expected)
     }
 
     @Test("local refresh bypasses only the app failure backoff")

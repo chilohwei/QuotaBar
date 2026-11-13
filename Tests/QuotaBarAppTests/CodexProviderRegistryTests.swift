@@ -6,16 +6,10 @@ import Testing
 struct CodexProviderRegistryTests {
     @Test("prepareAccount keeps registry active account unchanged")
     func prepareAccountDoesNotChangeActiveSelection() async throws {
-        let fileManager = FileManager.default
-        let tempRoot = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let codexHome = tempRoot.appendingPathComponent("codex-home", isDirectory: true)
-        let managedHome = tempRoot.appendingPathComponent("managed-home", isDirectory: true)
-        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-        setenv("CODEX_HOME", codexHome.path, 1)
-        defer {
-            unsetenv("CODEX_HOME")
-            try? fileManager.removeItem(at: tempRoot)
-        }
+        let fixture = try CodexRegistryFixture()
+        defer { fixture.cleanup() }
+        let codexHome = fixture.codexHome
+        let managedHome = fixture.managedHome
 
         let provider = CodexProvider()
         var account = Account(tool: .codex, name: "Added account")
@@ -45,17 +39,12 @@ struct CodexProviderRegistryTests {
 
     @Test("activation forces file credential store so auth.json switching is honored")
     func activationForcesFileCredentialStore() async throws {
-        let fileManager = FileManager.default
-        let tempRoot = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let codexHome = tempRoot.appendingPathComponent("codex-home", isDirectory: true)
-        let managedHome = tempRoot.appendingPathComponent("managed-home", isDirectory: true)
-        try fileManager.createDirectory(at: codexHome, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: managedHome, withIntermediateDirectories: true)
-        setenv("CODEX_HOME", codexHome.path, 1)
-        defer {
-            unsetenv("CODEX_HOME")
-            try? fileManager.removeItem(at: tempRoot)
-        }
+        let fixture = try CodexRegistryFixture()
+        defer { fixture.cleanup() }
+        let codexHome = fixture.codexHome
+        let managedHome = fixture.managedHome
+        try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: managedHome, withIntermediateDirectories: true)
 
         try """
         model = "gpt-5.4"
@@ -85,17 +74,12 @@ struct CodexProviderRegistryTests {
 
     @Test("registry writes compatible timestamps, preserves aliases, and creates backups")
     func registryCompatibilityAndBackups() async throws {
-        let fileManager = FileManager.default
-        let tempRoot = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let codexHome = tempRoot.appendingPathComponent("codex-home", isDirectory: true)
+        let fixture = try CodexRegistryFixture()
+        defer { fixture.cleanup() }
+        let codexHome = fixture.codexHome
+        let managedHome = fixture.managedHome
         let accountsDirectory = codexHome.appendingPathComponent("accounts", isDirectory: true)
-        let managedHome = tempRoot.appendingPathComponent("managed-home", isDirectory: true)
-        try fileManager.createDirectory(at: accountsDirectory, withIntermediateDirectories: true)
-        setenv("CODEX_HOME", codexHome.path, 1)
-        defer {
-            unsetenv("CODEX_HOME")
-            try? fileManager.removeItem(at: tempRoot)
-        }
+        try FileManager.default.createDirectory(at: accountsDirectory, withIntermediateDirectories: true)
 
         let registryURL = accountsDirectory.appendingPathComponent("registry.json")
         try writeJSONObject([
@@ -254,5 +238,39 @@ struct CodexProviderRegistryTests {
     private func backupExists(named baseName: String, in directory: URL) throws -> Bool {
         try FileManager.default.contentsOfDirectory(atPath: directory.path)
             .contains { $0.hasPrefix("\(baseName).bak.") }
+    }
+}
+
+private struct CodexRegistryFixture {
+    let root: URL
+    let codexHome: URL
+    let managedHome: URL
+    private let originalCodexHome: String?
+
+    init() throws {
+        let fileManager = FileManager.default
+        root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        codexHome = root.appendingPathComponent("codex-home", isDirectory: true)
+        managedHome = root.appendingPathComponent("managed-home", isDirectory: true)
+        originalCodexHome = getenv("CODEX_HOME").map { String(cString: $0) }
+
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        do {
+            try #require(setenv("CODEX_HOME", codexHome.path, 1) == 0)
+        } catch {
+            try? fileManager.removeItem(at: root)
+            throw error
+        }
+    }
+
+    func cleanup() {
+        let restored: Int32
+        if let originalCodexHome {
+            restored = setenv("CODEX_HOME", originalCodexHome, 1)
+        } else {
+            restored = unsetenv("CODEX_HOME")
+        }
+        #expect(restored == 0)
+        try? FileManager.default.removeItem(at: root)
     }
 }
