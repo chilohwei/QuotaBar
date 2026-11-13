@@ -13,10 +13,18 @@
 ```bash
 swift build            # 构建全部 target
 swift run QuotaBar     # 本地运行菜单栏应用
-swift test             # 运行单元测试
+swift test --filter AppStateAddAccountTests  # 需要验证登录改动时，运行对应测试
 ```
 
 > 说明：QuotaBar 是菜单栏应用（`setActivationPolicy(.accessory)`），运行后图标出现在系统菜单栏右侧，而非 Dock。
+
+## 测试范围
+
+非必要不新增、不运行测试。普通开发按改动风险选择最小验证范围：文档、文案、样式及固定常量调整通常审阅差异即可；涉及类型或接口的整理可只编译。账号隔离、登录切换、凭据存储、令牌刷新、额度解析、缓存一致性与更新校验发生行为变化时，优先运行对应的已有用例，覆盖不足再补回归测试。
+
+本地使用 `swift test --filter <Suite或用例>` 定向运行，通过后不自动扩大到全量。全量 `swift test` 留给共享基础行为的广泛修改、发布准备或明确要求；现有 CI 在合并和发布边界保留全量检查。仅整理测试文件且不改变断言逻辑时，可用 `swift build --build-tests` 确认编译，无需执行用例。
+
+用例按行为所属模块归档，例如账号添加在 `AppStateAddAccountTests`、额度含义与新鲜度在 `QuotaDisplayAccuracyTests`、错误展示在 `ErrorPresentationTests`、HTTP 重试在 `QuotaHTTPClientTests`、通知触发在 `QuotaNotificationEvaluatorTests`。保留不同故障模式的覆盖，删除已有覆盖的重复路径和低价值检查；不要通过合并不相关场景或隐藏执行来减少数量。截图生成、扫描源码字符串、固定路径清单、像素尺寸及纯文案断言不作为日常自动测试。
 
 ## 项目结构
 

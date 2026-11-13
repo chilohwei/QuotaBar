@@ -27,7 +27,7 @@ struct ClaudeTokenRefreshTransportTests {
         }
     }
 
-    @Test("token endpoint moved with the CLI to platform.claude.com")
+    @Test("Claude OAuth refresh targets the configured CLI token host")
     func tokenEndpointHost() {
         #expect(ClaudeCodeProvider.oauthTokenURL.host == "platform.claude.com")
     }
@@ -68,45 +68,30 @@ struct ClaudeTokenRefreshTransportTests {
         #expect(kept.refreshToken == "r1")
     }
 
-    @Test("dead grants map to unauthorized; an edge 403 stays a transient HTTP failure")
-    func failureMapping() {
-        func failure(status: Int, body: String = "") -> OAuthUsageFetchError? {
-            do {
-                _ = try ClaudeCodeProvider.parseTokenRefreshResponse(
-                    statusCode: status,
-                    data: Data(body.utf8),
-                    retryAfter: nil,
-                    fallbackRefreshToken: "r"
-                )
-                return nil
-            } catch let error as OAuthUsageFetchError {
-                return error
-            } catch {
-                return nil
-            }
-        }
+    struct RefreshFailure: Sendable {
+        let status: Int
+        var body = ""
+        let expected: OAuthUsageFetchError
+    }
 
-        // 400 invalid_grant / 401: the grant itself is dead — only a fresh CLI login helps.
-        guard case .unauthorized = failure(status: 400, body: #"{"error":"invalid_grant"}"#) else {
-            Issue.record("400 invalid_grant should be unauthorized")
-            return
-        }
-        guard case .unauthorized = failure(status: 401) else {
-            Issue.record("401 should be unauthorized")
-            return
-        }
-        guard case .httpStatus(400) = failure(status: 400, body: #"{"error":"invalid_request"}"#) else {
-            Issue.record("generic invalid_request should remain retryable")
-            return
-        }
-        // 403 is Cloudflare rejecting the client, not the grant: must not trip the 24h backoff.
-        guard case .httpStatus(403) = failure(status: 403) else {
-            Issue.record("403 should be a transient http failure")
-            return
-        }
-        guard case .rateLimited = failure(status: 429) else {
-            Issue.record("429 should be rateLimited")
-            return
+    @Test("Claude OAuth refresh classifies HTTP failures", arguments: [
+        RefreshFailure(status: 400, body: #"{"error":"invalid_grant"}"#, expected: .unauthorized),
+        RefreshFailure(status: 400, body: "Invalid refresh token", expected: .unauthorized),
+        RefreshFailure(status: 400, body: #"{"error":"invalid_request"}"#, expected: .httpStatus(400)),
+        RefreshFailure(status: 400, body: #"{"error":"temporarily_unavailable"}"#, expected: .httpStatus(400)),
+        RefreshFailure(status: 400, expected: .httpStatus(400)),
+        RefreshFailure(status: 401, expected: .unauthorized),
+        RefreshFailure(status: 403, expected: .httpStatus(403)),
+        RefreshFailure(status: 429, expected: .rateLimited(retryAfter: nil))
+    ])
+    func failureMapping(failure: RefreshFailure) {
+        #expect(throws: failure.expected) {
+            _ = try ClaudeCodeProvider.parseTokenRefreshResponse(
+                statusCode: failure.status,
+                data: Data(failure.body.utf8),
+                retryAfter: nil,
+                fallbackRefreshToken: "r"
+            )
         }
     }
 

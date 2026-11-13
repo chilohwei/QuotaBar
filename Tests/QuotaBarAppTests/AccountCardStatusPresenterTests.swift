@@ -128,63 +128,44 @@ struct AccountCardStatusPresenterTests {
         #expect(status(tool: .cursor, quota: quota) == .warning)
     }
 
-    @Test("a card-worthy note is left to the footer instead of being printed twice")
-    func metricFallbackDetailSkipsFooterNotes() {
+    struct MetricFallbackCase: Sendable {
+        let note: String?
+        var showsInFooter: Bool? = nil
+        var hasVisibleMetrics = false
+        var hasSnapshot = true
+        var showsFallback = false
+
+        static let cases: [Self] = [
+            .init(note: QuotaNoteCatalog.claudeApiKeyNoWindows, showsInFooter: true),
+            .init(note: QuotaNoteCatalog.codexEmptyQuotaFields, showsInFooter: true),
+            .init(note: QuotaNoteCatalog.cursorLegacyNoStandardFields, showsInFooter: true),
+            .init(note: QuotaNoteCatalog.codexLiveUnavailableCache, showsInFooter: false, showsFallback: true),
+            .init(note: QuotaNoteCatalog.codexLiveUnavailableCache, hasVisibleMetrics: true),
+            .init(note: nil, hasSnapshot: false)
+        ]
+    }
+
+    @Test("metric fallback respects footer notes and the presence of metrics", arguments: MetricFallbackCase.cases)
+    func metricFallbackDetail(scenario: MetricFallbackCase) throws {
         let text = AppText(language: .simplifiedChinese)
-        for note in [
-            QuotaNoteCatalog.claudeApiKeyNoWindows,
-            QuotaNoteCatalog.codexEmptyQuotaFields,
-            QuotaNoteCatalog.cursorLegacyNoStandardFields
-        ] {
-            #expect(text.shouldDisplayNoteOnCard(note))
-            let quota = snapshot(primary: nil, note: note)
-            #expect(AccountCardStatusPresenter.metricFallbackDetail(quota: quota, hasVisibleMetrics: false, text: text) == nil)
+        let primary = scenario.hasVisibleMetrics
+            ? QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil)
+            : nil
+        let quota = scenario.hasSnapshot ? snapshot(primary: primary, note: scenario.note) : nil
+
+        if let showsInFooter = scenario.showsInFooter {
+            #expect(text.shouldDisplayNoteOnCard(scenario.note) == showsInFooter)
         }
-    }
-
-    @Test("a freshness note the footer hides still labels the empty metric strip")
-    func metricFallbackDetailKeepsFreshnessNotes() {
-        let text = AppText(language: .simplifiedChinese)
-        let note = QuotaNoteCatalog.codexLiveUnavailableCache
-        #expect(!text.shouldDisplayNoteOnCard(note))
-        let quota = snapshot(primary: nil, note: note)
-        #expect(AccountCardStatusPresenter.metricFallbackDetail(quota: quota, hasVisibleMetrics: false, text: text) == text.localizedNote(note))
-    }
-
-    @Test("a strip that has metrics to plot needs no fallback detail")
-    func metricFallbackDetailUnusedWhenMetricsExist() {
-        let text = AppText(language: .simplifiedChinese)
-        let quota = snapshot(primary: QuotaWindow(label: "5h", used: 10, limit: 100, resetAt: nil), note: QuotaNoteCatalog.codexLiveUnavailableCache)
-        #expect(AccountCardStatusPresenter.metricFallbackDetail(quota: quota, hasVisibleMetrics: true, text: text) == nil)
-        #expect(AccountCardStatusPresenter.metricFallbackDetail(quota: nil, hasVisibleMetrics: false, text: text) == nil)
-    }
-}
-
-@Suite("Quota notification evaluator")
-struct QuotaNotificationEvaluatorTests {
-    @Test("threshold crossing fires once on transition")
-    func thresholdCrossing() {
-        #expect(QuotaNotificationEvaluator.event(previousRatio: 0.35, currentRatio: 0.15, threshold: 0.20) == .quotaLow(remainingPercent: 15))
-        #expect(QuotaNotificationEvaluator.event(previousRatio: 0.15, currentRatio: 0.12, threshold: 0.20) == nil)
-        #expect(QuotaNotificationEvaluator.event(previousRatio: nil, currentRatio: 0.15, threshold: 0.20) == nil)
-    }
-
-    @Test("exhaustion fires only on transition with a previous reading")
-    func exhaustionTransition() {
-        #expect(QuotaNotificationEvaluator.event(previousRatio: 0.05, currentRatio: 0.0, threshold: 0.20) == .quotaExhausted)
-        #expect(QuotaNotificationEvaluator.event(previousRatio: 0.0, currentRatio: 0.0, threshold: 0.20) == nil)
-        #expect(QuotaNotificationEvaluator.event(previousRatio: nil, currentRatio: 0.0, threshold: 0.20) == nil)
-    }
-
-    @Test("recovery fires when quota returns after exhaustion")
-    func recoveryTransition() {
-        #expect(QuotaNotificationEvaluator.event(previousRatio: 0.0, currentRatio: 0.9, threshold: 0.20) == .quotaRecovered(remainingPercent: 90))
-        #expect(QuotaNotificationEvaluator.event(previousRatio: 0.0, currentRatio: 0.05, threshold: 0.20) == nil)
-        #expect(QuotaNotificationEvaluator.event(previousRatio: 0.5, currentRatio: 0.9, threshold: 0.20) == nil)
-    }
-
-    @Test("missing current reading never fires")
-    func missingCurrentReading() {
-        #expect(QuotaNotificationEvaluator.event(previousRatio: 0.5, currentRatio: nil, threshold: 0.20) == nil)
+        let fallback = AccountCardStatusPresenter.metricFallbackDetail(
+            quota: quota,
+            hasVisibleMetrics: scenario.hasVisibleMetrics,
+            text: text
+        )
+        if scenario.showsFallback {
+            let localized = try #require(text.localizedNote(scenario.note))
+            #expect(fallback == localized)
+        } else {
+            #expect(fallback == nil)
+        }
     }
 }

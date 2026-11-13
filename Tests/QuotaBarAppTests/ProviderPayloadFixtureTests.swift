@@ -349,21 +349,28 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.tertiary == nil)
     }
 
-    @Test("Cursor free included-usage payload renders full remaining instead of hiding quota")
-    func cursorFreeIncludedUsagePayload() throws {
-        // Real shape returned by GetCurrentPeriodUsage for an unused Free account:
-        // the included allowance is reported only as percentages (all 0 == 100%
-        // remaining), accompanied by a positive display threshold and an
-        // "included usage" message. This must not collapse to "no quota".
+    struct CursorIncludedUsage: Sendable {
+        let autoUsed: Int
+        let totalUsed: Int
+        let remainingPercent: Double
+    }
+
+    @Test("Cursor Free included usage displays one Total bar", arguments: [
+        CursorIncludedUsage(autoUsed: 0, totalUsed: 0, remainingPercent: 100),
+        CursorIncludedUsage(autoUsed: 100, totalUsed: 98, remainingPercent: 2)
+    ])
+    func cursorFreeIncludedUsagePayload(usage: CursorIncludedUsage) throws {
+        // The Free allowance is reported as percentages plus an included-usage message.
+        // Unused quota still displays, and a full Auto bucket does not add a second bar.
         let payload = try jsonObject("""
         {
           "billingCycleStart": "1780998365124",
           "billingCycleEnd": "1783590365124",
           "planUsage": {
             "remainingBonus": false,
-            "autoPercentUsed": 0,
+            "autoPercentUsed": \(usage.autoUsed),
             "apiPercentUsed": 0,
-            "totalPercentUsed": 0
+            "totalPercentUsed": \(usage.totalUsed)
           },
           "spendLimitUsage": {
             "pooledLimit": 0,
@@ -373,7 +380,7 @@ struct ProviderPayloadFixtureTests {
             "overallRemaining": 0
           },
           "displayThreshold": 200,
-          "displayMessage": "You've used 0% of your included usage",
+          "displayMessage": "You've used \(usage.totalUsed)% of your included usage",
           "autoBucketModels": ["composer-2.5", "composer-2"]
         }
         """)
@@ -386,14 +393,18 @@ struct ProviderPayloadFixtureTests {
 
         #expect(snapshot.planName == "Free")
         #expect(snapshot.primary?.label == "Total")
-        #expect(snapshot.primary?.used == 0)
+        #expect(snapshot.primary?.used == Double(usage.totalUsed))
         #expect(snapshot.primary?.limit == 100)
-        #expect(snapshot.primary?.remainingPercent == 100)
-        #expect(snapshot.isQuotaBlocked != true)
-        // A Free account has a single included allowance — it should not mirror the
-        // paid Auto / API three-bucket layout.
         #expect(snapshot.secondary == nil)
         #expect(snapshot.tertiary == nil)
+        if usage.totalUsed == 0 {
+            #expect(snapshot.primary?.remainingPercent == usage.remainingPercent)
+            #expect(snapshot.isQuotaBlocked != true)
+        } else {
+            #expect(approximately(snapshot.primary?.remainingPercent, usage.remainingPercent))
+            #expect(snapshot.statusBarMetric?.title == "Total")
+            #expect(approximately(snapshot.statusBarMetric?.ratio, 0.02))
+        }
     }
 
     @Test("Cursor free login without stored plan name still renders single Total bar")
@@ -441,48 +452,6 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.primary?.limit == 100)
         #expect(snapshot.secondary == nil)
         #expect(snapshot.tertiary == nil)
-    }
-
-    @Test("Cursor free partially-used included usage does not expose paid Auto API buckets")
-    func cursorFreePartiallyUsedIncludedUsagePayload() throws {
-        let payload = try jsonObject("""
-        {
-          "billingCycleStart": "1780998365124",
-          "billingCycleEnd": "1783590365124",
-          "planUsage": {
-            "remainingBonus": false,
-            "autoPercentUsed": 100,
-            "apiPercentUsed": 0,
-            "totalPercentUsed": 98
-          },
-          "spendLimitUsage": {
-            "pooledLimit": 0,
-            "pooledRemaining": 0,
-            "individualLimit": 0,
-            "overallLimit": 0,
-            "overallRemaining": 0
-          },
-          "displayThreshold": 200,
-          "displayMessage": "You've used 98% of your included usage",
-          "autoBucketModels": ["composer-2.5", "composer-2"]
-        }
-        """)
-
-        let snapshot = try CursorProvider().parseCurrentPeriodUsageForTesting(
-            payload,
-            email: "cursor-free@example.com",
-            membershipType: "free"
-        )
-
-        #expect(snapshot.planName == "Free")
-        #expect(snapshot.primary?.label == "Total")
-        #expect(snapshot.primary?.used == 98)
-        #expect(snapshot.primary?.limit == 100)
-        #expect(approximately(snapshot.primary?.remainingPercent, 2))
-        #expect(snapshot.secondary == nil)
-        #expect(snapshot.tertiary == nil)
-        #expect(snapshot.statusBarMetric?.title == "Total")
-        #expect(approximately(snapshot.statusBarMetric?.ratio, 0.02))
     }
 
     @Test("Claude statusLine payload maps 5h 7d without context or subscription panel")
@@ -645,60 +614,47 @@ struct ProviderPayloadFixtureTests {
         #expect(snapshot.note == QuotaNoteCatalog.claudeRateLimitReached)
     }
 
-    @Test("Claude expired local rate-limit transcript does not override current statusLine")
-    func claudeExpiredRateLimitTranscriptDoesNotOverrideStatusLine() throws {
-        let status = try jsonDictionary("""
-        {
-          "rate_limits": {
-            "five_hour": {
-              "used_percentage": 71,
-              "resets_at": 1782733800
-            }
-          }
-        }
-        """)
-        let rateLimitLine = """
-        {"type":"assistant","timestamp":"2026-06-29T04:00:00.000Z","message":{"content":[{"type":"text","text":"You've hit your session limit · resets 3pm (Asia/Shanghai)"}]},"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}
-        """
-
-        let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
-            status,
-            capturedAt: Date(timeIntervalSince1970: 1_782_730_800),
-            now: Date(timeIntervalSince1970: 1_782_730_800),
-            rateLimitTranscriptLine: rateLimitLine
-        )
-
-        #expect(snapshot.primary?.used == 71)
-        #expect(snapshot.isQuotaBlocked == false)
+    struct ClaudeTranscript: Sendable {
+        let line: String
+        let used: Int
+        let resetAt: Int
+        let capturedAt: TimeInterval
     }
 
-    @Test("Claude transcript that only mentions a limit in text does not force a block")
-    func claudeRateLimitTextWithoutApiErrorMarkersIsIgnored() throws {
+    @Test("Claude ignores expired limits and discussion without API error markers", arguments: [
+        ClaudeTranscript(
+            line: #"{"type":"assistant","timestamp":"2026-06-29T04:00:00.000Z","message":{"content":[{"type":"text","text":"You've hit your session limit · resets 3pm (Asia/Shanghai)"}]},"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}"#,
+            used: 71,
+            resetAt: 1_782_733_800,
+            capturedAt: 1_782_730_800
+        ),
+        ClaudeTranscript(
+            line: #"{"type":"assistant","timestamp":"2026-06-29T13:39:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"You've hit your session limit · resets 7:50pm (Asia/Shanghai) — investigating why the panel shows this."}]}}"#,
+            used: 40,
+            resetAt: 1_782_744_600,
+            capturedAt: 1_782_740_000
+        )
+    ])
+    func claudeIgnoresInactiveRateLimitTranscript(transcript: ClaudeTranscript) throws {
         let status = try jsonDictionary("""
         {
           "rate_limits": {
             "five_hour": {
-              "used_percentage": 40,
-              "resets_at": 1782744600
+              "used_percentage": \(transcript.used),
+              "resets_at": \(transcript.resetAt)
             }
           }
         }
         """)
-        // A non-error transcript line (tool output / assistant discussion / this very session)
-        // that contains the words but lacks the top-level apiErrorStatus / error / isApiErrorMessage
-        // markers of a real 429. It must NOT be treated as an active rate limit.
-        let discussionLine = """
-        {"type":"assistant","timestamp":"2026-06-29T13:39:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"You've hit your session limit · resets 7:50pm (Asia/Shanghai) — investigating why the panel shows this."}]}}
-        """
-
+        let capturedAt = Date(timeIntervalSince1970: transcript.capturedAt)
         let snapshot = ClaudeCodeProvider().parseStatusLineSnapshotForTesting(
             status,
-            capturedAt: Date(timeIntervalSince1970: 1_782_740_000),
-            now: Date(timeIntervalSince1970: 1_782_740_000),
-            rateLimitTranscriptLine: discussionLine
+            capturedAt: capturedAt,
+            now: capturedAt,
+            rateLimitTranscriptLine: transcript.line
         )
 
-        #expect(snapshot.primary?.used == 40)
+        #expect(snapshot.primary?.used == Double(transcript.used))
         #expect(snapshot.isQuotaBlocked == false)
         #expect(snapshot.note?.contains("Usage limit reached") != true)
     }
@@ -1014,16 +970,12 @@ struct ProviderPayloadFixtureTests {
             source: "Claude Code OAuth Cache",
             updatedAt: now.addingTimeInterval(-31 * 60)
         )
-        #expect(provider.preferredClaudeSnapshot(
-            liveSnapshot: liveOAuth,
-            statusLineSnapshot: statusLine,
-            hasUsableStatusLineSnapshot: true
-        ).source == "Claude Code OAuth")
         let mergedLiveOAuth = provider.preferredClaudeSnapshot(
             liveSnapshot: liveOAuth,
             statusLineSnapshot: statusLine,
             hasUsableStatusLineSnapshot: true
         )
+        #expect(mergedLiveOAuth.source == "Claude Code OAuth")
         #expect(mergedLiveOAuth.secondary?.used == 8)
         #expect(mergedLiveOAuth.orderedMetrics.count == 2)
         #expect(provider.preferredClaudeSnapshot(

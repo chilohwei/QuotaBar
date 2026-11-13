@@ -60,12 +60,12 @@ QuotaBar 使用 Swift Package Manager 构建，无第三方依赖。环境要求
 ```bash
 swift build            # 构建
 swift run QuotaBar     # 本地运行（图标出现在菜单栏，而非 Dock）
-swift test             # 运行单元测试
+swift test --filter AppStateAddAccountTests  # 按需验证对应模块
 ```
 
 主要目录：`Sources/QuotaBar/`（入口）、`Sources/QuotaBarApp/App`（生命周期与状态栏）、`Core`（`AppState` 状态中枢与刷新策略）、`Providers`（Codex/Cursor/Claude Code）、`Services`（Keychain/HTTP/通知/更新）、`UI`（SwiftUI 面板）、`Tests/`（单元测试）。
 
-构建、发布与贡献规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)，版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
+非必要不新增、不运行测试；测试范围、构建与发布规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)，版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
 代码结构与数据约定见 [架构](docs/architecture.md) 和 [额度数据](docs/provider-data.md)。
 

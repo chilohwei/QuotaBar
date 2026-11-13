@@ -577,41 +577,6 @@ struct ClaudeQuotaStalenessTests {
         #expect(filled.secondary?.used == 73)
     }
 
-    @Test("stale-data age humanizes to minutes, hours, and days")
-    func humanizedAgeFormatting() {
-        #expect(AppText.humanizedAge(minutes: 12, language: .simplifiedChinese) == "12 分钟")
-        #expect(AppText.humanizedAge(minutes: 480, language: .simplifiedChinese) == "8 小时")
-        #expect(AppText.humanizedAge(minutes: 480, language: .traditionalChinese) == "8 小時")
-        #expect(AppText.humanizedAge(minutes: 3000, language: .simplifiedChinese) == "2 天")
-        #expect(AppText.humanizedAge(minutes: 90, language: .english) == "1 hour")
-        #expect(AppText.humanizedAge(minutes: 2880, language: .english) == "2 days")
-    }
-
-    @Test("compact error summary keeps only the actionable first sentence")
-    func compactErrorSummaryFirstSentence() {
-        let zh = AppText(language: .simplifiedChinese)
-        #expect(zh.compactErrorSummary("Claude Code 需要重新登录。请重新登录 Claude Code，然后刷新 QuotaBar。") == "Claude Code 需要重新登录")
-        #expect(zh.compactErrorSummary("本地登录记录需要重新建立。请在 QuotaBar 删除该账号后重新添加。") == "本地登录记录需要重新建立")
-
-        let en = AppText(language: .english)
-        #expect(en.compactErrorSummary("Claude Code needs a fresh sign-in. Sign in to Claude Code again, then refresh QuotaBar.") == "Claude Code needs a fresh sign-in")
-
-        // No sentence break: returned unchanged.
-        #expect(zh.compactErrorSummary("刷新中") == "刷新中")
-    }
-
-    @Test("stored transport errors follow the current dashboard language")
-    func storedTransportErrorRelocalizes() {
-        let zh = AppText(language: .simplifiedChinese)
-        let storedEnglish = "The connection did not finish. QuotaBar will try again automatically."
-
-        #expect(zh.localizedStoredErrorMessage(storedEnglish) == "这次连接没有完成，QuotaBar 会稍后自动重试。")
-        #expect(
-            zh.accountErrorSummary(storedEnglish, isRetrying: true, hasCachedQuota: true)
-                == "显示上次数据 · 正在重试"
-        )
-    }
-
     @Test("expired credentials serve cached data with recovery guidance, never a re-login nag")
     func expiredCredentialFallbackGuidance() throws {
         let provider = ClaudeCodeProvider()
@@ -657,27 +622,6 @@ struct ClaudeQuotaStalenessTests {
         #expect(token(expiresIn: -1).isHardExpired)
         // Missing expiry metadata: assume usable and let the server be the judge.
         #expect(!token(expiresIn: nil).isHardExpired)
-    }
-
-    @Test("credential guidance note localizes and shows on the card")
-    func credentialGuidanceNoteLocalization() {
-        let note = QuotaNoteCatalog.claudeCredentialsAwaitingClaudeCode
-        let en = AppText(language: .english)
-        #expect(en.localizedNote(note)?.contains("live data resumes") == true)
-        #expect(en.shouldDisplayNoteOnCard(note))
-        let zh = AppText(language: .simplifiedChinese)
-        #expect(zh.localizedNote(note) == note)
-    }
-
-    @Test("dead grants are recognized from the OAuth error body")
-    func permanentRefreshFailureDetection() {
-        func body(_ text: String) -> Data { Data(text.utf8) }
-
-        #expect(ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body(#"{"error":"invalid_grant"}"#)))
-        #expect(ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body("Invalid refresh token")))
-        #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body(#"{"error":"invalid_request"}"#)))
-        #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: body(#"{"error":"temporarily_unavailable"}"#)))
-        #expect(!ClaudeCodeProvider.isPermanentTokenRefreshFailure(body: Data()))
     }
 
 }

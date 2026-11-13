@@ -61,12 +61,12 @@ QuotaBar is built with Swift Package Manager and has no third-party dependencies
 ```bash
 swift build            # build
 swift run QuotaBar     # run locally (icon appears in the menu bar, not the Dock)
-swift test             # run unit tests
+swift test --filter AppStateAddAccountTests  # validate the affected module when needed
 ```
 
 Layout: `Sources/QuotaBar/` (entry point), `Sources/QuotaBarApp/App` (lifecycle & status bar), `Core` (the `AppState` hub and refresh policies), `Providers` (Codex/Cursor/Claude Code), `Services` (Keychain/HTTP/notifications/updates), `UI` (SwiftUI panels), and `Tests/`.
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for build, release, and contribution guidelines, and [CHANGELOG.md](./CHANGELOG.md) for the version history.
+Add or run tests only when needed. See [CONTRIBUTING.md](./CONTRIBUTING.md) for test scope, build, and release guidelines, and [CHANGELOG.md](./CHANGELOG.md) for the version history.
 
 See [Architecture](docs/architecture.md) and [Quota data](docs/provider-data.md) for module responsibilities and data semantics.
 
