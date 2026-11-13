@@ -126,14 +126,19 @@ extension AppState {
         }
     }
 
-    private struct QuickAddSecretResult {
+    struct QuickAddSecretResult {
         let secret: String
         let matchesExistingAccount: Bool
     }
 
-    private func quickAddSecret(tool: ToolKind, provider: any Provider) async throws -> QuickAddSecretResult {
-        addAccountPhase = .importingLocal
-        if let importedSecret = try? await provider.importCurrentCredentials(),
+    func quickAddSecret(tool: ToolKind, provider: any Provider) async throws -> QuickAddSecretResult {
+        // ChatGPT's Add action always starts a fresh browser login. Existing local accounts
+        // are imported separately by credential sync; they must not short-circuit this action.
+        if tool != .codex {
+            addAccountPhase = .importingLocal
+        }
+        if tool != .codex,
+           let importedSecret = try? await provider.importCurrentCredentials(),
            !importedSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if storedDuplicate(for: tool, provider: provider, secret: importedSecret) == nil {
                 return QuickAddSecretResult(secret: importedSecret, matchesExistingAccount: false)
